@@ -1,0 +1,19 @@
+[package]
+name = "pm-core"
+description = "projectM orchestration: drives a Milkdrop preset's warp-mesh render on the GPU"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "pm_core"
+
+[dependencies]
+pm-preset = { path = "../pm-preset" }
+pm-render = { path = "../pm-render" }
+pm-audio = { path = "../pm-audio" }
+bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }

@@ -654,8 +654,28 @@ name = "pm-audio"
 version = "0.0.1"
 
 [[package]]
+name = "pm-core"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "image",
+ "pm-audio",
+ "pm-preset",
+ "pm-render",
+]
+
+[[package]]
 name = "pm-eval"
 version = "0.0.1"
+
+[[package]]
+name = "pm-preset"
+version = "0.0.1"
+dependencies = [
+ "pm-audio",
+ "pm-eval",
+ "pm-shader",
+]
 
 [[package]]
 name = "pm-render"

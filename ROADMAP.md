@@ -47,8 +47,15 @@ preset format with a `.milk` importer/converter.
    validated by naga). Remaining: matrix `mul` conventions, full intrinsic
    tail, texture-binding integration (with Phase 5).
 5. **pm-preset** — full Milkdrop preset engine wiring eval + render + shader.
+   ← *eval backbone + warp render done*. Done: .milk parser, PresetState +
+   defaults, per-frame & per-pixel evaluation; and in **pm-core** the warp mesh
+   geometry + GPU warp/feedback pass (renders a recognizable Milkdrop flow from
+   a real preset). Remaining: composite pass, waveform/shape drawing,
+   motion-vector/border passes, shader WGSL integration (Milkdrop shader wrapper
+   + uniform/texture bindings).
 6. **pm-core + pm-format + pm-app** — orchestrator, native format + importer,
-   live windowed app (winit + cpal).
+   live windowed app (winit + cpal). ← *pm-core started* (WarpEngine drives a
+   preset's warp render); pm-format and pm-app still to come.
 
 ## Parity strategy
 

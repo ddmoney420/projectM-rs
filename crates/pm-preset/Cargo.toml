@@ -1,0 +1,15 @@
+[package]
+name = "pm-preset"
+description = "Milkdrop .milk preset engine: file parser, preset state, and per-frame/per-pixel equation evaluation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "pm_preset"
+
+[dependencies]
+pm-eval = { path = "../pm-eval" }
+pm-audio = { path = "../pm-audio" }
+pm-shader = { path = "../pm-shader" }

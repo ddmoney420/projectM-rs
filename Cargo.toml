@@ -5,6 +5,8 @@ members = [
     "crates/pm-audio",
     "crates/pm-render",
     "crates/pm-shader",
+    "crates/pm-preset",
+    "crates/pm-core",
 ]
 
 # Crates added as each phase lands:
