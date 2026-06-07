@@ -1,12 +1,27 @@
 //! Headless test: the warp pass actually transforms the feedback buffer.
 //! Skips (rather than fails) when no GPU adapter is available.
 
-use pm_audio::FrameAudioData;
-use pm_core::WarpEngine;
-use pm_preset::Preset;
+use pm_audio::{FrameAudioData, WAVEFORM_SAMPLES};
+use pm_core::{generate_waveform, WarpEngine};
+use pm_preset::{FrameParams, Preset};
 use pm_render::{read_rgba8, GpuContext};
 
 const SIZE: u32 = 64;
+
+/// A loud sawtooth-ish waveform for one frame.
+fn loud_audio() -> FrameAudioData {
+    let mut a = FrameAudioData::default();
+    for i in 0..WAVEFORM_SAMPLES {
+        let p = i as f32 / WAVEFORM_SAMPLES as f32;
+        a.waveform_left[i] = (p * 20.0).sin() * 40.0;
+        a.waveform_right[i] = (p * 20.0).cos() * 40.0;
+    }
+    a.bass = 2.0;
+    a.mid = 1.5;
+    a.treb = 1.2;
+    a.vol = 1.5;
+    a
+}
 
 /// Seed image: white top half, black bottom half (a sharp horizontal edge).
 fn split_image() -> Vec<u8> {
@@ -81,4 +96,61 @@ per_pixel_1=`rot = rot + 0.3 * (rad - 0.5); zoom = zoom + 0.02 * sin(ang);
     }
     let out = read_rgba8(&ctx, engine.main_texture());
     assert_eq!(out.len(), (SIZE * SIZE * 4) as usize);
+}
+
+#[test]
+fn waveform_circle_generates_a_loop() {
+    // Mode 0 (Circle) -> a closed loop with points (CPU only, no GPU).
+    let mut preset = Preset::load("nWaveMode=0\nfWaveScale=1.0").unwrap();
+    let frame = FrameParams { viewport_width: 512, viewport_height: 512, ..FrameParams::default() };
+    preset.update_frame(frame, loud_audio()).unwrap();
+
+    let geo = generate_waveform(preset.state());
+    assert!(geo.is_loop, "circle mode is a loop");
+    assert!(geo.points.len() > 100, "expected many points, got {}", geo.points.len());
+    // All points finite.
+    assert!(geo.points.iter().all(|p| p[0].is_finite() && p[1].is_finite()));
+}
+
+#[test]
+fn waveform_line_is_not_a_loop() {
+    let mut preset = Preset::load("nWaveMode=6\nfWaveScale=1.0").unwrap();
+    let frame = FrameParams { viewport_width: 512, viewport_height: 512, ..FrameParams::default() };
+    preset.update_frame(frame, loud_audio()).unwrap();
+    let geo = generate_waveform(preset.state());
+    assert!(!geo.is_loop, "line mode is not a loop");
+    assert!(!geo.points.is_empty());
+}
+
+#[test]
+fn full_pipeline_injects_bright_content() {
+    let Ok(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+
+    // Bright additive circular waveform; the composite output should light up.
+    let milk = "\
+fDecay=0.9
+nWaveMode=0
+bAdditiveWaves=1
+bMaximizeWaveColor=1
+fWaveAlpha=1.0
+fWaveScale=2.0
+wave_r=1.0
+wave_g=1.0
+wave_b=1.0
+";
+    let preset = Preset::load(milk).unwrap();
+    let mut engine = WarpEngine::new(&ctx, preset, 128, 128);
+    // Start from black; the waveform must add visible content on its own.
+    engine.seed(&ctx, &vec![0u8; 128 * 128 * 4]);
+
+    for frame in 0..15 {
+        engine.render_frame(&ctx, frame as f32 / 30.0, frame, loud_audio()).unwrap();
+    }
+
+    let out = read_rgba8(&ctx, engine.display_texture());
+    let lit = out.chunks_exact(4).filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 60).count();
+    assert!(lit > 50, "waveform should inject visible content, only {lit} lit pixels");
 }

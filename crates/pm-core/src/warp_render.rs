@@ -293,6 +293,11 @@ impl WarpRenderer {
         &self.main[self.current]
     }
 
+    /// View of the current frame, for drawing waveforms/shapes on top.
+    pub fn current_view(&self) -> &wgpu::TextureView {
+        &self.main[self.current].view
+    }
+
     /// Upload an RGBA8 image into the current main texture (initial content).
     pub fn seed(&self, ctx: &GpuContext, rgba: &[u8]) {
         let tex = &self.main[self.current].texture;

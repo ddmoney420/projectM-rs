@@ -1,18 +1,25 @@
 //! `pm-core` — orchestrates a Milkdrop preset into rendered frames.
 //!
 //! Brings the pieces together: [`pm_preset`] evaluates the equations,
-//! [`crate::warp_mesh`] builds the per-vertex warp geometry, and
-//! [`crate::warp_render`] runs the GPU warp pass on [`pm_render`]'s wgpu device.
+//! [`crate::warp_mesh`] builds the per-vertex warp geometry,
+//! [`crate::warp_render`] runs the GPU warp/feedback pass, [`crate::waveform`]
+//! generates the audio waveform that's drawn into the feedback buffer, and
+//! [`crate::composite`] does the final tinted draw to the display target.
 //!
-//! Currently implements the **warp/motion feedback** stage (the core of
-//! Milkdrop's "flow"). Composite, waveform, shape and border passes build on
-//! this in later work.
+//! Per-frame pipeline (mirrors Milkdrop):
+//! `warp (feedback) → waveform → composite`.
 
+mod composite;
 mod warp_mesh;
 mod warp_render;
+mod waveform;
+mod waveform_render;
 
+pub use composite::CompositeRenderer;
 pub use warp_mesh::{WarpMesh, WarpVertex};
 pub use warp_render::{WarpParams, WarpRenderer};
+pub use waveform::{generate as generate_waveform, WaveformGeometry};
+pub use waveform_render::WaveformRenderer;
 
 use pm_audio::FrameAudioData;
 use pm_preset::{FrameParams, Preset, PresetError, PresetState};
@@ -32,8 +39,7 @@ fn compute_aspect(width: u32, height: u32) -> (f32, f32, f32, f32) {
     }
 }
 
-/// Warp parameters derived from the current preset state, mirroring
-/// `PerPixelMesh::WarpedBlit`.
+/// Warp parameters derived from the current preset state (`PerPixelMesh::WarpedBlit`).
 fn warp_params(state: &PresetState) -> WarpParams {
     let warp_time = state.frame.time * state.warp_anim_speed;
     let warp_scale_inverse = 1.0 / state.warp_scale;
@@ -44,12 +50,7 @@ fn warp_params(state: &PresetState) -> WarpParams {
         11.49 + 4.0 * (warp_time * 0.933 + 5.0).cos(),
     ];
     WarpParams {
-        aspect: [
-            state.frame.aspect_x,
-            state.frame.aspect_y,
-            state.frame.inv_aspect_x,
-            state.frame.inv_aspect_y,
-        ],
+        aspect: [state.frame.aspect_x, state.frame.aspect_y, state.frame.inv_aspect_x, state.frame.inv_aspect_y],
         warp_factors,
         texel_offset: [0.0, 0.0],
         warp_time,
@@ -59,11 +60,44 @@ fn warp_params(state: &PresetState) -> WarpParams {
     }
 }
 
-/// Drives one preset's warp/motion render at a fixed resolution.
+/// Compute the waveform draw color (port of `Waveform::MaximizeColors`,
+/// without the spiro-mode alpha scaling).
+fn waveform_color(state: &PresetState) -> [f32; 4] {
+    let mut alpha = state.wave_alpha;
+
+    if state.mod_wave_alpha_by_volume {
+        let vol = state.audio.vol;
+        alpha = if vol <= state.mod_wave_alpha_start {
+            0.0
+        } else if vol >= state.mod_wave_alpha_end {
+            state.wave_alpha
+        } else {
+            state.wave_alpha * (vol - state.mod_wave_alpha_start)
+                / (state.mod_wave_alpha_end - state.mod_wave_alpha_start)
+        };
+    }
+    alpha = alpha.clamp(0.0, 1.0);
+
+    let (mut r, mut g, mut b) = (state.wave_r, state.wave_g, state.wave_b);
+    if state.maximize_wave_color {
+        let max = r.max(g).max(b);
+        if max > 0.01 {
+            r /= max;
+            g /= max;
+            b /= max;
+        }
+    }
+    [r, g, b, alpha]
+}
+
+/// Drives one preset's full render (warp + waveform + composite) at a fixed
+/// resolution.
 pub struct WarpEngine {
     preset: Preset,
     mesh: WarpMesh,
-    renderer: WarpRenderer,
+    warp: WarpRenderer,
+    waveform: WaveformRenderer,
+    composite: CompositeRenderer,
     width: u32,
     height: u32,
     aspect: (f32, f32, f32, f32),
@@ -75,11 +109,12 @@ impl WarpEngine {
     pub fn new(ctx: &GpuContext, preset: Preset, width: u32, height: u32) -> Self {
         let aspect = compute_aspect(width, height);
         let mesh = WarpMesh::new(DEFAULT_MESH_X, DEFAULT_MESH_Y, aspect.0, aspect.1);
-        let renderer = WarpRenderer::new(ctx, width, height);
         WarpEngine {
             preset,
             mesh,
-            renderer,
+            warp: WarpRenderer::new(ctx, width, height),
+            waveform: WaveformRenderer::new(ctx),
+            composite: CompositeRenderer::new(ctx, width, height),
             width,
             height,
             aspect,
@@ -88,14 +123,13 @@ impl WarpEngine {
         }
     }
 
-    /// Seed the feedback buffer with an initial RGBA8 image
-    /// (`width * height * 4` bytes).
+    /// Seed the feedback buffer with an initial RGBA8 image.
     pub fn seed(&self, ctx: &GpuContext, rgba: &[u8]) {
-        self.renderer.seed(ctx, rgba);
+        self.warp.seed(ctx, rgba);
     }
 
-    /// Render one frame: evaluate the preset for `time`/`audio`, compute the
-    /// warp mesh, and run the warp pass. The result is in [`Self::main_texture`].
+    /// Render one full frame: evaluate the preset, warp the feedback buffer,
+    /// draw the waveform into it, and composite to the display target.
     pub fn render_frame(
         &mut self,
         ctx: &GpuContext,
@@ -118,17 +152,38 @@ impl WarpEngine {
             mesh_y: self.mesh_y as i32,
         };
 
+        // 1. Equations + warp/feedback.
         self.preset.update_frame(frame_params, audio)?;
         self.mesh.calculate(&mut self.preset)?;
-
         let params = warp_params(self.preset.state());
-        self.renderer.warp_frame(ctx, &self.mesh, &params);
+        self.warp.warp_frame(ctx, &self.mesh, &params);
+
+        // 2. Waveform drawn into the (now warped) feedback buffer.
+        let geometry = generate_waveform(self.preset.state());
+        let color = waveform_color(self.preset.state());
+        self.waveform.draw(
+            ctx,
+            self.warp.current_view(),
+            &geometry.points,
+            color,
+            self.preset.state().additive_waves,
+            geometry.is_loop,
+        );
+
+        // 3. Composite to the display target.
+        let shades = composite::hue_shades(time, self.preset.state().hue_random_offsets);
+        self.composite.draw(ctx, self.warp.main_texture(), shades);
         Ok(())
     }
 
-    /// The texture holding the most recently rendered frame.
+    /// The feedback buffer (input to the next frame's warp).
     pub fn main_texture(&self) -> &Texture {
-        self.renderer.main_texture()
+        self.warp.main_texture()
+    }
+
+    /// The final composited image for display / screenshot.
+    pub fn display_texture(&self) -> &Texture {
+        self.composite.output()
     }
 
     pub fn state(&self) -> &PresetState {

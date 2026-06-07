@@ -146,6 +146,8 @@ pub struct PresetState {
 
     // Inter-frame state
     pub frame_q_variables: [f64; Q_VAR_COUNT],
+    /// Per-preset constant offsets for the composite hue animation.
+    pub hue_random_offsets: [f32; 4],
 
     // Per-frame inputs
     pub frame: FrameParams,
@@ -244,6 +246,7 @@ impl Default for PresetState {
             composite_shader: String::new(),
 
             frame_q_variables: [0.0; Q_VAR_COUNT],
+            hue_random_offsets: [0.0; 4],
 
             frame: FrameParams::default(),
             audio: FrameAudioData::default(),
