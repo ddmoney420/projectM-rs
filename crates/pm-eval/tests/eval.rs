@@ -160,6 +160,43 @@ fn rand_is_deterministic_with_seed() {
 }
 
 #[test]
+fn empty_statements_allowed() {
+    // ns-eel permits `;;`, leading and trailing `;`.
+    approx(run("1;; 2;"), 2.0);
+    approx(run(";; 5"), 5.0);
+    approx(run("a = 3;;; a + 1"), 4.0);
+}
+
+#[test]
+fn megabuf_call_form_assignment() {
+    let mut ctx = Context::new();
+    ctx.eval_str("megabuf(5) = 99").unwrap();
+    approx(ctx.eval_str("megabuf(5)").unwrap(), 99.0);
+    // Compound assignment through the call form.
+    ctx.eval_str("megabuf(5) += 1").unwrap();
+    approx(ctx.eval_str("megabuf(5)").unwrap(), 100.0);
+}
+
+#[test]
+fn gmegabuf_call_form_assignment() {
+    let mut ctx = Context::new();
+    ctx.eval_str("gmegabuf(3) = 7").unwrap();
+    approx(ctx.eval_str("gmegabuf(3)").unwrap(), 7.0);
+}
+
+#[test]
+fn assign_function() {
+    let mut ctx = Context::new();
+    // assign(var, value)
+    approx(ctx.eval_str("assign(x, 5)").unwrap(), 5.0);
+    approx(ctx.get("x"), 5.0);
+    // The common preset idiom: exec2(assign(gmegabuf(i), v), assign(i, i+1)).
+    ctx.eval_str("i = 0; exec2(assign(gmegabuf(i), 42), assign(i, i + 1))").unwrap();
+    approx(ctx.eval_str("gmegabuf(0)").unwrap(), 42.0);
+    approx(ctx.get("i"), 1.0);
+}
+
+#[test]
 fn comments_are_ignored() {
     approx(run("1 + /* inline */ 2 // trailing\n + 3"), 6.0);
 }

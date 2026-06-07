@@ -75,6 +75,11 @@ impl Parser {
             if terminators.contains(self.peek()) {
                 break;
             }
+            // Empty statements (`;;`, leading/trailing `;`) are allowed by ns-eel.
+            if matches!(self.peek(), Tok::Semicolon) {
+                self.pos += 1;
+                continue;
+            }
             stmts.push(self.parse_expr(0)?);
             match self.peek() {
                 Tok::Semicolon => {
@@ -208,7 +213,15 @@ impl Parser {
 }
 
 fn is_lvalue(e: &Expr) -> bool {
-    matches!(e, Expr::Var(_) | Expr::Mem { .. })
+    match e {
+        Expr::Var(_) | Expr::Mem { .. } => true,
+        // ns-eel allows assigning to the function-call memory forms:
+        // `megabuf(i) = v` and `gmegabuf(i) = v`.
+        Expr::Call(name, args) => {
+            args.len() == 1 && (name == "megabuf" || name == "gmegabuf")
+        }
+        _ => false,
+    }
 }
 
 // Prefix operators bind tighter than the binary arithmetic operators but

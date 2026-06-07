@@ -353,21 +353,21 @@ impl PresetState {
             s.composite_shader_version = file.get_int("PSVERSION_COMP", s.composite_shader_version);
         }
 
-        // Code:
-        s.per_frame_init_code = file.get_code("per_frame_init_");
-        s.per_frame_code = file.get_code("per_frame_");
-        s.per_pixel_code = file.get_code("per_pixel_");
+        // Code (statement-aware assembly: one statement per numbered line):
+        s.per_frame_init_code = file.get_code_statements("per_frame_init_");
+        s.per_frame_code = file.get_code_statements("per_frame_");
+        s.per_pixel_code = file.get_code_statements("per_pixel_");
 
         for i in 0..CUSTOM_WAVEFORM_COUNT {
             let prefix = format!("wave_{i}_");
-            s.custom_wave_init_code[i] = file.get_code(&format!("{prefix}init"));
-            s.custom_wave_per_frame_code[i] = file.get_code(&format!("{prefix}per_frame"));
-            s.custom_wave_per_point_code[i] = file.get_code(&format!("{prefix}per_point"));
+            s.custom_wave_init_code[i] = file.get_code_statements(&format!("{prefix}init"));
+            s.custom_wave_per_frame_code[i] = file.get_code_statements(&format!("{prefix}per_frame"));
+            s.custom_wave_per_point_code[i] = file.get_code_statements(&format!("{prefix}per_point"));
         }
         for i in 0..CUSTOM_SHAPE_COUNT {
             let prefix = format!("shape_{i}_");
-            s.custom_shape_init_code[i] = file.get_code(&format!("{prefix}init"));
-            s.custom_shape_per_frame_code[i] = file.get_code(&format!("{prefix}per_frame"));
+            s.custom_shape_init_code[i] = file.get_code_statements(&format!("{prefix}init"));
+            s.custom_shape_per_frame_code[i] = file.get_code_statements(&format!("{prefix}per_frame"));
         }
 
         s.warp_shader = file.get_code("warp_");

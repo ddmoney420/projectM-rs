@@ -56,6 +56,38 @@ impl PresetFile {
         code
     }
 
+    /// Like [`PresetFile::get_code`] but for equation blocks: appends a `;` to
+    /// each line that forms a complete statement (i.e. doesn't end in a
+    /// continuation operator). Milkdrop stores one statement per numbered line,
+    /// often without a trailing `;`, relying on ns-eel's line-boundary
+    /// statement separation; this reproduces that. Multi-line expressions
+    /// (a line ending in `+`, `(`, `,`, …) are left joined.
+    pub fn get_code_statements(&self, prefix: &str) -> String {
+        let prefix = prefix.to_ascii_lowercase();
+
+        let mut lines = Vec::new();
+        for index in 1.. {
+            let key = format!("{prefix}{index}");
+            let Some(line) = self.values.get(&key) else { break };
+            let line = line.strip_prefix('`').unwrap_or(line);
+            lines.push(line.trim_end().to_string());
+        }
+
+        let mut code = String::new();
+        for (i, line) in lines.iter().enumerate() {
+            code.push_str(line);
+            // Insert a separator only when this line is a complete statement AND
+            // the next line doesn't continue it with a leading binary operator.
+            let next_continues =
+                lines.get(i + 1).is_some_and(|n| starts_with_continuation(n));
+            if !ends_with_continuation(line) && !next_continues {
+                code.push(';');
+            }
+            code.push('\n');
+        }
+        code
+    }
+
     pub fn get_int(&self, key: &str, default: i32) -> i32 {
         self.values
             .get(&key.to_ascii_lowercase())
@@ -84,6 +116,26 @@ impl PresetFile {
     /// Raw access to the parsed key/value map.
     pub fn values(&self) -> &BTreeMap<String, String> {
         &self.values
+    }
+}
+
+/// A trimmed line "continues" (no implicit `;`) if it's empty or ends in an
+/// operator / open bracket / comma — i.e. the expression isn't complete yet.
+/// A line already ending in `;` also needs no extra separator.
+fn ends_with_continuation(line: &str) -> bool {
+    match line.chars().last() {
+        None => true,
+        Some(c) => ";+-*/%^&|=<>!,([?~".contains(c),
+    }
+}
+
+/// A line "continues" the previous one if it begins with a strictly-binary
+/// operator (`*`, `/`, `)` …) that can't start a fresh expression. `+`/`-`/`!`
+/// are excluded since they can be unary at the start of a new statement.
+fn starts_with_continuation(line: &str) -> bool {
+    match line.trim_start().chars().next() {
+        None => false,
+        Some(c) => "*/%^&|<>=,)]".contains(c),
     }
 }
 
@@ -187,6 +239,21 @@ mod tests {
         // per_frame_3 missing -> only 1 and 2 are collected.
         let f = PresetFile::parse("per_frame_1=a;\nper_frame_2=b;\nper_frame_4=d;").unwrap();
         assert_eq!(f.get_code("per_frame_"), "a;\nb;\n");
+    }
+
+    #[test]
+    fn get_code_statements_inserts_separators() {
+        // Lines without trailing ';' get one; a line ending in '+' is joined.
+        let src = "per_frame_1=`xspeed = 0.5\nper_frame_2=`yspeed = 0.3\nper_frame_3=`zoom = 1.0 +\nper_frame_4=`0.1 * bass";
+        let f = PresetFile::parse(src).unwrap();
+        let code = f.get_code_statements("per_frame_");
+        assert_eq!(code, "xspeed = 0.5;\nyspeed = 0.3;\nzoom = 1.0 +\n0.1 * bass;\n");
+    }
+
+    #[test]
+    fn get_code_statements_preserves_existing_semicolons() {
+        let f = PresetFile::parse("per_frame_1=`a = 1; b = 2;").unwrap();
+        assert_eq!(f.get_code_statements("per_frame_"), "a = 1; b = 2;\n");
     }
 
     #[test]

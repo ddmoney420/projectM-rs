@@ -185,6 +185,28 @@ impl Context {
                 self.megabuf.insert(addr, new);
                 Ok(new)
             }
+            // `megabuf(i) = v` / `gmegabuf(i) = v` function-call lvalue forms.
+            Expr::Call(name, args) if args.len() == 1 => {
+                let idx = self.eval(&args[0])? as i64;
+                let is_global = name == "gmegabuf";
+                let new = match op {
+                    None => rhs,
+                    Some(o) => {
+                        let cur = if is_global {
+                            self.gmegabuf.get(&idx).copied().unwrap_or(0.0)
+                        } else {
+                            self.megabuf.get(&idx).copied().unwrap_or(0.0)
+                        };
+                        apply_binop(o, cur, rhs)
+                    }
+                };
+                if is_global {
+                    self.gmegabuf.insert(idx, new);
+                } else {
+                    self.megabuf.insert(idx, new);
+                }
+                Ok(new)
+            }
             // Parser guarantees only l-values reach here.
             _ => unreachable!("non-lvalue assignment target"),
         }
@@ -247,6 +269,19 @@ impl Context {
                 self.eval(&args[0])?;
                 self.eval(&args[1])?;
                 return self.eval(&args[2]);
+            }
+            // ns-eel `assign(dest, value)`: write `value` into the lvalue `dest`
+            // and return it. `dest` is a variable or megabuf/gmegabuf cell.
+            "assign" => {
+                expect(name, args, 2)?;
+                return match &args[0] {
+                    Expr::Var(_) | Expr::Mem { .. } => self.eval_assign(&args[0], None, &args[1]),
+                    Expr::Call(n, a) if a.len() == 1 && (n == "megabuf" || n == "gmegabuf") => {
+                        self.eval_assign(&args[0], None, &args[1])
+                    }
+                    // Not an l-value: just evaluate for its side effects/value.
+                    _ => self.eval(&args[1]),
+                };
             }
             _ => {}
         }
