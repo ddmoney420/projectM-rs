@@ -1,0 +1,20 @@
+[package]
+name = "pm-app"
+description = "Live projectM player: a window that renders Milkdrop presets reacting to audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "pm-app"
+path = "src/main.rs"
+
+[dependencies]
+pm-core = { path = "../pm-core" }
+pm-render = { path = "../pm-render" }
+pm-audio = { path = "../pm-audio" }
+pm-preset = { path = "../pm-preset" }
+winit = "0.30"
+cpal = "0.18"
+pollster = "0.4"

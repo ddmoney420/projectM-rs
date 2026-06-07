@@ -60,8 +60,11 @@ preset format with a `.milk` importer/converter.
    waveforms/shapes, motion-vector/border/echo passes, preset shader WGSL
    integration (Milkdrop shader wrapper + uniform/texture bindings).
 6. **pm-core + pm-format + pm-app** — orchestrator, native format + importer,
-   live windowed app (winit + cpal). ← *pm-core started* (WarpEngine drives a
-   preset's warp render); pm-format and pm-app still to come.
+   live windowed app (winit + cpal). ← *pm-core + pm-app done*. pm-core's
+   WarpEngine drives warp+waveform+composite; **pm-app** is a live winit window
+   with a wgpu surface, cpal audio capture (graceful synthetic fallback), preset
+   cycling over the 9,795-preset corpus, and keyboard controls. pm-format (native
+   `.milk`-importing format) still to come.
 
 ## Parity strategy
 
