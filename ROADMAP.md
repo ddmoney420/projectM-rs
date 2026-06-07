@@ -42,7 +42,10 @@ preset format with a `.milk` importer/converter.
 3. **pm-render** — wgpu framebuffers, textures, meshes, samplers, blend modes,
    shader cache, transitions. ← *foundation done* (context, texture,
    framebuffer, fullscreen pass, readback, render context, vertex types)
-4. **pm-shader** — Milkdrop HLSL → WGSL translation.
+4. **pm-shader** — Milkdrop HLSL → WGSL translation. ← *core done*
+   (preprocessor, HLSL lexer/parser, WGSL codegen with type inference; output
+   validated by naga). Remaining: matrix `mul` conventions, full intrinsic
+   tail, texture-binding integration (with Phase 5).
 5. **pm-preset** — full Milkdrop preset engine wiring eval + render + shader.
 6. **pm-core + pm-format + pm-app** — orchestrator, native format + importer,
    live windowed app (winit + cpal).

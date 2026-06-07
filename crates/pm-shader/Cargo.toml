@@ -1,0 +1,18 @@
+[package]
+name = "pm-shader"
+description = "Milkdrop HLSL preset shader to WGSL transpiler (hlslparser + MilkdropShader port)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "pm_shader"
+
+# Dependency-free core (like pm-eval): a self-contained preprocessor, HLSL
+# parser and WGSL generator.
+[dependencies]
+
+[dev-dependencies]
+# Validate generated WGSL with the same compiler wgpu uses. Pinned to wgpu's naga.
+naga = { version = "29", features = ["wgsl-in"] }

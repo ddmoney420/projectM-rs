@@ -669,6 +669,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-shader"
+version = "0.0.1"
+dependencies = [
+ "naga",
+]
+
+[[package]]
 name = "png"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
