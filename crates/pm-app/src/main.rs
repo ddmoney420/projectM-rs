@@ -113,9 +113,12 @@ impl App {
         if let Some(render) = &mut self.render {
             let (w, h) = (render.config.width, render.config.height);
             render.engine = WarpEngine::new(&render.ctx, preset, w, h);
-            render
-                .window
-                .set_title(&format!("pm-app — {name}  [{}/{}]", self.index + 1, self.presets.len().max(1)));
+            let cc = if render.engine.uses_custom_composite() { " ·custom-comp" } else { "" };
+            render.window.set_title(&format!(
+                "pm-app — {name}{cc}  [{}/{}]",
+                self.index + 1,
+                self.presets.len().max(1)
+            ));
         }
     }
 
@@ -210,7 +213,8 @@ impl ApplicationHandler for App {
         let blit = Blit::new(&ctx, format);
         let (preset, name) = self.current_preset();
         let engine = WarpEngine::new(&ctx, preset, w, h);
-        window.set_title(&format!("pm-app — {name}  [{}/{}]", self.index + 1, self.presets.len().max(1)));
+        let cc = if engine.uses_custom_composite() { " ·custom-comp" } else { "" };
+        window.set_title(&format!("pm-app — {name}{cc}  [{}/{}]", self.index + 1, self.presets.len().max(1)));
 
         self.render = Some(Render { window, ctx, surface, config, engine, blit });
     }

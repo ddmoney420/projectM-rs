@@ -35,7 +35,9 @@ mod state;
 
 pub use error::PresetError;
 pub use parser::PresetFile;
-pub use preset_shader::{to_wgsl as shader_to_wgsl, wrap as wrap_shader, ShaderError, ShaderKind};
+pub use preset_shader::{
+    to_wgsl as shader_to_wgsl, wrap as wrap_shader, ShaderError, ShaderKind, TranslatedShader,
+};
 pub use per_frame::PerFrameContext;
 pub use per_pixel::{PerPixelContext, PerPixelOutput};
 pub use state::{

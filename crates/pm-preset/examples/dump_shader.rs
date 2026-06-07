@@ -25,7 +25,7 @@ fn main() {
 
     match shader_to_wgsl(src, kind) {
         Err(e) => println!("translate error: {e}"),
-        Ok(wgsl) => {
+        Ok(t) => { let wgsl = t.wgsl;
             match naga::front::wgsl::parse_str(&wgsl) {
                 Ok(_) => println!("naga: parsed OK"),
                 Err(e) => {

@@ -10,20 +10,38 @@
 //! `warp (feedback) → waveform → composite`.
 
 mod composite;
+mod md_uniforms;
+mod preset_composite;
 mod warp_mesh;
 mod warp_render;
 mod waveform;
 mod waveform_render;
 
 pub use composite::CompositeRenderer;
+pub use preset_composite::PresetComposite;
 pub use warp_mesh::{WarpMesh, WarpVertex};
 pub use warp_render::{WarpParams, WarpRenderer};
 pub use waveform::{generate as generate_waveform, WaveformGeometry};
 pub use waveform_render::WaveformRenderer;
 
 use pm_audio::FrameAudioData;
-use pm_preset::{FrameParams, Preset, PresetError, PresetState};
+use pm_preset::{shader_to_wgsl, FrameParams, Preset, PresetError, PresetState, ShaderKind};
 use pm_render::{GpuContext, Texture};
+
+/// Try to build a custom composite renderer from the preset's composite shader.
+fn build_preset_composite(
+    ctx: &GpuContext,
+    preset: &Preset,
+    width: u32,
+    height: u32,
+) -> Option<PresetComposite> {
+    let src = preset.composite_shader_source();
+    if !src.contains("shader_body") {
+        return None;
+    }
+    let translated = shader_to_wgsl(src, ShaderKind::Composite).ok()?;
+    PresetComposite::new(ctx, &translated, width, height)
+}
 
 const DEFAULT_MESH_X: usize = 64;
 const DEFAULT_MESH_Y: usize = 48;
@@ -98,6 +116,8 @@ pub struct WarpEngine {
     warp: WarpRenderer,
     waveform: WaveformRenderer,
     composite: CompositeRenderer,
+    /// The preset's custom composite shader, if it translated successfully.
+    preset_composite: Option<PresetComposite>,
     width: u32,
     height: u32,
     aspect: (f32, f32, f32, f32),
@@ -109,18 +129,25 @@ impl WarpEngine {
     pub fn new(ctx: &GpuContext, preset: Preset, width: u32, height: u32) -> Self {
         let aspect = compute_aspect(width, height);
         let mesh = WarpMesh::new(DEFAULT_MESH_X, DEFAULT_MESH_Y, aspect.0, aspect.1);
+        let preset_composite = build_preset_composite(ctx, &preset, width, height);
         WarpEngine {
             preset,
             mesh,
             warp: WarpRenderer::new(ctx, width, height),
             waveform: WaveformRenderer::new(ctx),
             composite: CompositeRenderer::new(ctx, width, height),
+            preset_composite,
             width,
             height,
             aspect,
             mesh_x: DEFAULT_MESH_X,
             mesh_y: DEFAULT_MESH_Y,
         }
+    }
+
+    /// Whether this preset is rendering its own (custom) composite shader.
+    pub fn uses_custom_composite(&self) -> bool {
+        self.preset_composite.is_some()
     }
 
     /// Seed the feedback buffer with an initial RGBA8 image.
@@ -170,9 +197,14 @@ impl WarpEngine {
             geometry.is_loop,
         );
 
-        // 3. Composite to the display target.
-        let shades = composite::hue_shades(time, self.preset.state().hue_random_offsets);
-        self.composite.draw(ctx, self.warp.main_texture(), shades);
+        // 3. Composite to the display target: the preset's own composite shader
+        //    if it has one, otherwise the built-in hue composite.
+        if let Some(pc) = &self.preset_composite {
+            pc.draw(ctx, self.warp.main_texture(), self.preset.state(), time);
+        } else {
+            let shades = composite::hue_shades(time, self.preset.state().hue_random_offsets);
+            self.composite.draw(ctx, self.warp.main_texture(), shades);
+        }
         Ok(())
     }
 
@@ -183,7 +215,10 @@ impl WarpEngine {
 
     /// The final composited image for display / screenshot.
     pub fn display_texture(&self) -> &Texture {
-        self.composite.output()
+        match &self.preset_composite {
+            Some(pc) => pc.output(),
+            None => self.composite.output(),
+        }
     }
 
     pub fn state(&self) -> &PresetState {

@@ -18,11 +18,21 @@ pub enum ShaderKind {
     Composite,
 }
 
+/// A translated preset shader: the WGSL module plus the texture/sampler names
+/// it binds, in binding order (`textures[i]` is at `@binding(2*i+1)`, its
+/// sampler at `@binding(2*i+2)`).
+#[derive(Debug, Clone)]
+pub struct TranslatedShader {
+    pub wgsl: String,
+    pub textures: Vec<String>,
+}
+
 /// Translate a preset shader body to a complete, render-ready WGSL module.
-pub fn to_wgsl(body: &str, kind: ShaderKind) -> Result<String, ShaderError> {
+pub fn to_wgsl(body: &str, kind: ShaderKind) -> Result<TranslatedShader, ShaderError> {
     let wrapped = wrap(body, kind)?;
     let translated = pm_shader::translate(&wrapped)?;
-    Ok(assemble(&translated, kind))
+    let (wgsl, textures) = assemble(&translated, kind);
+    Ok(TranslatedShader { wgsl, textures })
 }
 
 /// The fixed list of Milkdrop shader uniforms: `(private var, struct field,
@@ -48,7 +58,7 @@ fn uniforms() -> Vec<(String, String, &'static str)> {
 
 /// Assemble the final WGSL: uniform block + texture bindings + the translated
 /// globals/`PS` function + a `load_uniforms` copy + a fullscreen entry.
-fn assemble(translated: &str, kind: ShaderKind) -> String {
+fn assemble(translated: &str, kind: ShaderKind) -> (String, Vec<String>) {
     let uniforms = uniforms();
     let mut out = String::new();
 
@@ -91,7 +101,7 @@ fn assemble(translated: &str, kind: ShaderKind) -> String {
         "@fragment\nfn fs_main(in: VsOut) -> @location(0) vec4<f32> {{\n    load_uniforms();\n    let ra = rad_ang_of(in.uv);\n    let diffuse = vec4<f32>(1.0, 1.0, 1.0, 1.0);\n    let o = {ps_call};\n    return vec4<f32>(o._return_value.rgb, 1.0);\n}}\n"
     ));
 
-    out
+    (out, textures)
 }
 
 /// Find the textures referenced as `textureSample(<name>, …)`.

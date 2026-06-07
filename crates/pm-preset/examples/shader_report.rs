@@ -52,7 +52,7 @@ fn check(tally: &mut Tally, name: &str, src: &str, kind: ShaderKind) {
             let b = format!("translate: {}", first_words(&e.to_string()));
             tally.note(&b, name);
         }
-        Ok(wgsl) => match validate_wgsl(&wgsl) {
+        Ok(t) => match validate_wgsl(&t.wgsl) {
             Ok(()) => tally.ok += 1,
             Err(msg) => {
                 tally.validate_fail += 1;

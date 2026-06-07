@@ -17,7 +17,7 @@ fn validate(wgsl: &str) -> Result<(), String> {
 fn default_composite_shader_compiles() {
     // The built-in default composite shader.
     let body = "shader_body\n{\nret = tex2D(sampler_main, uv).xyz;\n}";
-    let wgsl = shader_to_wgsl(body, ShaderKind::Composite).expect("translate");
+    let wgsl = shader_to_wgsl(body, ShaderKind::Composite).expect("translate").wgsl;
     validate(&wgsl).unwrap();
     assert!(wgsl.contains("textureSample(sampler_main"));
     assert!(wgsl.contains("@fragment"));
@@ -34,7 +34,7 @@ fn composite_with_uniforms_and_intrinsics() {
     float l = lum(ret);
     ret = lerp(ret, float3(l, l, l), 0.2);
 }"#;
-    let wgsl = shader_to_wgsl(body, ShaderKind::Composite).expect("translate");
+    let wgsl = shader_to_wgsl(body, ShaderKind::Composite).expect("translate").wgsl;
     validate(&wgsl).unwrap();
     assert!(wgsl.contains("md.c2")); // time uniform wired
 }
@@ -47,7 +47,7 @@ fn warp_shader_compiles() {
     ret *= 0.99;
     ret += GetPixel(uv + float2(0.001, 0.0)) * 0.1;
 }"#;
-    let wgsl = shader_to_wgsl(body, ShaderKind::Warp).expect("translate");
+    let wgsl = shader_to_wgsl(body, ShaderKind::Warp).expect("translate").wgsl;
     validate(&wgsl).unwrap();
     // Warp has a second output for motion vectors.
     assert!(wgsl.contains("_mv_tex_coords"));
@@ -56,7 +56,7 @@ fn warp_shader_compiles() {
 #[test]
 fn getblur_references_blur_samplers() {
     let body = "shader_body { ret = GetBlur1(uv) * 0.5 + GetPixel(uv) * 0.5; }";
-    let wgsl = shader_to_wgsl(body, ShaderKind::Composite).expect("translate");
+    let wgsl = shader_to_wgsl(body, ShaderKind::Composite).expect("translate").wgsl;
     validate(&wgsl).unwrap();
     assert!(wgsl.contains("sampler_blur1"));
 }
