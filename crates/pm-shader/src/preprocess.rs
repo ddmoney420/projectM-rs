@@ -65,28 +65,119 @@ fn join_line_continuations(src: &str) -> String {
     src.replace("\\\n", "").replace("\\\r\n", "")
 }
 
-/// Pull out `#define`s and return the source with directive lines removed.
+/// One `#if`/`#else` nesting level.
+struct Cond {
+    /// Whether the current branch is emitting (parent active AND condition).
+    active: bool,
+    /// Whether any branch at this level has been active yet.
+    taken: bool,
+    /// Whether the enclosing context was active when this `#if` opened.
+    parent: bool,
+}
+
+/// Pull out `#define`s, evaluate conditional compilation (`#if`/`#ifdef`/
+/// `#else`/`#elif`/`#endif`), and return the active source with directive lines
+/// removed. Inactive branches (e.g. `#if 0 … #endif`) are dropped entirely.
 fn extract_defines(src: &str) -> (String, HashMap<String, Macro>) {
     let mut macros = HashMap::new();
     let mut body = String::with_capacity(src.len());
+    let mut stack: Vec<Cond> = Vec::new();
+
+    let active = |s: &[Cond]| s.last().map_or(true, |c| c.active);
 
     for line in src.lines() {
         let trimmed = line.trim_start();
         if let Some(rest) = trimmed.strip_prefix('#') {
             let rest = rest.trim_start();
-            if let Some(def) = rest.strip_prefix("define") {
-                if let Some((name, m)) = parse_define(def) {
-                    macros.insert(name, m);
+            let (word, arg) = split_first_word(rest);
+            match word {
+                "if" => {
+                    let parent = active(&stack);
+                    let a = parent && eval_if_condition(arg, &macros);
+                    stack.push(Cond { active: a, taken: a, parent });
                 }
+                "ifdef" => {
+                    let parent = active(&stack);
+                    let a = parent && macros.contains_key(first_ident(arg));
+                    stack.push(Cond { active: a, taken: a, parent });
+                }
+                "ifndef" => {
+                    let parent = active(&stack);
+                    let a = parent && !macros.contains_key(first_ident(arg));
+                    stack.push(Cond { active: a, taken: a, parent });
+                }
+                "elif" => {
+                    if let Some(top) = stack.last_mut() {
+                        let a = top.parent && !top.taken && eval_if_condition(arg, &macros);
+                        top.active = a;
+                        top.taken |= a;
+                    }
+                }
+                "else" => {
+                    if let Some(top) = stack.last_mut() {
+                        top.active = top.parent && !top.taken;
+                        top.taken = true;
+                    }
+                }
+                "endif" => {
+                    stack.pop();
+                }
+                "define" if active(&stack) => {
+                    if let Some((name, m)) = parse_define(arg) {
+                        macros.insert(name, m);
+                    }
+                }
+                // #undef, #include, #pragma, inactive #define, … — dropped.
+                _ => {}
             }
-            // All other directives are dropped (line removed).
             continue;
         }
-        body.push_str(line);
-        body.push('\n');
+
+        if active(&stack) {
+            body.push_str(line);
+            body.push('\n');
+        }
     }
 
     (body, macros)
+}
+
+/// Split off the first whitespace-delimited word, returning `(word, rest)`.
+fn split_first_word(s: &str) -> (&str, &str) {
+    let s = s.trim_start();
+    match s.find(|c: char| c.is_whitespace()) {
+        Some(i) => (&s[..i], s[i..].trim_start()),
+        None => (s, ""),
+    }
+}
+
+fn first_ident(s: &str) -> &str {
+    let s = s.trim_start();
+    let end = s.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(s.len());
+    &s[..end]
+}
+
+/// Evaluate a `#if` condition. Handles integer literals and `defined(X)`;
+/// anything else defaults to active (include) to avoid wrongly dropping code.
+fn eval_if_condition(arg: &str, macros: &HashMap<String, Macro>) -> bool {
+    let a = arg.trim();
+    if let Ok(n) = a.parse::<i64>() {
+        return n != 0;
+    }
+    if let Some(rest) = a.strip_prefix('!') {
+        return !eval_if_condition(rest, macros);
+    }
+    if let Some(rest) = a.strip_prefix("defined") {
+        let name = first_ident(rest.trim_start().trim_start_matches('('));
+        return macros.contains_key(name);
+    }
+    // A bare defined macro name that expands to 0 means false; otherwise true.
+    if let Some(Macro { params: None, body }) = macros.get(a) {
+        if let Ok(n) = body.trim().parse::<i64>() {
+            return n != 0;
+        }
+    }
+    true
 }
 
 /// Parse the text following `#define`.
@@ -304,6 +395,36 @@ mod tests {
     fn self_reference_is_not_infinite() {
         let src = "#define x x\nint y = x;";
         assert_eq!(pp(src), "int y = x;");
+    }
+
+    #[test]
+    fn conditional_if_zero_excluded() {
+        let src = "a;\n#if 0\nDEAD_CODE;\n#endif\nb;";
+        assert_eq!(pp(src), "a; b;");
+    }
+
+    #[test]
+    fn conditional_if_one_included() {
+        let src = "#if 1\nkept;\n#else\ndropped;\n#endif";
+        assert_eq!(pp(src), "kept;");
+    }
+
+    #[test]
+    fn conditional_else_branch() {
+        let src = "#if 0\nx;\n#else\ny;\n#endif";
+        assert_eq!(pp(src), "y;");
+    }
+
+    #[test]
+    fn conditional_nested() {
+        let src = "#if 1\nouter;\n#if 0\ninner_dead;\n#endif\nouter2;\n#endif";
+        assert_eq!(pp(src), "outer; outer2;");
+    }
+
+    #[test]
+    fn conditional_ifdef() {
+        let src = "#define FOO 1\n#ifdef FOO\nhas_foo;\n#endif\n#ifdef BAR\nhas_bar;\n#endif";
+        assert_eq!(pp(src), "has_foo;");
     }
 
     #[test]

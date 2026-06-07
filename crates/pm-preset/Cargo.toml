@@ -13,3 +13,7 @@ name = "pm_preset"
 pm-eval = { path = "../pm-eval" }
 pm-audio = { path = "../pm-audio" }
 pm-shader = { path = "../pm-shader" }
+
+[dev-dependencies]
+# Validate generated preset-shader WGSL with the same compiler wgpu uses.
+naga = { version = "29", features = ["wgsl-in"] }

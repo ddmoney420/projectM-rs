@@ -98,10 +98,19 @@ impl Generator {
             let _ = writeln!(self.out, "}}\n");
         }
 
+        // HLSL lets you assign to `in` parameters, but WGSL parameters are
+        // immutable and can't be shadowed by a same-named local. So a written-to
+        // parameter is renamed `<name>_param` and copied into a mutable local.
+        let mut mutated = std::collections::HashSet::new();
+        collect_mutated(&f.body, &mut mutated);
+
         // Signature.
         let params_s = in_params
             .iter()
-            .map(|p| format!("{}: {}", p.name, wgsl_type(p.ty)))
+            .map(|p| {
+                let pname = if mutated.contains(&p.name) { format!("{}_param", p.name) } else { p.name.clone() };
+                format!("{}: {}", pname, wgsl_type(p.ty))
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let ret_s = if !out_params.is_empty() {
@@ -116,6 +125,13 @@ impl Generator {
         // `out` params become mutable locals initialized to zero.
         for p in &out_params {
             let _ = writeln!(self.out, "    var {}: {} = {};", p.name, wgsl_type(p.ty), zero_value(p.ty));
+        }
+
+        // Mutable local copies of written-to parameters.
+        for p in &in_params {
+            if mutated.contains(&p.name) {
+                let _ = writeln!(self.out, "    var {0} = {0}_param;", p.name);
+            }
         }
 
         let return_expr = if out_params.is_empty() {
@@ -481,6 +497,93 @@ impl Generator {
 }
 
 // ----------------------------------------------------------- helpers ---------
+
+/// Collect the root identifiers that are assigned to anywhere in `stmts`
+/// (the targets of `=`/compound assignment and `++`/`--`).
+fn collect_mutated(stmts: &[Stmt], out: &mut std::collections::HashSet<String>) {
+    for s in stmts {
+        collect_mutated_stmt(s, out);
+    }
+}
+
+fn collect_mutated_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
+    match s {
+        Stmt::Decl { init: Some(e), .. } => collect_mutated_expr(e, out),
+        Stmt::Decl { init: None, .. } => {}
+        Stmt::Expr(e) | Stmt::Return(Some(e)) => collect_mutated_expr(e, out),
+        Stmt::Return(None) => {}
+        Stmt::Block(b) => collect_mutated(b, out),
+        Stmt::If(c, t, e) => {
+            collect_mutated_expr(c, out);
+            collect_mutated_stmt(t, out);
+            if let Some(e) = e {
+                collect_mutated_stmt(e, out);
+            }
+        }
+        Stmt::While(c, b) => {
+            collect_mutated_expr(c, out);
+            collect_mutated_stmt(b, out);
+        }
+        Stmt::For(init, cond, update, body) => {
+            if let Some(i) = init {
+                collect_mutated_stmt(i, out);
+            }
+            if let Some(c) = cond {
+                collect_mutated_expr(c, out);
+            }
+            if let Some(u) = update {
+                collect_mutated_expr(u, out);
+            }
+            collect_mutated_stmt(body, out);
+        }
+    }
+}
+
+fn collect_mutated_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
+    match e {
+        Expr::Assign(_, target, value) => {
+            if let Some(name) = root_ident(target) {
+                out.insert(name);
+            }
+            collect_mutated_expr(value, out);
+        }
+        Expr::PreInc(x) | Expr::PostInc(x) | Expr::PreDec(x) | Expr::PostDec(x) => {
+            if let Some(name) = root_ident(x) {
+                out.insert(name);
+            }
+        }
+        Expr::Unary(_, x) => collect_mutated_expr(x, out),
+        Expr::Binary(_, a, b) => {
+            collect_mutated_expr(a, out);
+            collect_mutated_expr(b, out);
+        }
+        Expr::Ternary(c, t, f) => {
+            collect_mutated_expr(c, out);
+            collect_mutated_expr(t, out);
+            collect_mutated_expr(f, out);
+        }
+        Expr::Member(b, _) => collect_mutated_expr(b, out),
+        Expr::Index(b, i) => {
+            collect_mutated_expr(b, out);
+            collect_mutated_expr(i, out);
+        }
+        Expr::Call(_, args) | Expr::Construct(_, args) => {
+            for a in args {
+                collect_mutated_expr(a, out);
+            }
+        }
+        Expr::FloatLit(_) | Expr::IntLit(_) | Expr::BoolLit(_) | Expr::Ident(_) => {}
+    }
+}
+
+/// The root variable name of an l-value expression (`a.b[c].d` -> `a`).
+fn root_ident(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Ident(name) => Some(name.clone()),
+        Expr::Member(b, _) | Expr::Index(b, _) => root_ident(b),
+        _ => None,
+    }
+}
 
 fn wgsl_type(ty: Type) -> &'static str {
     use Type::*;

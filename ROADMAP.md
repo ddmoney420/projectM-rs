@@ -42,10 +42,14 @@ preset format with a `.milk` importer/converter.
 3. **pm-render** — wgpu framebuffers, textures, meshes, samplers, blend modes,
    shader cache, transitions. ← *foundation done* (context, texture,
    framebuffer, fullscreen pass, readback, render context, vertex types)
-4. **pm-shader** — Milkdrop HLSL → WGSL translation. ← *core done*
-   (preprocessor, HLSL lexer/parser, WGSL codegen with type inference; output
-   validated by naga). Remaining: matrix `mul` conventions, full intrinsic
-   tail, texture-binding integration (with Phase 5).
+4. **pm-shader** — Milkdrop HLSL → WGSL translation. ← *core done + hardening*
+   (preprocessor with `#if`/`#ifdef` conditionals, HLSL lexer/parser, WGSL codegen
+   with type inference + param-mutation shadowing; output validated by naga).
+   The full preset-shader pipeline (wrap `shader_body` → uniform/intrinsic header
+   → transpile → assemble bindings + entry) lives in `pm-preset::preset_shader`.
+   **Corpus shader compat: ~37% composite / ~18% warp produce valid WGSL** — the
+   remaining naga rejections (type-inference edge cases, matrix `mul`, intrinsic
+   tail) are the main hardening work, tracked by the `shader_report` example.
 5. **pm-preset** — full Milkdrop preset engine wiring eval + render + shader.
    ← *eval + warp + waveform + composite done*. Done: .milk parser, PresetState
    + defaults, per-frame & per-pixel evaluation; and in **pm-core** the warp

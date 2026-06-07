@@ -672,6 +672,7 @@ version = "0.0.1"
 name = "pm-preset"
 version = "0.0.1"
 dependencies = [
+ "naga",
  "pm-audio",
  "pm-eval",
  "pm-shader",

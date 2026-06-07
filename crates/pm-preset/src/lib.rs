@@ -30,10 +30,12 @@ mod error;
 mod parser;
 mod per_frame;
 mod per_pixel;
+mod preset_shader;
 mod state;
 
 pub use error::PresetError;
 pub use parser::PresetFile;
+pub use preset_shader::{to_wgsl as shader_to_wgsl, wrap as wrap_shader, ShaderError, ShaderKind};
 pub use per_frame::PerFrameContext;
 pub use per_pixel::{PerPixelContext, PerPixelOutput};
 pub use state::{
