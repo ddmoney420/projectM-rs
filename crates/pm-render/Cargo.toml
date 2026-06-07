@@ -1,0 +1,20 @@
+[package]
+name = "pm-render"
+description = "projectM rendering layer on wgpu: GPU context, textures, framebuffers, fullscreen passes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "pm_render"
+
+[dependencies]
+wgpu = "29"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.30"
+
+[dev-dependencies]
+# Used only by the `screenshot` example to write a viewable PNG.
+image = { version = "0.25", default-features = false, features = ["png"] }

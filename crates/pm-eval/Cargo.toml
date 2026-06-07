@@ -1,0 +1,14 @@
+[package]
+name = "pm-eval"
+description = "Milkdrop / ns-eel expression-language compiler and interpreter (projectm-eval port)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "pm_eval"
+
+# Intentionally dependency-free: this is the foundational crate and stays pure
+# Rust so it can be fuzzed and differential-tested against ns-eel in isolation.
+[dependencies]

@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pm-eval",
+    "crates/pm-audio",
+    "crates/pm-render",
+]
+
+# Crates added as each phase lands:
+#   crates/pm-render  — Phase 3
+#   crates/pm-shader  — Phase 4
+#   crates/pm-preset  — Phase 5
+#   crates/pm-core    — Phase 6
+#   crates/pm-format  — Phase 6
+#   crates/pm-app     — Phase 6
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "LGPL-2.1"
+repository = "local"
+rust-version = "1.80"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

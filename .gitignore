@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+.DS_Store
+
+# Upstream C++ sources kept locally as a porting reference; not ours to commit.
+/.reference/
+
+# Generated screenshots from the render examples.
+*.png
