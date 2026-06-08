@@ -50,15 +50,19 @@ preset format with a `.milk` importer/converter.
    with type inference + param-mutation shadowing; output validated by naga).
    The full preset-shader pipeline (wrap `shader_body` → uniform/intrinsic header
    → transpile → assemble bindings + entry) lives in `pm-preset::preset_shader`.
-   **Corpus shader compat: ~79% composite / ~81% warp produce valid WGSL** (up
+   **Corpus shader compat: ~83% composite / ~86% warp produce valid WGSL** (up
    from 37% / 18%), via corpus-driven hardening tracked by the `shader_report`
    example: built-in noise `texsize_*` constants, HLSL implicit vector
    truncation on store *and* in binary ops (`float4 * float2` -> first two
    lanes), `const`/`static` qualifiers and `float1` scalars, top-level comma
-   operator, scalar swizzles, 3D noise-volume textures, `lerp` broadcasting to
-   the widest operand, and float `++`/`--` lowered to `+= 1`. The remaining
-   naga rejections (user-defined function return-type inference, matrix `mul`,
-   non-lvalue assignment targets) are the next hardening work.
+   operator, scalar swizzles, 3D noise-volume textures, intrinsic argument-width
+   coercion (`dot`/`distance`/`cross`/`reflect`/`smoothstep` and
+   `min`/`max`/`clamp`/`lerp`/`pow` — truncate the wider operand, e.g.
+   `dot(float4, float3)`), and float `++`/`--` lowered to `+= 1`. The remaining
+   naga rejections, by descending frequency (`parse_buckets` example): non-lvalue
+   assignment from macro-expanded swizzles, matrix-from-`float4` / `mul`,
+   global initializers referencing uniforms, bool->float in vector constructors,
+   and reserved-keyword identifiers (`mod`). These are the next hardening work.
    **Custom composite *and* warp shaders now render.** Composite
    (`pm-core::PresetComposite`): the translated WGSL is wired with a per-frame
    `MdUniforms` buffer (`_cN`/`q`/rot) and `sampler_main`, swapping in for the

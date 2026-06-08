@@ -468,8 +468,13 @@ impl Generator {
                     );
                 }
             }
-            // Intrinsics that require all args share one type: broadcast scalars.
-            "pow" | "min" | "max" | "step" | "clamp" | "atan" => {
+            // Intrinsics whose arguments must share one type. Component-wise ones
+            // (`pow`/`min`/…) and reductive ones (`dot`/`distance` → scalar) alike
+            // need every argument coerced to a common vector width: scalars
+            // broadcast up, and a wider operand truncates to match the narrower
+            // (HLSL's rule, e.g. `dot(float4, float3)` operates on the first 3).
+            "pow" | "min" | "max" | "step" | "clamp" | "atan" | "dot" | "cross" | "distance" | "reflect"
+            | "smoothstep" => {
                 let common = args.iter().map(|a| self.infer(a)).fold(Type::Float, arith_common);
                 if common.vector_len().is_some() {
                     let parts =
@@ -545,6 +550,9 @@ impl Generator {
             "dot" | "length" | "distance" | "determinant" => Type::Float,
             "tex2d" | "tex3d" | "tex2dlod" | "tex2dbias" => Type::Float4,
             "cross" => Type::Float3,
+            // `smoothstep` is component-wise: its result matches the (coerced)
+            // common width of its arguments, not just the first edge.
+            "smoothstep" => args.iter().map(|a| self.infer(a)).fold(Type::Float, arith_common),
             "any" | "all" => Type::Bool,
             "mul" => args.iter().map(|a| self.infer(a)).find(|t| t.vector_len().is_some()).unwrap_or(Type::Float4),
             _ => args.first().map(|a| self.infer(a)).unwrap_or(Type::Float),

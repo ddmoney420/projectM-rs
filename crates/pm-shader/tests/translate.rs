@@ -243,3 +243,71 @@ fn user_function_signature_inference_and_arg_coercion() {
     // The scalar arg is broadcast to the vec2 parameter.
     assert!(wgsl.contains("polar(_uv, vec2<f32>(0.5))"), "scalar arg broadcast to vec2 param");
 }
+
+#[test]
+fn dot_truncates_mismatched_vector_widths() {
+    // HLSL `dot` operates on the common (narrower) width; WGSL needs both args
+    // the same type. Covers vec4/vec3, vec3/vec4, vec2/vec4.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float4 a = float4(1.0, 2.0, 3.0, 4.0);
+            float3 b = float3(0.1, 0.2, 0.3);
+            float2 c = float2(0.5, 0.6);
+            float d1 = dot(a, b);   // vec4, vec3 -> vec3
+            float d2 = dot(b, a);   // vec3, vec4 -> vec3
+            float d3 = dot(c, a);   // vec2, vec4 -> vec2
+            _return_value = float4(d1, d2, d3, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains(".xyz") && wgsl.contains(".xy"), "wider dot args truncated");
+}
+
+#[test]
+fn distance_and_reflect_coerce_widths() {
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float4 a = float4(1.0, 2.0, 3.0, 4.0);
+            float3 b = float3(0.1, 0.2, 0.3);
+            float dd = distance(a, b);          // vec4, vec3 -> vec3
+            float3 r = reflect(b, a);           // vec3, vec4 -> vec3
+            _return_value = float4(r, dd);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+}
+
+#[test]
+fn smoothstep_broadcasts_scalar_edges_to_vector() {
+    // `smoothstep(scalar, scalar, vec3)` broadcasts the edges and returns vec3.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float3 x = float3(0.2, 0.5, 0.8);
+            float3 s = smoothstep(0.0, 1.0, x);
+            _return_value = float4(s, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("smoothstep("), "smoothstep emitted");
+}
+
+#[test]
+fn component_wise_intrinsics_regression() {
+    // The pre-existing min/max/clamp/lerp coercion must still work unchanged.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float3 v = float3(0.2, 0.5, 0.8);
+            float3 a = min(v, 0.6);
+            float3 b = max(a, float3(0.1, 0.1, 0.1));
+            float3 c = clamp(b, 0.0, 1.0);
+            float3 d = lerp(c, v, 0.5);
+            _return_value = float4(d, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("mix(") && wgsl.contains("clamp("));
+}
