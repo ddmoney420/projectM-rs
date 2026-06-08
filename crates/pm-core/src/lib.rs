@@ -23,6 +23,35 @@ mod waveform_render;
 
 pub use colored_line::ColoredLineRenderer;
 pub use composite::CompositeRenderer;
+
+/// The classic (non-shader) final-composite effect parameters, read from the
+/// preset state each frame: video echo, gamma brighten, and the colour filters.
+#[derive(Debug, Clone, Copy)]
+pub struct CompositeEffects {
+    pub echo_zoom: f32,
+    pub echo_alpha: f32,
+    pub echo_orientation: i32,
+    pub gamma: f32,
+    pub brighten: bool,
+    pub darken: bool,
+    pub solarize: bool,
+    pub invert: bool,
+}
+
+impl CompositeEffects {
+    fn from_state(state: &PresetState) -> Self {
+        CompositeEffects {
+            echo_zoom: state.video_echo_zoom,
+            echo_alpha: state.video_echo_alpha,
+            echo_orientation: state.video_echo_orientation,
+            gamma: state.gamma_adj,
+            brighten: state.brighten,
+            darken: state.darken,
+            solarize: state.solarize,
+            invert: state.invert,
+        }
+    }
+}
 pub use preset_composite::PresetComposite;
 pub use warp_mesh::{WarpMesh, WarpVertex};
 pub use warp_render::{WarpParams, WarpRenderer};
@@ -274,7 +303,8 @@ impl WarpEngine {
             pc.draw(ctx, self.warp.main_texture(), self.preset.state(), time, &self.noise, &self.blur);
         } else {
             let shades = composite::hue_shades(time, self.preset.state().hue_random_offsets);
-            self.composite.draw(ctx, self.warp.main_texture(), shades);
+            let fx = CompositeEffects::from_state(self.preset.state());
+            self.composite.draw(ctx, self.warp.main_texture(), shades, fx);
         }
         Ok(())
     }

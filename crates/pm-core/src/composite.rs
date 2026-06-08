@@ -1,10 +1,15 @@
-//! Port of the default `FinalComposite` path: draw the feedback buffer to a
-//! display target, multiplied by an animated bilinear hue gradient (the gentle
-//! color drift modern Milkdrop applies via its default composite shader).
+//! Port of the default `FinalComposite` / `VideoEcho` / `Filters` path: draws
+//! the feedback buffer to the display target with the classic Milkdrop-1 effects
+//! used when a preset has no composite shader.
 //!
-//! The preset-author-supplied composite shader (via [`pm_shader`]) is a future
-//! addition; this implements the built-in default.
+//! In one fragment: the animated bilinear hue gradient
+//! ([`hue_shades`]/`ApplyHueShaderColors`), the **video echo** (blend a
+//! zoomed+oriented copy of the frame, `VideoEcho`), the **gamma** brighten
+//! (`gammaAdj`), and the **filters** brighten/darken/solarize/invert
+//! (`Filters`). The multi-pass GL blend tricks of the original collapse to
+//! closed-form colour math here (e.g. invert = `1-c`, darken = `c²`).
 
+use crate::CompositeEffects;
 use bytemuck::{Pod, Zeroable};
 use pm_render::wgpu;
 use pm_render::{GpuContext, Texture, TARGET_FORMAT};
@@ -14,10 +19,18 @@ use pm_render::{GpuContext, Texture, TARGET_FORMAT};
 struct HueUniform {
     /// Four corner shades (rgb in xyz). Order: (1,1), (0,1), (1,0), (0,0).
     shades: [[f32; 4]; 4],
+    /// Video echo: `(zoom, alpha, orientation, gammaAdj)`.
+    echo: [f32; 4],
+    /// Filter flags as 0/1: `(brighten, darken, solarize, invert)`.
+    filters: [f32; 4],
 }
 
 const COMPOSITE_WGSL: &str = r#"
-struct U { shades: array<vec4<f32>, 4> };
+struct U {
+    shades: array<vec4<f32>, 4>,
+    echo: vec4<f32>,
+    filters: vec4<f32>,
+};
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var src_tex: texture_2d<f32>;
 @group(0) @binding(2) var src_smp: sampler;
@@ -41,14 +54,40 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let x = in.uv.x;
-    let y = in.uv.y;
+    let uv = in.uv;
+    let x = uv.x;
+    let y = uv.y;
     let hue = u.shades[0].rgb * (x * y)
             + u.shades[1].rgb * ((1.0 - x) * y)
             + u.shades[2].rgb * (x * (1.0 - y))
             + u.shades[3].rgb * ((1.0 - x) * (1.0 - y));
-    let c = textureSample(src_tex, src_smp, in.uv);
-    return vec4<f32>(c.rgb * hue, 1.0);
+
+    let main = textureSample(src_tex, src_smp, uv).rgb;
+    var color = main;
+
+    // Video echo: blend a zoomed + (optionally flipped) copy of the frame.
+    let alpha = u.echo.y;
+    if (alpha > 0.001) {
+        let zoom = max(u.echo.x, 0.0001);
+        var euv = (uv - vec2<f32>(0.5)) / zoom + vec2<f32>(0.5);
+        let orient = u.echo.z;
+        if (orient % 2.0 >= 1.0) { euv.x = 1.0 - euv.x; }
+        if (orient >= 2.0) { euv.y = 1.0 - euv.y; }
+        let echo = textureSample(src_tex, src_smp, euv).rgb;
+        color = main * (1.0 - alpha) + echo * alpha;
+    }
+
+    // Hue tint and gamma brighten.
+    color = color * hue * u.echo.w;
+
+    // Filters (applied in Milkdrop's order: brighten, darken, solarize, invert).
+    let one = vec3<f32>(1.0);
+    if (u.filters.x > 0.5) { color = one - (one - color) * (one - color); }
+    if (u.filters.y > 0.5) { color = color * color; }
+    if (u.filters.z > 0.5) { color = 2.0 * color * (one - color); }
+    if (u.filters.w > 0.5) { color = one - color; }
+
+    return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 "#;
 
@@ -155,9 +194,20 @@ impl CompositeRenderer {
         &self.output
     }
 
-    /// Draw `source` (the feedback buffer) to the output, tinted by `shades`.
-    pub fn draw(&self, ctx: &GpuContext, source: &Texture, shades: [[f32; 4]; 4]) {
-        ctx.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&HueUniform { shades }));
+    /// Draw `source` (the feedback buffer) to the output with the hue tint,
+    /// video echo, gamma and filters.
+    pub fn draw(&self, ctx: &GpuContext, source: &Texture, shades: [[f32; 4]; 4], fx: CompositeEffects) {
+        let uniform = HueUniform {
+            shades,
+            echo: [fx.echo_zoom, fx.echo_alpha, fx.echo_orientation as f32, fx.gamma],
+            filters: [
+                fx.brighten as u8 as f32,
+                fx.darken as u8 as f32,
+                fx.solarize as u8 as f32,
+                fx.invert as u8 as f32,
+            ],
+        };
+        ctx.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniform));
 
         let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("composite bg"),

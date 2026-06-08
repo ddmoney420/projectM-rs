@@ -83,8 +83,12 @@ preset format with a `.milk` importer/converter.
    waveform** now covers the full `nWaveMode` family: Circle (0), XY-oscillation
    spiral (1), centered spiro (2/3), derivative line (4), explosive hash (5),
    Line (6) and double line (7), ported from projectM's `Waveforms/`; spectrum
-   line (8) and the Milkdrop2077 modes fall back to Line. Remaining: textured
-   shapes, motion-vector/border/echo passes.
+   line (8) and the Milkdrop2077 modes fall back to Line. The **default
+   (non-shader) final composite** now ports `FinalComposite`/`VideoEcho`/`Filters`:
+   the animated hue tint, **video echo** (blend a zoomed+oriented copy), **gamma**
+   brighten, and the **brighten/darken/solarize/invert** filters — the original's
+   multi-pass GL blend tricks collapsed to closed-form colour math in one
+   fragment. Remaining: textured shapes, motion-vector/border passes.
 6. **pm-core + pm-format + pm-app** — orchestrator, native format + importer,
    live windowed app (winit + cpal). ← *done*. pm-core's WarpEngine drives
    warp+waveform+composite; **pm-app** is a live winit window with a wgpu

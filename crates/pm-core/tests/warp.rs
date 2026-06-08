@@ -272,3 +272,33 @@ warp_6=`}
     let lit = out.chunks_exact(4).filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 30).count();
     assert!(lit > 50, "blur-sampling warp should produce visible content");
 }
+
+#[test]
+fn default_composite_with_echo_and_filter_renders() {
+    let Ok(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    // No composite shader -> the classic VideoEcho + Filters path. Strong echo,
+    // gamma, and the invert filter must produce a valid, non-empty frame.
+    let milk = "\
+nWaveMode=0
+fWaveScale=1.5
+bAdditiveWaves=1
+fVideoEchoZoom=1.25
+fVideoEchoAlpha=0.5
+nVideoEchoOrientation=3
+fGammaAdj=2.0
+bInvert=1
+";
+    let preset = Preset::load(milk).unwrap();
+    let mut engine = WarpEngine::new(&ctx, preset, 128, 128);
+    assert!(!engine.uses_custom_composite(), "should use the built-in composite");
+    for frame in 0..6 {
+        engine.render_frame(&ctx, frame as f32 / 30.0, frame, loud_audio()).unwrap();
+    }
+    let out = read_rgba8(&ctx, engine.display_texture());
+    // Invert turns the black background white, so most pixels are bright.
+    let bright = out.chunks_exact(4).filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 600).count();
+    assert!(bright > out.len() / 4 / 2, "invert filter should brighten the background");
+}
