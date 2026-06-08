@@ -88,7 +88,9 @@ preset format with a `.milk` importer/converter.
    the animated hue tint, **video echo** (blend a zoomed+oriented copy), **gamma**
    brighten, and the **brighten/darken/solarize/invert** filters — the original's
    multi-pass GL blend tricks collapsed to closed-form colour math in one
-   fragment. Remaining: textured shapes, motion-vector/border passes.
+   fragment. The **inner/outer border** frames (`ob_*`/`ib_*`) draw into the
+   feedback buffer on top of the waveforms (`Border`). Remaining: textured
+   shapes, motion vectors (needs a warp motion-field texture).
 6. **pm-core + pm-format + pm-app** — orchestrator, native format + importer,
    live windowed app (winit + cpal). ← *done*. pm-core's WarpEngine drives
    warp+waveform+composite; **pm-app** is a live winit window with a wgpu

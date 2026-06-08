@@ -302,3 +302,22 @@ bInvert=1
     let bright = out.chunks_exact(4).filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 600).count();
     assert!(bright > out.len() / 4 / 2, "invert filter should brighten the background");
 }
+
+#[test]
+fn border_frames_gated_on_visible_alpha() {
+    use pm_core::border_frames;
+    // No alpha -> no frames.
+    let p = Preset::load("ob_size=0.05\nib_size=0.05").unwrap();
+    assert!(border_frames(p.state()).is_empty(), "invisible borders produce no geometry");
+
+    // Both visible -> two frames, each a non-empty triangle list with the color.
+    let milk = "ob_size=0.06\nob_a=1.0\nob_r=1.0\nib_size=0.03\nib_a=1.0\nib_b=1.0";
+    let p = Preset::load(milk).unwrap();
+    let frames = border_frames(p.state());
+    assert_eq!(frames.len(), 2, "outer + inner");
+    assert_eq!(frames[0].vertices.len() % 3, 0, "triangle list");
+    assert!(!frames[0].vertices.is_empty());
+    assert_eq!(frames[0].colors[0], [1.0, 0.0, 0.0, 1.0], "outer border color");
+    // All vertices within the clip square.
+    assert!(frames[0].vertices.iter().all(|v| v[0].abs() <= 1.0 && v[1].abs() <= 1.0));
+}

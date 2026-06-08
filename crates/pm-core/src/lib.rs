@@ -10,6 +10,7 @@
 //! `warp (feedback) → waveform → composite`.
 
 mod blur;
+mod border;
 mod colored_line;
 mod composite;
 mod md_uniforms;
@@ -21,6 +22,7 @@ mod warp_render;
 mod waveform;
 mod waveform_render;
 
+pub use border::{frames as border_frames, BorderFrame};
 pub use colored_line::ColoredLineRenderer;
 pub use composite::CompositeRenderer;
 
@@ -295,6 +297,11 @@ impl WarpEngine {
                 cw.additive,
                 cw.use_dots,
             );
+        }
+
+        // 2c. Inner/outer border frames, drawn last into the feedback buffer.
+        for frame in border::frames(self.preset.state()) {
+            self.custom_lines.draw_triangles(ctx, self.warp.current_view(), &frame.vertices, &frame.colors, false);
         }
 
         // 3. Composite to the display target: the preset's own composite shader
