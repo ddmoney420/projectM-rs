@@ -14,7 +14,7 @@ use blit::Blit;
 use pm_core::WarpEngine;
 use pm_preset::Preset;
 use pm_render::wgpu;
-use pm_render::GpuContext;
+use pm_render::{read_rgba8, GpuContext};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -52,9 +52,18 @@ struct Render {
     blit: Blit,
 }
 
+/// Number of warm-up frames to build feedback content before probing.
+const WARMUP_FRAMES: i32 = 8;
+/// Max presets to skip when searching for one that renders visible content.
+const MAX_PROBE: usize = 400;
+/// A preset "renders" if at least this many display pixels are non-black.
+const CONTENT_THRESHOLD: usize = 400;
+
 struct App {
     presets: Vec<PathBuf>,
     index: usize,
+    /// False until the user navigates into the corpus (we start on the built-in).
+    on_corpus: bool,
     rng: u32,
     audio: AudioInput,
     render: Option<Render>,
@@ -69,6 +78,7 @@ impl App {
         App {
             presets,
             index: 0,
+            on_corpus: false,
             rng: 0x1234_5678,
             audio: AudioInput::new(),
             render: None,
@@ -78,33 +88,49 @@ impl App {
         }
     }
 
-    /// Resolve and load the current preset, falling back to the built-in.
+    /// The current preset: the built-in until the user navigates into the corpus.
     fn current_preset(&self) -> (Preset, String) {
-        if let Some(path) = self.presets.get(self.index) {
-            if let Ok(bytes) = std::fs::read(path) {
-                let content = String::from_utf8_lossy(&bytes);
-                if let Ok(preset) = Preset::load(&content) {
-                    let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                    return (preset, name);
+        if self.on_corpus {
+            if let Some(path) = self.presets.get(self.index) {
+                if let Ok(bytes) = std::fs::read(path) {
+                    if let Ok(preset) = Preset::load(&String::from_utf8_lossy(&bytes)) {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                        return (preset, name);
+                    }
                 }
             }
         }
         (Preset::load(BUILTIN).expect("builtin preset"), "built-in".into())
     }
 
-    /// Advance to the next loadable preset in the given direction (or random).
+    /// Navigate the corpus, skipping presets that render black (many advanced
+    /// presets need content generators we don't render yet).
     fn change_preset(&mut self, delta: i64, random: bool) {
         if self.presets.is_empty() {
             return;
         }
         let len = self.presets.len();
-        if random {
+        let dir: i64 = if delta < 0 { -1 } else { 1 };
+        let start = if random {
             self.rng = self.rng.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-            self.index = (self.rng as usize) % len;
+            (self.rng as usize) % len
+        } else if !self.on_corpus {
+            // First step into the corpus: begin at an end.
+            if dir > 0 { 0 } else { len - 1 }
         } else {
-            self.index = ((self.index as i64 + delta).rem_euclid(len as i64)) as usize;
-        }
-        self.rebuild_engine();
+            ((self.index as i64 + delta).rem_euclid(len as i64)) as usize
+        };
+        self.on_corpus = true;
+
+        let Some(render) = self.render.as_mut() else { return };
+        let (w, h) = (render.config.width, render.config.height);
+        let (engine, idx, name) =
+            find_renderable(&render.ctx, w, h, &self.presets, &mut self.audio, self.frame, start, dir);
+        let cc = if engine.uses_custom_composite() { " ·custom-comp" } else { "" };
+        render.engine = engine;
+        render.window.set_title(&format!("pm-app — {name}{cc}  [{}/{}]", idx + 1, len));
+        println!("Showing [{}/{}]: {name}", idx + 1, len);
+        self.index = idx;
     }
 
     /// Recreate the warp engine for the current preset at the current size.
@@ -249,6 +275,70 @@ impl ApplicationHandler for App {
             render.window.request_redraw();
         }
     }
+}
+
+/// Load a preset file, returning the parsed preset and its display name.
+fn load_preset(path: &Path) -> Option<(Preset, String)> {
+    let bytes = std::fs::read(path).ok()?;
+    let preset = Preset::load(&String::from_utf8_lossy(&bytes)).ok()?;
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    Some((preset, name))
+}
+
+/// Run a few frames so the feedback buffer accumulates content.
+fn warm_up(engine: &mut WarpEngine, ctx: &GpuContext, audio: &mut AudioInput, base: i32) {
+    for f in 0..WARMUP_FRAMES {
+        let n = base + f;
+        let a = audio.frame_data(1.0 / 60.0, n);
+        let _ = engine.render_frame(ctx, n as f32 / 60.0, n, a);
+    }
+}
+
+/// True if the engine's display output has visible (non-black) content.
+fn has_content(ctx: &GpuContext, engine: &WarpEngine) -> bool {
+    let px = read_rgba8(ctx, engine.display_texture());
+    px.chunks_exact(4)
+        .filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 30)
+        .count()
+        > CONTENT_THRESHOLD
+}
+
+/// Resolution used for the cheap "does it render anything?" probe.
+const PROBE_SIZE: u32 = 160;
+
+/// Search from `start` in direction `dir` for a preset that renders visible
+/// content. Each candidate is probed at low resolution (fast); the winner is
+/// rebuilt at full resolution. Falls back to the built-in if none found.
+#[allow(clippy::too_many_arguments)]
+fn find_renderable(
+    ctx: &GpuContext,
+    w: u32,
+    h: u32,
+    presets: &[PathBuf],
+    audio: &mut AudioInput,
+    frame_base: i32,
+    start: usize,
+    dir: i64,
+) -> (WarpEngine, usize, String) {
+    let len = presets.len();
+    for attempt in 0..MAX_PROBE.min(len) {
+        let idx = ((start as i64 + dir * attempt as i64).rem_euclid(len as i64)) as usize;
+        let Some((preset, name)) = load_preset(&presets[idx]) else { continue };
+
+        let mut probe = WarpEngine::new(ctx, preset, PROBE_SIZE, PROBE_SIZE);
+        warm_up(&mut probe, ctx, audio, frame_base);
+        if has_content(ctx, &probe) {
+            // Rebuild the winner at full resolution.
+            let (preset, _) = load_preset(&presets[idx]).expect("reload");
+            let mut engine = WarpEngine::new(ctx, preset, w, h);
+            warm_up(&mut engine, ctx, audio, frame_base);
+            return (engine, idx, name);
+        }
+    }
+    // Nothing rendered in range — show the built-in instead.
+    let mut engine = WarpEngine::new(ctx, Preset::load(BUILTIN).unwrap(), w, h);
+    warm_up(&mut engine, ctx, audio, frame_base);
+    (engine, start.min(len.saturating_sub(1)), "built-in".into())
 }
 
 fn collect_presets(root: &Path, out: &mut Vec<PathBuf>) {

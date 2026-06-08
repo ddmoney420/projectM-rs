@@ -42,8 +42,18 @@ fn collect(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
+fn renders_content(ctx: &GpuContext, preset: Preset) -> bool {
+    let mut engine = WarpEngine::new(ctx, preset, 160, 160);
+    for frame in 0..8 {
+        let _ = engine.render_frame(ctx, frame as f32 / 60.0, frame, frame_audio(frame));
+    }
+    let px = read_rgba8(ctx, engine.display_texture());
+    px.chunks_exact(4).filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 30).count() > 100
+}
+
 fn main() {
-    let arg = std::env::args().nth(1).expect("usage: render_preset <file.milk | dir>");
+    let arg = std::env::args().nth(1).expect("usage: render_preset <file.milk | dir> [count]");
+    let count_mode = std::env::args().nth(2).as_deref() == Some("count");
     let ctx = GpuContext::headless().expect("no GPU adapter");
 
     // Resolve to a list of candidate presets.
@@ -53,6 +63,25 @@ fn main() {
         collect(path, &mut candidates);
     } else {
         candidates.push(path.to_path_buf());
+    }
+
+    if count_mode {
+        let sample = candidates.len().min(400);
+        let mut rendered = 0;
+        let mut loaded = 0;
+        for p in candidates.iter().take(sample) {
+            let Ok(bytes) = std::fs::read(p) else { continue };
+            let Ok(preset) = Preset::load(&String::from_utf8_lossy(&bytes)) else { continue };
+            loaded += 1;
+            if renders_content(&ctx, preset) {
+                rendered += 1;
+            }
+        }
+        println!(
+            "Of {loaded} loaded presets (first {sample}), {rendered} render visible content ({:.1}%)",
+            100.0 * rendered as f64 / loaded.max(1) as f64
+        );
+        return;
     }
 
     // Find the first preset that actually uses a custom composite shader.
