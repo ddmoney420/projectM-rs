@@ -334,7 +334,14 @@ impl WarpRenderer {
 
     /// Render one warp pass: sample the current frame through the warped mesh
     /// into the other buffer, then make it current.
-    pub fn warp_frame(&mut self, ctx: &GpuContext, mesh: &WarpMesh, params: &WarpParams, md_bytes: Option<&[u8]>) {
+    pub fn warp_frame(
+        &mut self,
+        ctx: &GpuContext,
+        mesh: &WarpMesh,
+        params: &WarpParams,
+        md_bytes: Option<&[u8]>,
+        noise: &crate::noise::NoiseTextures,
+    ) {
         let device = &ctx.device;
 
         // Upload vertices (grow buffer if needed).
@@ -388,9 +395,15 @@ impl WarpRenderer {
                     wgpu::BindGroupEntry { binding: 1, resource: custom.md_buf.as_entire_binding() },
                 ];
                 for i in 0..custom.texture_count {
+                    // Bind a noise texture if the sampler names one, else the
+                    // feedback buffer (`sampler_main`, blur stand-ins, etc.).
+                    let view = match custom.texture_names.get(i).and_then(|n| noise.get(n)) {
+                        Some(tex) => &tex.view,
+                        None => &self.main[source].view,
+                    };
                     entries.push(wgpu::BindGroupEntry {
                         binding: (2 + 2 * i) as u32,
-                        resource: wgpu::BindingResource::TextureView(&self.main[source].view),
+                        resource: wgpu::BindingResource::TextureView(view),
                     });
                     entries.push(wgpu::BindGroupEntry {
                         binding: (3 + 2 * i) as u32,

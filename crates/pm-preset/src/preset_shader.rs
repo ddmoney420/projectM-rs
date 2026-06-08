@@ -112,7 +112,8 @@ fn assemble(translated: &str, kind: ShaderKind) -> (String, Vec<String>) {
     let textures = find_textures(translated);
     let mut binding = 1u32;
     for tex in &textures {
-        out.push_str(&format!("@group(0) @binding({binding}) var {tex}: texture_2d<f32>;\n"));
+        let dim = if is_3d_sampler(tex) { "texture_3d<f32>" } else { "texture_2d<f32>" };
+        out.push_str(&format!("@group(0) @binding({binding}) var {tex}: {dim};\n"));
         binding += 1;
         out.push_str(&format!("@group(0) @binding({binding}) var {tex}_sampler: sampler;\n"));
         binding += 1;
@@ -141,6 +142,12 @@ fn assemble(translated: &str, kind: ShaderKind) -> (String, Vec<String>) {
     ));
 
     (out, textures)
+}
+
+/// Whether a sampler name refers to a 3D (volume) texture. Milkdrop's only
+/// built-in volume textures are the `noisevol_*` set, sampled with `tex3D`.
+pub fn is_3d_sampler(name: &str) -> bool {
+    name.contains("noisevol")
 }
 
 /// Find the textures referenced as `textureSample(<name>, …)`.

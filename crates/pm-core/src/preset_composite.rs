@@ -6,7 +6,8 @@
 //! block from preset state each frame, and draws fullscreen to a display target.
 
 use crate::md_uniforms::MdUniforms;
-use pm_preset::{PresetState, TranslatedShader};
+use crate::noise::NoiseTextures;
+use pm_preset::{is_3d_sampler, PresetState, TranslatedShader};
 use pm_render::wgpu;
 use pm_render::{GpuContext, Texture, TARGET_FORMAT};
 
@@ -16,6 +17,8 @@ pub struct PresetComposite {
     uniform_buf: wgpu::Buffer,
     sampler: wgpu::Sampler,
     texture_count: usize,
+    /// Sampler names in binding order, to bind noise textures vs. the feedback.
+    texture_names: Vec<String>,
     output: Texture,
 }
 
@@ -36,13 +39,18 @@ impl PresetComposite {
             },
             count: None,
         }];
-        for i in 0..shader.textures.len() {
+        for (i, tex) in shader.textures.iter().enumerate() {
+            let view_dimension = if is_3d_sampler(tex) {
+                wgpu::TextureViewDimension::D3
+            } else {
+                wgpu::TextureViewDimension::D2
+            };
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding: (2 * i + 1) as u32,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
+                    view_dimension,
                     multisampled: false,
                 },
                 count: None,
@@ -125,6 +133,7 @@ impl PresetComposite {
             uniform_buf,
             sampler,
             texture_count: shader.textures.len(),
+            texture_names: shader.textures.clone(),
             output,
         })
     }
@@ -133,8 +142,9 @@ impl PresetComposite {
         &self.output
     }
 
-    /// Render the composite, sampling `main` (the warp feedback buffer).
-    pub fn draw(&self, ctx: &GpuContext, main: &Texture, state: &PresetState, time: f32) {
+    /// Render the composite, sampling `main` (the warp feedback buffer) and the
+    /// shared `noise` textures for any `sampler_noise*` references.
+    pub fn draw(&self, ctx: &GpuContext, main: &Texture, state: &PresetState, time: f32, noise: &NoiseTextures) {
         let uniforms = MdUniforms::from_state(state, time);
         ctx.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
@@ -143,10 +153,15 @@ impl PresetComposite {
             resource: self.uniform_buf.as_entire_binding(),
         }];
         for i in 0..self.texture_count {
-            // All textures resolve to the feedback buffer for now.
+            // Noise samplers resolve to the matching noise texture; everything
+            // else (main, blur stand-ins, user textures) to the feedback buffer.
+            let view = match self.texture_names.get(i).and_then(|n| noise.get(n)) {
+                Some(tex) => &tex.view,
+                None => &main.view,
+            };
             entries.push(wgpu::BindGroupEntry {
                 binding: (2 * i + 1) as u32,
-                resource: wgpu::BindingResource::TextureView(&main.view),
+                resource: wgpu::BindingResource::TextureView(view),
             });
             entries.push(wgpu::BindGroupEntry {
                 binding: (2 * i + 2) as u32,

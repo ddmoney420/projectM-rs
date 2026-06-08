@@ -50,9 +50,13 @@ preset format with a `.milk` importer/converter.
    with type inference + param-mutation shadowing; output validated by naga).
    The full preset-shader pipeline (wrap `shader_body` → uniform/intrinsic header
    → transpile → assemble bindings + entry) lives in `pm-preset::preset_shader`.
-   **Corpus shader compat: ~37% composite / ~18% warp produce valid WGSL** — the
-   remaining naga rejections (type-inference edge cases, matrix `mul`, intrinsic
-   tail) are the main hardening work, tracked by the `shader_report` example.
+   **Corpus shader compat: ~70% composite / ~70% warp produce valid WGSL** (up
+   from 37% / 18%), via corpus-driven hardening tracked by the `shader_report`
+   example: built-in noise `texsize_*` constants, HLSL implicit vector
+   truncation on store, `const`/`static` qualifiers and `float1` scalars,
+   top-level comma operator, scalar swizzles, and 3D noise-volume textures. The
+   remaining naga rejections (scattered `InvalidBinary` type-inference edges,
+   matrix `mul`, intrinsic tail) are the next hardening work.
    **Custom composite *and* warp shaders now render.** Composite
    (`pm-core::PresetComposite`): the translated WGSL is wired with a per-frame
    `MdUniforms` buffer (`_cN`/`q`/rot) and `sampler_main`, swapping in for the
@@ -68,10 +72,13 @@ preset format with a `.milk` importer/converter.
    warp mesh + GPU feedback pass, the Circle/Line **standard waveform**, the
    **custom waveforms** (`wave_N` per-point geometry), the **custom shapes**
    (`shape_N` filled N-gons w/ gradient + border, per-instance per-frame eval),
-   the default **composite** (hue), **custom composite shaders**, and **custom
-   warp shaders** (`shader_body` warp fragment over the warp mesh). Remaining:
-   more standard waveform modes, textured shapes, motion-vector/border/echo
-   passes.
+   the default **composite** (hue), **custom composite shaders**, **custom
+   warp shaders** (`shader_body` warp fragment over the warp mesh), and the
+   built-in **noise textures** (`noise_lq/mq/hq`, `noisevol_lq/hq` 3D volumes,
+   generated once and bound to `sampler_noise*` references). Remaining: more
+   standard waveform modes, textured shapes, motion-vector/border/echo passes,
+   real per-frame blur textures (`sampler_blur1/2/3`, currently feedback
+   stand-ins).
 6. **pm-core + pm-format + pm-app** — orchestrator, native format + importer,
    live windowed app (winit + cpal). ← *pm-core + pm-app done*. pm-core's
    WarpEngine drives warp+waveform+composite; **pm-app** is a live winit window

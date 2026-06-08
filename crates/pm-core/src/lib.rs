@@ -12,6 +12,7 @@
 mod colored_line;
 mod composite;
 mod md_uniforms;
+mod noise;
 mod preset_composite;
 mod preset_warp;
 mod warp_mesh;
@@ -122,6 +123,8 @@ pub struct WarpEngine {
     composite: CompositeRenderer,
     /// The preset's custom composite shader, if it translated successfully.
     preset_composite: Option<PresetComposite>,
+    /// Milkdrop's built-in noise textures, bound to `sampler_noise*` references.
+    noise: noise::NoiseTextures,
     width: u32,
     height: u32,
     aspect: (f32, f32, f32, f32),
@@ -152,6 +155,7 @@ impl WarpEngine {
             custom_lines: ColoredLineRenderer::new(ctx),
             composite: CompositeRenderer::new(ctx, width, height),
             preset_composite,
+            noise: noise::NoiseTextures::new(ctx),
             width,
             height,
             aspect,
@@ -209,7 +213,7 @@ impl WarpEngine {
         } else {
             None
         };
-        self.warp.warp_frame(ctx, &self.mesh, &params, md.as_ref().map(bytemuck::bytes_of));
+        self.warp.warp_frame(ctx, &self.mesh, &params, md.as_ref().map(bytemuck::bytes_of), &self.noise);
 
         // 1b. Custom shapes (filled N-gons + borders) into the feedback buffer.
         let shapes = self.preset.custom_shapes()?;
@@ -262,7 +266,7 @@ impl WarpEngine {
         // 3. Composite to the display target: the preset's own composite shader
         //    if it has one, otherwise the built-in hue composite.
         if let Some(pc) = &self.preset_composite {
-            pc.draw(ctx, self.warp.main_texture(), self.preset.state(), time);
+            pc.draw(ctx, self.warp.main_texture(), self.preset.state(), time, &self.noise);
         } else {
             let shades = composite::hue_shades(time, self.preset.state().hue_random_offsets);
             self.composite.draw(ctx, self.warp.main_texture(), shades);

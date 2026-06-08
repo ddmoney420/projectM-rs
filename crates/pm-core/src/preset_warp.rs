@@ -93,7 +93,8 @@ pub fn assemble(parts: &WarpShaderParts) -> String {
     s.push_str("@group(0) @binding(1) var<uniform> md: MdUniforms;\n");
     let mut binding = 2u32;
     for tex in &parts.textures {
-        s.push_str(&format!("@group(0) @binding({binding}) var {tex}: texture_2d<f32>;\n"));
+        let dim = if pm_preset::is_3d_sampler(tex) { "texture_3d<f32>" } else { "texture_2d<f32>" };
+        s.push_str(&format!("@group(0) @binding({binding}) var {tex}: {dim};\n"));
         binding += 1;
         s.push_str(&format!("@group(0) @binding({binding}) var {tex}_sampler: sampler;\n"));
         binding += 1;
@@ -114,6 +115,9 @@ pub struct CustomWarp {
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub md_buf: wgpu::Buffer,
     pub texture_count: usize,
+    /// Sampler names in binding order, so the renderer can bind the matching
+    /// source (feedback buffer vs. a noise texture) to each.
+    pub texture_names: Vec<String>,
 }
 
 impl CustomWarp {
@@ -146,13 +150,18 @@ impl CustomWarp {
                 count: None,
             },
         ];
-        for i in 0..parts.textures.len() {
+        for (i, tex) in parts.textures.iter().enumerate() {
+            let view_dimension = if pm_preset::is_3d_sampler(tex) {
+                wgpu::TextureViewDimension::D3
+            } else {
+                wgpu::TextureViewDimension::D2
+            };
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding: (2 + 2 * i) as u32,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
+                    view_dimension,
                     multisampled: false,
                 },
                 count: None,
@@ -219,6 +228,12 @@ impl CustomWarp {
             mapped_at_creation: false,
         });
 
-        Some(CustomWarp { pipeline, bind_group_layout, md_buf, texture_count: parts.textures.len() })
+        Some(CustomWarp {
+            pipeline,
+            bind_group_layout,
+            md_buf,
+            texture_count: parts.textures.len(),
+            texture_names: parts.textures.clone(),
+        })
     }
 }

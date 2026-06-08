@@ -186,3 +186,35 @@ warp_6=`}
     let lit = out.chunks_exact(4).filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 30).count();
     assert!(lit > 50, "custom warp + waveform should produce visible content");
 }
+
+#[test]
+fn custom_warp_with_3d_noise_renders() {
+    let Ok(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    // A warp shader that samples the 3D noise-volume texture (texture_3d binding
+    // path) plus the 2D noise texture — must build a valid pipeline and render
+    // without a bind-group dimension mismatch.
+    let milk = "\
+MILKDROP_PRESET_VERSION=201
+nWaveMode=0
+bAdditiveWaves=1
+fWaveScale=2.0
+warp_1=`shader_body
+warp_2=`{
+warp_3=`float3 n3 = tex3D(sampler_noisevol_hq, float3(uv, time*0.1)).xyz;
+warp_4=`float3 n2 = tex2D(sampler_noise_lq, uv*2.0).xyz;
+warp_5=`ret = tex2D(sampler_main, uv).xyz * 0.97 + 0.05*n3 + 0.03*n2;
+warp_6=`}
+";
+    let preset = Preset::load(milk).unwrap();
+    let mut engine = WarpEngine::new(&ctx, preset, 128, 128);
+    assert!(engine.uses_custom_warp(), "3D-noise warp shader should compile to valid WGSL");
+    for frame in 0..8 {
+        engine.render_frame(&ctx, frame as f32 / 30.0, frame, loud_audio()).unwrap();
+    }
+    let out = read_rgba8(&ctx, engine.display_texture());
+    let lit = out.chunks_exact(4).filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 30).count();
+    assert!(lit > 50, "noise-sampling warp should produce visible content");
+}
