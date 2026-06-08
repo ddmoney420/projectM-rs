@@ -205,3 +205,21 @@ fn binary_op_truncates_wider_vector() {
     validate_wgsl(&wgsl).unwrap();
     assert!(wgsl.contains(").xy"), "wider operand truncated to vec2");
 }
+
+#[test]
+fn lerp_broadcasts_to_widest_and_float_increment() {
+    // `lerp(scalar, scalar, vec3)` must broadcast the scalars to vec3 so `mix`
+    // gets consistent operands; HLSL `n++` on a float lowers to `n = n + 1.0`.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float3 a = float3(1.0, 2.0, 3.0);
+            float n = 0.0;
+            n++;
+            float3 m = lerp(0.0, 1.0, a);
+            _return_value = float4(m, n);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("n = (n + 1.0)") || wgsl.contains("n = n + 1.0"), "float ++ lowered to add");
+}

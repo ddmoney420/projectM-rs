@@ -242,11 +242,19 @@ impl Generator {
     fn emit_expr_stmt(&mut self, e: &Expr, indent: usize) {
         let pad = "    ".repeat(indent);
         match e {
+            // HLSL `x++`/`x--` work on floats; WGSL `++`/`--` are int-only, so
+            // lower to `x = x + 1` with a literal matching the operand type.
             Expr::PostInc(x) | Expr::PreInc(x) => {
-                let _ = writeln!(self.out, "{pad}{}++;", self.expr(x, Type::Int));
+                let ty = self.infer(x);
+                let target = self.expr(x, scalar_of(ty));
+                let one = broadcast_scalar_literal(ty, if scalar_of(ty) == Type::Int { "1" } else { "1.0" });
+                let _ = writeln!(self.out, "{pad}{target} = {target} + {one};");
             }
             Expr::PostDec(x) | Expr::PreDec(x) => {
-                let _ = writeln!(self.out, "{pad}{}--;", self.expr(x, Type::Int));
+                let ty = self.infer(x);
+                let target = self.expr(x, scalar_of(ty));
+                let one = broadcast_scalar_literal(ty, if scalar_of(ty) == Type::Int { "1" } else { "1.0" });
+                let _ = writeln!(self.out, "{pad}{target} = {target} - {one};");
             }
             Expr::Assign(op, lhs, rhs) => self.emit_assign(*op, lhs, rhs, indent),
             other => {
@@ -408,13 +416,12 @@ impl Generator {
             }
             "lerp" => {
                 if args.len() == 3 {
-                    let ty = self.infer(&args[0]);
-                    return format!(
-                        "mix({}, {}, {})",
-                        self.emit_broadcast(&args[0], ty),
-                        self.emit_broadcast(&args[1], ty),
-                        self.expr(&args[2], Type::Float)
-                    );
+                    // `mix` needs all three operands to share one type; broadcast
+                    // each to the widest (e.g. `lerp(scalar, scalar, vec3)`).
+                    let common = args.iter().map(|a| self.infer(a)).fold(Type::Float, arith_common);
+                    let parts =
+                        args.iter().map(|a| self.emit_broadcast(a, common)).collect::<Vec<_>>().join(", ");
+                    return format!("mix({parts})");
                 }
             }
             "saturate" => {
