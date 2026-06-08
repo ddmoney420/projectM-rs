@@ -94,7 +94,15 @@ preset format with a `.milk` importer/converter.
    motion-field texture, and a grid of `mv_x`×`mv_y` line segments samples it in
    the vertex stage (port of `PresetMotionVectorsVertexShader`, with the
    `length_multiplier`/`minimum_length` trail logic) to visualise the optical
-   flow. Remaining: textured shapes (needs external preset image assets).
+   flow. **Feedback-textured custom shapes**: a shape with the `textured` flag
+   samples the warp feedback buffer (the previous-frame ping-pong texture,
+   hazard-free vs. the one being drawn into) at per-vertex UVs derived from
+   `tex_ang`/`tex_zoom` (port of `CustomShape`'s UV math), stamping a
+   zoomed/rotated copy of the current image; untextured shapes are unchanged and
+   a missing/mismatched UV set falls back to the flat-colour fill.
+   **Not yet supported:** external image-file shape textures (`sampler_<file>`)
+   — only the in-pipeline feedback texture is sampled. Remaining: external
+   preset image assets (texture files).
 6. **pm-core + pm-format + pm-app** — orchestrator, native format + importer,
    live windowed app (winit + cpal). ← *done*. pm-core's WarpEngine drives
    warp+waveform+composite; **`PresetPlayer`** wraps it to crossfade between

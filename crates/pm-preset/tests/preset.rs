@@ -180,3 +180,46 @@ fn disabled_custom_waveform_produces_nothing() {
 fn rejects_garbage() {
     assert!(Preset::load("\0\0\0").is_err());
 }
+
+#[test]
+fn textured_shape_emits_uvs_when_enabled() {
+    // A shape with `textured` set produces per-vertex UVs and the textured flag.
+    let milk = "\
+shapecode_0_enabled=1
+shapecode_0_sides=6
+shapecode_0_textured=1
+shapecode_0_tex_zoom=0.8
+shapecode_0_a=1.0
+shape_0_per_frame1=`rad = 0.4; tex_ang = 0.5;
+";
+    let mut preset = Preset::load(milk).unwrap();
+    preset.update_frame(FrameParams::default(), FrameAudioData::default()).unwrap();
+    let shapes = preset.custom_shapes().unwrap();
+    assert_eq!(shapes.len(), 1);
+    let s = &shapes[0];
+    assert!(s.textured, "textured flag should be set");
+    assert_eq!(s.fill_uvs.len(), s.fill_vertices.len(), "one UV per fill vertex");
+    assert!(!s.fill_uvs.is_empty());
+    // Centre vertex of each triangle samples (0.5, 0.5).
+    assert_eq!(s.fill_uvs[0], [0.5, 0.5]);
+    // UVs are finite and roughly in the unit square neighbourhood.
+    assert!(s.fill_uvs.iter().all(|uv| uv[0].is_finite() && uv[1].is_finite()));
+}
+
+#[test]
+fn non_textured_shape_has_no_uvs() {
+    // Default (untextured) shapes are unchanged: no UVs, flat-colour fill.
+    let milk = "\
+shapecode_0_enabled=1
+shapecode_0_sides=5
+shapecode_0_a=1.0
+shape_0_per_frame1=`rad = 0.4;
+";
+    let mut preset = Preset::load(milk).unwrap();
+    preset.update_frame(FrameParams::default(), FrameAudioData::default()).unwrap();
+    let shapes = preset.custom_shapes().unwrap();
+    assert_eq!(shapes.len(), 1);
+    assert!(!shapes[0].textured);
+    assert!(shapes[0].fill_uvs.is_empty(), "untextured shapes carry no UVs");
+    assert_eq!(shapes[0].fill_vertices.len(), 5 * 3, "fill geometry unchanged");
+}

@@ -354,3 +354,42 @@ fVideoEchoAlpha=0.0
     let lit = out.chunks_exact(4).filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 60).count();
     assert!(lit > 50, "motion vectors should inject visible content, only {lit} lit");
 }
+
+#[test]
+fn feedback_textured_shape_renders() {
+    let Ok(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    // A textured shape samples the feedback buffer. With a bright waveform
+    // seeding content, the shape must render (sampling the previous frame) and
+    // inject visible content without a read/write hazard or crash.
+    let milk = "\
+nWaveMode=2
+fDecay=0.96
+bAdditiveWaves=1
+fWaveScale=2.0
+wave_r=1.0
+wave_g=1.0
+wave_b=1.0
+zoom=1.01
+shapecode_0_enabled=1
+shapecode_0_sides=4
+shapecode_0_textured=1
+shapecode_0_tex_zoom=0.7
+shapecode_0_a=1.0
+shapecode_0_r=1.0
+shapecode_0_g=1.0
+shapecode_0_b=1.0
+shape_0_per_frame1=`x=0.5; y=0.5; rad=0.4; ang=time; tex_ang=time*0.5;
+";
+    let preset = Preset::load(milk).unwrap();
+    let mut engine = WarpEngine::new(&ctx, preset, 128, 128);
+    engine.seed(&ctx, &vec![0u8; 128 * 128 * 4]);
+    for frame in 0..12 {
+        engine.render_frame(&ctx, frame as f32 / 30.0, frame, loud_audio()).unwrap();
+    }
+    let out = read_rgba8(&ctx, engine.display_texture());
+    let lit = out.chunks_exact(4).filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 60).count();
+    assert!(lit > 50, "feedback-textured shape should inject visible content, only {lit} lit");
+}

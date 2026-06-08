@@ -361,6 +361,13 @@ impl WarpRenderer {
         &self.main[self.current].view
     }
 
+    /// View of the *previous* frame (the ping-pong buffer the warp read from
+    /// this frame). Safe to sample while drawing into [`Self::current_view`] —
+    /// used as the feedback source for textured shapes.
+    pub fn feedback_source_view(&self) -> &wgpu::TextureView {
+        &self.main[1 - self.current].view
+    }
+
     /// Upload an RGBA8 image into the current main texture (initial content).
     pub fn seed(&self, ctx: &GpuContext, rgba: &[u8]) {
         let tex = &self.main[self.current].texture;

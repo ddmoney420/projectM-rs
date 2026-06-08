@@ -18,6 +18,7 @@ mod md_uniforms;
 mod motion_vectors;
 mod noise;
 mod player;
+mod textured_shape;
 mod preset_composite;
 mod preset_warp;
 mod warp_mesh;
@@ -165,6 +166,8 @@ pub struct WarpEngine {
     blur: blur::Blur,
     /// Motion-vector grid overlay (`mv_*`).
     motion_vectors: motion_vectors::MotionVectors,
+    /// Renderer for feedback-textured custom shapes.
+    textured_shapes: textured_shape::TexturedShapeRenderer,
     width: u32,
     height: u32,
     aspect: (f32, f32, f32, f32),
@@ -198,6 +201,7 @@ impl WarpEngine {
             noise: noise::NoiseTextures::new(ctx),
             blur: blur::Blur::new(ctx, width, height),
             motion_vectors: motion_vectors::MotionVectors::new(ctx),
+            textured_shapes: textured_shape::TexturedShapeRenderer::new(ctx),
             width,
             height,
             aspect,
@@ -266,13 +270,28 @@ impl WarpEngine {
         // 1b. Custom shapes (filled N-gons + borders) into the feedback buffer.
         let shapes = self.preset.custom_shapes()?;
         for sh in &shapes {
-            self.custom_lines.draw_triangles(
-                ctx,
-                self.warp.current_view(),
-                &sh.fill_vertices,
-                &sh.fill_colors,
-                sh.additive,
-            );
+            // Textured shapes sample the previous-frame feedback (hazard-free vs
+            // the buffer we're drawing into); a missing/empty UV set falls back
+            // to the flat-colour fill.
+            if sh.textured && sh.fill_uvs.len() == sh.fill_vertices.len() && !sh.fill_uvs.is_empty() {
+                self.textured_shapes.draw(
+                    ctx,
+                    self.warp.current_view(),
+                    self.warp.feedback_source_view(),
+                    &sh.fill_vertices,
+                    &sh.fill_colors,
+                    &sh.fill_uvs,
+                    sh.additive,
+                );
+            } else {
+                self.custom_lines.draw_triangles(
+                    ctx,
+                    self.warp.current_view(),
+                    &sh.fill_vertices,
+                    &sh.fill_colors,
+                    sh.additive,
+                );
+            }
             if !sh.border_points.is_empty() {
                 let border_colors = vec![sh.border_color; sh.border_points.len()];
                 self.custom_lines.draw(

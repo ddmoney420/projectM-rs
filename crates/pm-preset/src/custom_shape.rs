@@ -15,6 +15,11 @@ pub struct CustomShapeOutput {
     /// Fill triangles (triangle list): `sides * 3` vertices.
     pub fill_vertices: Vec<[f32; 2]>,
     pub fill_colors: Vec<[f32; 4]>,
+    /// Per-fill-vertex texture coordinates, parallel to `fill_vertices`. Only
+    /// populated (non-empty) when [`Self::textured`] is set.
+    pub fill_uvs: Vec<[f32; 2]>,
+    /// Whether this shape samples the feedback texture (the `textured` flag).
+    pub textured: bool,
     /// Border line loop (closed; empty if no border).
     pub border_points: Vec<[f32; 2]>,
     pub border_color: [f32; 4],
@@ -127,6 +132,9 @@ impl CustomShape {
             let rad = c.get("rad");
             let ang = c.get("ang");
             let additive = c.get("additive") > 0.5;
+            let textured = c.get("textured") > 0.5;
+            let tex_ang = c.get("tex_ang");
+            let tex_zoom = c.get("tex_zoom");
 
             let center = [(x * 2.0 - 1.0) as f32, (y * 2.0 - 1.0) as f32];
             let center_color = modulo4(c.get("r"), c.get("g"), c.get("b"), c.get("a"));
@@ -143,9 +151,28 @@ impl CustomShape {
                 })
                 .collect();
 
+            // Texture coordinates (port of `CustomShape::Draw` UV math): centre
+            // at (0.5, 0.5), perimeter from `tex_ang`/`tex_zoom`, V flipped.
+            let perim_uv: Vec<[f32; 2]> = if textured {
+                let zoom = if tex_zoom.abs() < 1e-6 { 1e-6 } else { tex_zoom };
+                (0..sides)
+                    .map(|i| {
+                        let angle = i as f64 / sides as f64 * PI * 2.0 + tex_ang + PI * 0.25;
+                        [
+                            (0.5 + 0.5 * angle.cos() / zoom * aspect_y) as f32,
+                            (1.0 - (0.5 - 0.5 * angle.sin() / zoom)) as f32,
+                        ]
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let center_uv = [0.5f32, 0.5];
+
             // Triangle-list fill (fan around the center).
             let mut fill_vertices = Vec::with_capacity(sides as usize * 3);
             let mut fill_colors = Vec::with_capacity(sides as usize * 3);
+            let mut fill_uvs = if textured { Vec::with_capacity(sides as usize * 3) } else { Vec::new() };
             for i in 0..sides as usize {
                 let j = (i + 1) % sides as usize;
                 fill_vertices.push(center);
@@ -154,6 +181,11 @@ impl CustomShape {
                 fill_colors.push(edge_color);
                 fill_vertices.push(perim[j]);
                 fill_colors.push(edge_color);
+                if textured {
+                    fill_uvs.push(center_uv);
+                    fill_uvs.push(perim_uv[i]);
+                    fill_uvs.push(perim_uv[j]);
+                }
             }
 
             // Border loop.
@@ -177,6 +209,8 @@ impl CustomShape {
             out.push(CustomShapeOutput {
                 fill_vertices,
                 fill_colors,
+                fill_uvs,
+                textured,
                 border_points,
                 border_color,
                 additive,
