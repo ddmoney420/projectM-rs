@@ -9,6 +9,7 @@
 //! Per-frame pipeline (mirrors Milkdrop):
 //! `warp (feedback) → waveform → composite`.
 
+mod blur;
 mod colored_line;
 mod composite;
 mod md_uniforms;
@@ -125,6 +126,8 @@ pub struct WarpEngine {
     preset_composite: Option<PresetComposite>,
     /// Milkdrop's built-in noise textures, bound to `sampler_noise*` references.
     noise: noise::NoiseTextures,
+    /// Per-frame Gaussian blur chain, bound to `sampler_blur1/2/3` references.
+    blur: blur::Blur,
     width: u32,
     height: u32,
     aspect: (f32, f32, f32, f32),
@@ -156,6 +159,7 @@ impl WarpEngine {
             composite: CompositeRenderer::new(ctx, width, height),
             preset_composite,
             noise: noise::NoiseTextures::new(ctx),
+            blur: blur::Blur::new(ctx, width, height),
             width,
             height,
             aspect,
@@ -207,13 +211,16 @@ impl WarpEngine {
         self.preset.update_frame(frame_params, audio)?;
         self.mesh.calculate(&mut self.preset)?;
         let params = warp_params(self.preset.state());
+        // Blur chain from the current feedback (last frame's image), so warp and
+        // composite can sample GetBlur1/2/3 this frame.
+        self.blur.compute(ctx, self.warp.main_texture());
         // The custom warp shader needs the per-frame MdUniforms block.
         let md = if self.warp.has_custom_warp() {
             Some(md_uniforms::MdUniforms::from_state(self.preset.state(), time))
         } else {
             None
         };
-        self.warp.warp_frame(ctx, &self.mesh, &params, md.as_ref().map(bytemuck::bytes_of), &self.noise);
+        self.warp.warp_frame(ctx, &self.mesh, &params, md.as_ref().map(bytemuck::bytes_of), &self.noise, &self.blur);
 
         // 1b. Custom shapes (filled N-gons + borders) into the feedback buffer.
         let shapes = self.preset.custom_shapes()?;
@@ -266,7 +273,7 @@ impl WarpEngine {
         // 3. Composite to the display target: the preset's own composite shader
         //    if it has one, otherwise the built-in hue composite.
         if let Some(pc) = &self.preset_composite {
-            pc.draw(ctx, self.warp.main_texture(), self.preset.state(), time, &self.noise);
+            pc.draw(ctx, self.warp.main_texture(), self.preset.state(), time, &self.noise, &self.blur);
         } else {
             let shades = composite::hue_shades(time, self.preset.state().hue_random_offsets);
             self.composite.draw(ctx, self.warp.main_texture(), shades);

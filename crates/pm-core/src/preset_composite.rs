@@ -144,7 +144,15 @@ impl PresetComposite {
 
     /// Render the composite, sampling `main` (the warp feedback buffer) and the
     /// shared `noise` textures for any `sampler_noise*` references.
-    pub fn draw(&self, ctx: &GpuContext, main: &Texture, state: &PresetState, time: f32, noise: &NoiseTextures) {
+    pub fn draw(
+        &self,
+        ctx: &GpuContext,
+        main: &Texture,
+        state: &PresetState,
+        time: f32,
+        noise: &NoiseTextures,
+        blur: &crate::blur::Blur,
+    ) {
         let uniforms = MdUniforms::from_state(state, time);
         ctx.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
@@ -153,9 +161,9 @@ impl PresetComposite {
             resource: self.uniform_buf.as_entire_binding(),
         }];
         for i in 0..self.texture_count {
-            // Noise samplers resolve to the matching noise texture; everything
-            // else (main, blur stand-ins, user textures) to the feedback buffer.
-            let view = match self.texture_names.get(i).and_then(|n| noise.get(n)) {
+            // Noise/blur samplers resolve to the matching texture; everything
+            // else (main, user textures) to the feedback buffer.
+            let view = match self.texture_names.get(i).and_then(|n| noise.get(n).or_else(|| blur.get(n))) {
                 Some(tex) => &tex.view,
                 None => &main.view,
             };

@@ -75,12 +75,12 @@ preset format with a `.milk` importer/converter.
    **custom waveforms** (`wave_N` per-point geometry), the **custom shapes**
    (`shape_N` filled N-gons w/ gradient + border, per-instance per-frame eval),
    the default **composite** (hue), **custom composite shaders**, **custom
-   warp shaders** (`shader_body` warp fragment over the warp mesh), and the
+   warp shaders** (`shader_body` warp fragment over the warp mesh), the
    built-in **noise textures** (`noise_lq/mq/hq`, `noisevol_lq/hq` 3D volumes,
-   generated once and bound to `sampler_noise*` references). Remaining: more
-   standard waveform modes, textured shapes, motion-vector/border/echo passes,
-   real per-frame blur textures (`sampler_blur1/2/3`, currently feedback
-   stand-ins).
+   generated once and bound to `sampler_noise*` references), and the per-frame
+   **blur chain** (`sampler_blur1/2/3` — separable Gaussian at 1/2, 1/4, 1/8
+   res, rebuilt each frame from the feedback; `GetBlur1/2/3`). Remaining: more
+   standard waveform modes, textured shapes, motion-vector/border/echo passes.
 6. **pm-core + pm-format + pm-app** — orchestrator, native format + importer,
    live windowed app (winit + cpal). ← *pm-core + pm-app done*. pm-core's
    WarpEngine drives warp+waveform+composite; **pm-app** is a live winit window

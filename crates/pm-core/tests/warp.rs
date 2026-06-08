@@ -218,3 +218,34 @@ warp_6=`}
     let lit = out.chunks_exact(4).filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 30).count();
     assert!(lit > 50, "noise-sampling warp should produce visible content");
 }
+
+#[test]
+fn warp_shader_sampling_blur_renders() {
+    let Ok(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    // GetBlur1/2/3 expand to tex2D(sampler_blur1/2/3, ...); the blur chain must
+    // bind real blur textures so the pipeline builds and renders.
+    let milk = "\
+MILKDROP_PRESET_VERSION=201
+nWaveMode=0
+bAdditiveWaves=1
+fWaveScale=2.0
+warp_1=`shader_body
+warp_2=`{
+warp_3=`float3 b1 = GetBlur1(uv);
+warp_4=`float3 b3 = GetBlur3(uv);
+warp_5=`ret = tex2D(sampler_main, uv).xyz * 0.95 + 0.05*b1 + 0.05*b3;
+warp_6=`}
+";
+    let preset = Preset::load(milk).unwrap();
+    let mut engine = WarpEngine::new(&ctx, preset, 128, 128);
+    assert!(engine.uses_custom_warp(), "blur-sampling warp shader should compile to valid WGSL");
+    for frame in 0..8 {
+        engine.render_frame(&ctx, frame as f32 / 30.0, frame, loud_audio()).unwrap();
+    }
+    let out = read_rgba8(&ctx, engine.display_texture());
+    let lit = out.chunks_exact(4).filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 30).count();
+    assert!(lit > 50, "blur-sampling warp should produce visible content");
+}

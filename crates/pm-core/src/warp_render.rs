@@ -341,6 +341,7 @@ impl WarpRenderer {
         params: &WarpParams,
         md_bytes: Option<&[u8]>,
         noise: &crate::noise::NoiseTextures,
+        blur: &crate::blur::Blur,
     ) {
         let device = &ctx.device;
 
@@ -395,9 +396,10 @@ impl WarpRenderer {
                     wgpu::BindGroupEntry { binding: 1, resource: custom.md_buf.as_entire_binding() },
                 ];
                 for i in 0..custom.texture_count {
-                    // Bind a noise texture if the sampler names one, else the
-                    // feedback buffer (`sampler_main`, blur stand-ins, etc.).
-                    let view = match custom.texture_names.get(i).and_then(|n| noise.get(n)) {
+                    // Bind a noise or blur texture if the sampler names one,
+                    // else the feedback buffer (`sampler_main`, user textures).
+                    let named = custom.texture_names.get(i);
+                    let view = match named.and_then(|n| noise.get(n).or_else(|| blur.get(n))) {
                         Some(tex) => &tex.view,
                         None => &self.main[source].view,
                     };
