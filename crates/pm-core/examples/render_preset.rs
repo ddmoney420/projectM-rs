@@ -66,7 +66,7 @@ fn main() {
     }
 
     if count_mode {
-        let sample = candidates.len().min(400);
+        let sample = candidates.len().min(100);
         let mut rendered = 0;
         let mut loaded = 0;
         for p in candidates.iter().take(sample) {
@@ -78,7 +78,7 @@ fn main() {
             }
         }
         println!(
-            "Of {loaded} loaded presets (first {sample}), {rendered} render visible content ({:.1}%)",
+            "Of {loaded} loaded presets (first {sample}, with custom waveforms), {rendered} render visible content ({:.1}%)",
             100.0 * rendered as f64 / loaded.max(1) as f64
         );
         return;
