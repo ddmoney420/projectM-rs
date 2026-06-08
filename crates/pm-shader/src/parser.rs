@@ -44,9 +44,9 @@ fn type_from_ident(s: &str) -> Option<Type> {
     use Type::*;
     Some(match s {
         "void" => Void,
-        "float" | "half" => Float,
-        "int" | "uint" | "dword" => Int,
-        "bool" => Bool,
+        "float" | "half" | "float1" | "half1" => Float,
+        "int" | "uint" | "dword" | "int1" | "uint1" => Int,
+        "bool" | "bool1" => Bool,
         "float2" | "half2" => Float2,
         "float3" | "half3" => Float3,
         "float4" | "half4" => Float4,
@@ -117,6 +117,28 @@ impl Parser {
             type_from_ident(s)
         } else {
             None
+        }
+    }
+
+    /// True if a (possibly qualifier-prefixed) declaration starts here:
+    /// `[const|static|...] <type> <ident>`.
+    fn peek_decl(&self) -> bool {
+        let mut q = 0;
+        while let Tok::Ident(s) = self.peek_at(q) {
+            if TYPE_QUALIFIERS.contains(&s.as_str()) {
+                q += 1;
+            } else {
+                break;
+            }
+        }
+        matches!(self.peek_at(q), Tok::Ident(s) if type_from_ident(s).is_some())
+            && matches!(self.peek_at(q + 1), Tok::Ident(_))
+    }
+
+    /// Skip leading type qualifiers (`const`, `static`, …) on a declaration.
+    fn skip_qualifiers(&mut self) {
+        while matches!(self.peek(), Tok::Ident(s) if TYPE_QUALIFIERS.contains(&s.as_str())) {
+            self.pos += 1;
         }
     }
 
@@ -283,19 +305,23 @@ impl Parser {
             }
         }
 
-        // Declaration: a type keyword followed by an identifier name.
-        if self.peek_type().is_some() && matches!(self.peek_at(1), Tok::Ident(_)) {
+        // Declaration: an optional qualifier + type keyword + identifier name.
+        if self.peek_decl() {
             return self.parse_decl(out);
         }
 
-        // Expression statement.
-        let e = self.parse_expr()?;
+        // Expression statement. A top-level comma operator (`a, b, c;`) becomes
+        // a sequence of expression statements (only side effects matter here).
+        out.push(Stmt::Expr(self.parse_expr()?));
+        while self.eat(&Tok::Comma) {
+            out.push(Stmt::Expr(self.parse_expr()?));
+        }
         self.expect(&Tok::Semicolon, "';'")?;
-        out.push(Stmt::Expr(e));
         Ok(())
     }
 
     fn parse_decl(&mut self, out: &mut Vec<Stmt>) -> Result<(), ParseError> {
+        self.skip_qualifiers();
         let ty = self.peek_type().unwrap();
         self.pos += 1;
         loop {
@@ -345,7 +371,7 @@ impl Parser {
         let init = if self.at(&Tok::Semicolon) {
             self.pos += 1;
             None
-        } else if self.peek_type().is_some() && matches!(self.peek_at(1), Tok::Ident(_)) {
+        } else if self.peek_decl() {
             let mut v = Vec::new();
             self.parse_decl(&mut v)?; // consumes trailing ';'
             Some(Box::new(if v.len() == 1 { v.pop().unwrap() } else { Stmt::Block(v) }))

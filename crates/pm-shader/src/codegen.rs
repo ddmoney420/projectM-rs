@@ -347,7 +347,19 @@ impl Generator {
                 )
             }
             Expr::Member(base, field) => {
-                format!("{}.{}", self.expr(base, Type::Float), field)
+                let bt = self.infer(base);
+                // HLSL allows swizzles on scalars (`s.x` -> s, `s.xxx` -> broadcast);
+                // WGSL has no scalar field accessor, so rewrite them.
+                if bt.is_scalar() && is_swizzle(field) {
+                    let s = self.expr(base, scalar_of(bt));
+                    if field.len() == 1 {
+                        s
+                    } else {
+                        format!("{}({})", wgsl_type(vec_of(bt, field.len() as u8)), s)
+                    }
+                } else {
+                    format!("{}.{}", self.expr(base, Type::Float), field)
+                }
             }
             Expr::Index(base, idx) => {
                 format!("{}[{}]", self.expr(base, Type::Float), self.expr(idx, Type::Int))
@@ -673,7 +685,7 @@ fn arith_common(a: Type, b: Type) -> Type {
 }
 
 fn member_type(base: Type, field: &str) -> Type {
-    if base.vector_len().is_some() && is_swizzle(field) {
+    if (base.vector_len().is_some() || base.is_scalar()) && is_swizzle(field) {
         let scalar = scalar_of(base);
         if field.len() == 1 {
             scalar

@@ -154,3 +154,37 @@ fn vector_truncation_on_assignment() {
     assert!(wgsl.contains(".xyz"), "vec4 truncated to vec3");
     assert!(wgsl.contains(").x"), "vec3 truncated to scalar on +=");
 }
+
+#[test]
+fn const_qualifier_and_float1_and_scalar_swizzle() {
+    // `const`/`static` qualifiers, the 1-component `float1` scalar type, and
+    // HLSL scalar swizzles (`s.x` -> s, `s.xxx` -> broadcast).
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            const float a = 0.5;
+            static float1 b = 0.25;
+            float c = a.x + b.x;
+            float3 v = c.xxx;
+            _return_value = float4(v, c);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("vec3<f32>(c)"), "scalar .xxx broadcast");
+}
+
+#[test]
+fn comma_operator_statement() {
+    // A top-level comma operator becomes a sequence of statements.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float3 ret = float3(0.0, 0.0, 0.0);
+            ret += float3(0.1, 0.0, 0.0),
+            ret += float3(0.0, 0.2, 0.0),
+            ret = ret * 2.0;
+            _return_value = float4(ret, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+}
