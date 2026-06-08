@@ -97,9 +97,13 @@ preset format with a `.milk` importer/converter.
    flow. Remaining: textured shapes (needs external preset image assets).
 6. **pm-core + pm-format + pm-app** — orchestrator, native format + importer,
    live windowed app (winit + cpal). ← *done*. pm-core's WarpEngine drives
-   warp+waveform+composite; **pm-app** is a live winit window with a wgpu
-   surface, cpal audio capture (graceful synthetic fallback), preset cycling
-   over the corpus, and keyboard controls. **pm-format** is the native `.pmp`
+   warp+waveform+composite; **`PresetPlayer`** wraps it to crossfade between
+   presets (Milkdrop's ~2.7s soft cut): both the outgoing and incoming presets
+   keep rendering independently and are blended over an elapsed-time window, the
+   outgoing one dropped when the fade completes (duration 0 = hard cut).
+   **pm-app** is a live winit window with a wgpu surface, cpal audio capture
+   (graceful synthetic fallback), transition-blended preset cycling over the
+   corpus, and keyboard controls (incl. `T` to toggle transitions). **pm-format** is the native `.pmp`
    preset format: a structured, lossless representation (scalar params + named
    code blocks) with a `.milk` importer/exporter and a readable text form.
    Validated over the 14k-preset corpus: `.milk → native → .pmp → native`

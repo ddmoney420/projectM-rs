@@ -13,9 +13,11 @@ mod blur;
 mod border;
 mod colored_line;
 mod composite;
+mod crossfade;
 mod md_uniforms;
 mod motion_vectors;
 mod noise;
+mod player;
 mod preset_composite;
 mod preset_warp;
 mod warp_mesh;
@@ -26,6 +28,7 @@ mod waveform_render;
 pub use border::{frames as border_frames, BorderFrame};
 pub use colored_line::ColoredLineRenderer;
 pub use composite::CompositeRenderer;
+pub use player::{transition_progress, PresetPlayer, DEFAULT_TRANSITION_SECS};
 
 /// The classic (non-shader) final-composite effect parameters, read from the
 /// preset state each frame: video echo, gamma brighten, and the colour filters.

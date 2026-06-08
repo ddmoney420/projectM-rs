@@ -4,14 +4,15 @@
 //! cargo run -p pm-app --release -- [preset-dir]
 //! ```
 //!
-//! Keys: →/Space/N next preset · ←/P previous · R random · Esc/Q quit.
+//! Keys: →/Space/N next preset · ←/P previous · R random · T toggle
+//! transitions · Esc/Q quit.
 
 mod audio;
 mod blit;
 
 use audio::AudioInput;
 use blit::Blit;
-use pm_core::WarpEngine;
+use pm_core::{PresetPlayer, WarpEngine, DEFAULT_TRANSITION_SECS};
 use pm_preset::Preset;
 use pm_render::wgpu;
 use pm_render::{read_rgba8, GpuContext};
@@ -48,7 +49,7 @@ struct Render {
     ctx: GpuContext,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
-    engine: WarpEngine,
+    player: PresetPlayer,
     blit: Blit,
 }
 
@@ -127,10 +128,19 @@ impl App {
         let (engine, idx, name) =
             find_renderable(&render.ctx, w, h, &self.presets, &mut self.audio, self.frame, start, dir);
         let cc = if engine.uses_custom_composite() { " ·custom-comp" } else { "" };
-        render.engine = engine;
+        render.player.switch_to(engine);
         render.window.set_title(&format!("pm-app — {name}{cc}  [{}/{}]", idx + 1, len));
         println!("Showing [{}/{}]: {name}", idx + 1, len);
         self.index = idx;
+    }
+
+    /// Toggle smooth preset transitions on/off (off = instant hard cut).
+    fn toggle_transitions(&mut self) {
+        if let Some(render) = &mut self.render {
+            let on = render.player.duration() > 0.0;
+            render.player.set_duration(if on { 0.0 } else { DEFAULT_TRANSITION_SECS });
+            println!("Preset transitions: {}", if on { "off (hard cut)" } else { "on (2.7s)" });
+        }
     }
 
     /// Recreate the warp engine for the current preset at the current size.
@@ -138,8 +148,11 @@ impl App {
         let (preset, name) = self.current_preset();
         if let Some(render) = &mut self.render {
             let (w, h) = (render.config.width, render.config.height);
-            render.engine = WarpEngine::new(&render.ctx, preset, w, h);
-            let cc = if render.engine.uses_custom_composite() { " ·custom-comp" } else { "" };
+            let engine = WarpEngine::new(&render.ctx, preset, w, h);
+            let cc = if engine.uses_custom_composite() { " ·custom-comp" } else { "" };
+            // Resize is a clean reset, not a transition.
+            let duration = render.player.duration();
+            render.player = PresetPlayer::new(&render.ctx, engine, w, h, duration);
             render.window.set_title(&format!(
                 "pm-app — {name}{cc}  [{}/{}]",
                 self.index + 1,
@@ -157,14 +170,14 @@ impl App {
         let time = (now - self.start).as_secs_f32();
 
         let audio = self.audio.frame_data(dt, self.frame);
-        let _ = render.engine.render_frame(&render.ctx, time, self.frame, audio);
+        render.player.render(&render.ctx, time, audio);
         self.frame += 1;
 
         match render.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
                 let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-                render.blit.draw(&render.ctx, render.engine.display_texture(), &view);
+                render.blit.draw(&render.ctx, render.player.output_texture(), &view);
                 frame.present();
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
@@ -241,8 +254,9 @@ impl ApplicationHandler for App {
         let engine = WarpEngine::new(&ctx, preset, w, h);
         let cc = if engine.uses_custom_composite() { " ·custom-comp" } else { "" };
         window.set_title(&format!("pm-app — {name}{cc}  [{}/{}]", self.index + 1, self.presets.len().max(1)));
+        let player = PresetPlayer::new(&ctx, engine, w, h, DEFAULT_TRANSITION_SECS);
 
-        self.render = Some(Render { window, ctx, surface, config, engine, blit });
+        self.render = Some(Render { window, ctx, surface, config, player, blit });
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -261,6 +275,7 @@ impl ApplicationHandler for App {
                     "n" => self.change_preset(1, false),
                     "p" => self.change_preset(-1, false),
                     "r" => self.change_preset(0, true),
+                    "t" => self.toggle_transitions(),
                     "q" => event_loop.exit(),
                     _ => {}
                 },
@@ -363,7 +378,7 @@ fn main() {
     } else {
         println!("Loaded {} presets from {dir}", presets.len());
     }
-    println!("Keys: Right/Space/N next · Left/P prev · R random · Esc/Q quit");
+    println!("Keys: Right/Space/N next · Left/P prev · R random · T transitions · Esc/Q quit");
 
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
