@@ -36,7 +36,10 @@ preset format with a `.milk` importer/converter.
 ## Phases
 
 1. **pm-eval** — expression compiler (the preset math language). Headless,
-   fully unit-tested. ← *done*
+   fully unit-tested. ← *done*. Compiles to a slot-resolved IR (variables →
+   `Vec` slot indices, functions → opcode enum, no per-call allocation) so the
+   hot per-pixel/per-point loops run without hashing — ~2.5–3× the original
+   tree-walker. Hosts hold `VarSlot` handles for the hottest variables.
 2. **pm-audio** — PCM ring buffer, FFT, loudness, waveform alignment, beat
    detection. Headless. ← *done*
 3. **pm-render** — wgpu framebuffers, textures, meshes, samplers, blend modes,
@@ -62,8 +65,7 @@ preset format with a `.milk` importer/converter.
    (`shape_N` filled N-gons w/ gradient + border, per-instance per-frame eval),
    the default **composite** (hue) and **custom composite shaders**. Remaining:
    more standard waveform modes, textured shapes, motion-vector/border/echo
-   passes, custom **warp** shaders. Perf note: per-point/per-instance eval in the
-   tree-walker is slow at hundreds of points × 60fps — wants the bytecode pass.
+   passes, custom **warp** shaders.
 6. **pm-core + pm-format + pm-app** — orchestrator, native format + importer,
    live windowed app (winit + cpal). ← *pm-core + pm-app done*. pm-core's
    WarpEngine drives warp+waveform+composite; **pm-app** is a live winit window

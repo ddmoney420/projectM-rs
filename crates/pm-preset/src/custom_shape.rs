@@ -34,12 +34,14 @@ impl CustomShape {
         if !state.custom_shapes[index].enabled {
             return Ok(None);
         }
-        let init_prog = compile_opt(&state.custom_shape_init_code[index], "shape_init")?;
-        let frame_prog = compile_opt(&state.custom_shape_per_frame_code[index], "shape_per_frame")?;
+        let mut per_frame = Context::new();
+        let init_prog = compile_opt(&mut per_frame, &state.custom_shape_init_code[index], "shape_init")?;
+        let frame_prog =
+            compile_opt(&mut per_frame, &state.custom_shape_per_frame_code[index], "shape_per_frame")?;
 
         let mut shape = CustomShape {
             index,
-            per_frame: Context::new(),
+            per_frame,
             init_prog,
             frame_prog,
             t_after_init: [0.0; T_VAR_COUNT],
@@ -195,9 +197,9 @@ fn modulo(x: f64) -> f32 {
     ((x % m) + m) % m
 }
 
-fn compile_opt(code: &str, block: &'static str) -> Result<Option<Program>, PresetError> {
+fn compile_opt(ctx: &mut Context, code: &str, block: &'static str) -> Result<Option<Program>, PresetError> {
     if code.trim().is_empty() {
         return Ok(None);
     }
-    Program::compile(code).map(Some).map_err(|e| PresetError::compile(block, e))
+    Program::compile(ctx, code).map(Some).map_err(|e| PresetError::compile(block, e))
 }

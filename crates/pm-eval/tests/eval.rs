@@ -149,10 +149,11 @@ fn rand_is_deterministic_with_seed() {
     a.seed(12345);
     let mut b = Context::new();
     b.seed(12345);
-    let prog = Program::compile("rand(1000)").unwrap();
+    let pa = Program::compile(&mut a, "rand(1000)").unwrap();
+    let pb = Program::compile(&mut b, "rand(1000)").unwrap();
     for _ in 0..50 {
-        let va = prog.run(&mut a).unwrap();
-        let vb = prog.run(&mut b).unwrap();
+        let va = pa.run(&mut a).unwrap();
+        let vb = pb.run(&mut b).unwrap();
         assert_eq!(va, vb);
         assert!((0.0..1000.0).contains(&va));
         assert_eq!(va, va.floor()); // rand(x) returns an integer in [0, x)
@@ -210,8 +211,8 @@ fn realistic_per_frame_snippet() {
         wave_b = 0.5 + 0.5 * sin(time * 1.9 + 4);
         zoom = 1.0 + 0.02 * sin(time);
     ";
-    let prog = Program::compile(src).unwrap();
     let mut ctx = Context::new();
+    let prog = Program::compile(&mut ctx, src).unwrap();
     ctx.set("time", 1.0);
     prog.run(&mut ctx).unwrap();
     // All channels stay in [0, 1].

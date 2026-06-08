@@ -1,20 +1,21 @@
-//! Tree-walking interpreter for compiled [`Expr`] programs.
+//! Execution context and the executor for compiled [`Node`] programs.
 //!
-//! Semantics mirror ns-eel / projectm-eval where they differ from plain IEEE
-//! math, because preset authors rely on the quirks:
-//!   * division / modulo by zero yields `0.0` (never NaN/inf),
+//! Variables live in a `Vec<f64>` indexed by slot (resolved at compile time),
+//! so reads/writes are a plain index — no per-access hashing. The host can hold
+//! a [`VarSlot`] handle to set/get hot variables (e.g. per-pixel `x`/`y`)
+//! without a name lookup either.
+//!
+//! Semantics mirror ns-eel / projectm-eval quirks preset authors rely on:
+//!   * division / modulo by zero yields `0.0`,
 //!   * `==` / `!=` compare with an epsilon of `1e-5`,
-//!   * "truthiness" for `if`/`while`/`&&`/`||`/`!` is `|v| > 1e-5`.
+//!   * truthiness is `|v| > 1e-5`.
 
-use crate::ast::{BinOp, Expr, UnOp};
+use crate::ast::{BinOp, UnOp};
+use crate::compile::{CallOp, Node, Target};
 use std::collections::HashMap;
 use std::fmt;
 
-/// ns-eel comparison / truthiness epsilon.
 const EPS: f64 = 1e-5;
-
-/// Hard cap on `loop()` / `while()` iterations to keep a runaway preset from
-/// hanging the host. ns-eel applies a similar safety limit.
 const MAX_ITERS: u64 = 1 << 21;
 
 fn truthy(v: f64) -> bool {
@@ -24,7 +25,7 @@ fn truthy(v: f64) -> bool {
 #[derive(Debug, Clone, PartialEq)]
 pub enum EvalError {
     UnknownFunction(String),
-    Arity { name: String, expected: &'static str, got: usize },
+    Arity { name: &'static str, expected: &'static str, got: usize },
 }
 
 impl fmt::Display for EvalError {
@@ -40,13 +41,17 @@ impl fmt::Display for EvalError {
 
 impl std::error::Error for EvalError {}
 
-/// Execution state: variables, per-instance and global memory, and the RNG.
-///
-/// Variables are addressed by lowercased name. Memory is sparse — unset cells
-/// read as `0.0`, matching ns-eel's zero-initialized megabuf.
+/// A handle to a variable's storage slot, for fast repeated set/get from the
+/// host in hot loops. Obtain via [`Context::variable_slot`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VarSlot(usize);
+
+/// Execution state: variables (slot-indexed), per-instance and global memory,
+/// and the RNG.
 #[derive(Debug, Clone)]
 pub struct Context {
-    vars: HashMap<String, f64>,
+    slots: Vec<f64>,
+    names: HashMap<String, usize>,
     megabuf: HashMap<i64, f64>,
     gmegabuf: HashMap<i64, f64>,
     rng: u64,
@@ -61,193 +66,200 @@ impl Default for Context {
 impl Context {
     pub fn new() -> Self {
         let mut ctx = Context {
-            vars: HashMap::new(),
+            slots: Vec::new(),
+            names: HashMap::new(),
             megabuf: HashMap::new(),
             gmegabuf: HashMap::new(),
             rng: 0x9E37_79B9_7F4A_7C15,
         };
-        // Named constants exposed as read-able (and over-writable) variables.
-        ctx.vars.insert("pi".into(), std::f64::consts::PI);
-        ctx.vars.insert("e".into(), std::f64::consts::E);
-        ctx.vars.insert("phi".into(), 1.618_033_988_749_895);
+        // Named constants (over-writable, like ns-eel).
+        ctx.set("pi", std::f64::consts::PI);
+        ctx.set("e", std::f64::consts::E);
+        ctx.set("phi", 1.618_033_988_749_895);
         ctx
     }
 
-    /// Seed the `rand()` generator deterministically (useful for tests).
+    /// Get or create the slot index for a (case-insensitive) variable name.
+    pub(crate) fn intern(&mut self, name: &str) -> usize {
+        let lower = name.to_ascii_lowercase();
+        if let Some(&i) = self.names.get(&lower) {
+            return i;
+        }
+        let i = self.slots.len();
+        self.slots.push(0.0);
+        self.names.insert(lower, i);
+        i
+    }
+
+    /// A reusable handle to a variable's slot, for fast set/get in hot loops.
+    pub fn variable_slot(&mut self, name: &str) -> VarSlot {
+        VarSlot(self.intern(name))
+    }
+
     pub fn seed(&mut self, seed: u64) {
         self.rng = seed | 1;
     }
 
     pub fn set(&mut self, name: &str, value: f64) {
-        self.vars.insert(name.to_ascii_lowercase(), value);
+        let i = self.intern(name);
+        self.slots[i] = value;
     }
 
     pub fn get(&self, name: &str) -> f64 {
-        self.vars.get(&name.to_ascii_lowercase()).copied().unwrap_or(0.0)
+        self.names.get(&name.to_ascii_lowercase()).map(|&i| self.slots[i]).unwrap_or(0.0)
+    }
+
+    /// Fast set via a pre-resolved slot handle.
+    #[inline]
+    pub fn set_slot(&mut self, slot: VarSlot, value: f64) {
+        self.slots[slot.0] = value;
+    }
+
+    /// Fast get via a pre-resolved slot handle.
+    #[inline]
+    pub fn get_slot(&self, slot: VarSlot) -> f64 {
+        self.slots[slot.0]
     }
 
     fn next_rand(&mut self) -> f64 {
-        // xorshift64*
         let mut x = self.rng;
         x ^= x >> 12;
         x ^= x << 25;
         x ^= x >> 27;
         self.rng = x;
         let v = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
-        // Top 53 bits → uniform f64 in [0, 1).
         (v >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    /// Evaluate a program against this context, returning the last value.
-    pub fn run(&mut self, program: &Expr) -> Result<f64, EvalError> {
-        self.eval(program)
+    /// Execute a compiled program, returning the value of the last statement.
+    pub(crate) fn run(&mut self, program: &Node) -> Result<f64, EvalError> {
+        self.execute(program)
     }
 
-    fn eval(&mut self, e: &Expr) -> Result<f64, EvalError> {
-        match e {
-            Expr::Num(n) => Ok(*n),
-            Expr::Var(name) => Ok(self.vars.get(name).copied().unwrap_or(0.0)),
-            Expr::Mem { base, offset } => {
+    fn execute(&mut self, n: &Node) -> Result<f64, EvalError> {
+        match n {
+            Node::Num(v) => Ok(*v),
+            Node::Var(i) => Ok(self.slots[*i]),
+            Node::Mem(base, offset) => {
                 let addr = self.mem_addr(base, offset.as_deref())?;
                 Ok(self.megabuf.get(&addr).copied().unwrap_or(0.0))
             }
-            Expr::Unary(op, x) => {
-                let v = self.eval(x)?;
+            Node::Unary(op, x) => {
+                let v = self.execute(x)?;
                 Ok(match op {
                     UnOp::Neg => -v,
                     UnOp::Not => bool_f(!truthy(v)),
                 })
             }
-            Expr::Binary(op, a, b) => self.eval_binary(*op, a, b),
-            Expr::Assign { target, op, value } => self.eval_assign(target, *op, value),
-            Expr::Block(stmts) => {
+            Node::Binary(op, a, b) => self.eval_binary(*op, a, b),
+            Node::Assign(target, op, value) => self.eval_assign(target, *op, value),
+            Node::Block(stmts) => {
                 let mut last = 0.0;
                 for s in stmts {
-                    last = self.eval(s)?;
+                    last = self.execute(s)?;
                 }
                 Ok(last)
             }
-            Expr::Call(name, args) => self.eval_call(name, args),
+            Node::Call(op, args) => self.eval_call(op, args),
         }
     }
 
-    fn eval_binary(&mut self, op: BinOp, a: &Expr, b: &Expr) -> Result<f64, EvalError> {
-        // Short-circuit logical operators.
+    fn eval_binary(&mut self, op: BinOp, a: &Node, b: &Node) -> Result<f64, EvalError> {
         match op {
-            BinOp::And => {
-                return Ok(bool_f(truthy(self.eval(a)?) && truthy(self.eval(b)?)));
-            }
+            BinOp::And => Ok(bool_f(truthy(self.execute(a)?) && truthy(self.execute(b)?))),
             BinOp::Or => {
-                let av = self.eval(a)?;
-                if truthy(av) {
-                    // Still must not evaluate b — but eval b only matters for
-                    // side effects; ns-eel short-circuits, so we do too.
-                    return Ok(1.0);
+                if truthy(self.execute(a)?) {
+                    Ok(1.0)
+                } else {
+                    Ok(bool_f(truthy(self.execute(b)?)))
                 }
-                return Ok(bool_f(truthy(self.eval(b)?)));
             }
-            _ => {}
+            _ => {
+                let x = self.execute(a)?;
+                let y = self.execute(b)?;
+                Ok(apply_binop(op, x, y))
+            }
         }
-
-        let x = self.eval(a)?;
-        let y = self.eval(b)?;
-        Ok(apply_binop(op, x, y))
     }
 
-    fn eval_assign(
-        &mut self,
-        target: &Expr,
-        op: Option<BinOp>,
-        value: &Expr,
-    ) -> Result<f64, EvalError> {
-        let rhs = self.eval(value)?;
+    fn eval_assign(&mut self, target: &Target, op: Option<BinOp>, value: &Node) -> Result<f64, EvalError> {
+        let rhs = self.execute(value)?;
         match target {
-            Expr::Var(name) => {
+            Target::Var(i) => {
                 let new = match op {
                     None => rhs,
-                    Some(o) => {
-                        let cur = self.vars.get(name).copied().unwrap_or(0.0);
-                        apply_binop(o, cur, rhs)
-                    }
+                    Some(o) => apply_binop(o, self.slots[*i], rhs),
                 };
-                self.vars.insert(name.clone(), new);
+                self.slots[*i] = new;
                 Ok(new)
             }
-            Expr::Mem { base, offset } => {
+            Target::Mem(base, offset) => {
                 let addr = self.mem_addr(base, offset.as_deref())?;
                 let new = match op {
                     None => rhs,
-                    Some(o) => {
-                        let cur = self.megabuf.get(&addr).copied().unwrap_or(0.0);
-                        apply_binop(o, cur, rhs)
-                    }
+                    Some(o) => apply_binop(o, self.megabuf.get(&addr).copied().unwrap_or(0.0), rhs),
                 };
                 self.megabuf.insert(addr, new);
                 Ok(new)
             }
-            // `megabuf(i) = v` / `gmegabuf(i) = v` function-call lvalue forms.
-            Expr::Call(name, args) if args.len() == 1 => {
-                let idx = self.eval(&args[0])? as i64;
-                let is_global = name == "gmegabuf";
+            Target::MegaCall(global, idx) => {
+                let i = self.execute(idx)? as i64;
+                let cur = if *global {
+                    self.gmegabuf.get(&i).copied().unwrap_or(0.0)
+                } else {
+                    self.megabuf.get(&i).copied().unwrap_or(0.0)
+                };
                 let new = match op {
                     None => rhs,
-                    Some(o) => {
-                        let cur = if is_global {
-                            self.gmegabuf.get(&idx).copied().unwrap_or(0.0)
-                        } else {
-                            self.megabuf.get(&idx).copied().unwrap_or(0.0)
-                        };
-                        apply_binop(o, cur, rhs)
-                    }
+                    Some(o) => apply_binop(o, cur, rhs),
                 };
-                if is_global {
-                    self.gmegabuf.insert(idx, new);
+                if *global {
+                    self.gmegabuf.insert(i, new);
                 } else {
-                    self.megabuf.insert(idx, new);
+                    self.megabuf.insert(i, new);
                 }
                 Ok(new)
             }
-            // Parser guarantees only l-values reach here.
-            _ => unreachable!("non-lvalue assignment target"),
         }
     }
 
-    fn mem_addr(&mut self, base: &Expr, offset: Option<&Expr>) -> Result<i64, EvalError> {
-        let b = self.eval(base)?;
+    fn mem_addr(&mut self, base: &Node, offset: Option<&Node>) -> Result<i64, EvalError> {
+        let b = self.execute(base)?;
         let o = match offset {
-            Some(e) => self.eval(e)?,
+            Some(e) => self.execute(e)?,
             None => 0.0,
         };
         Ok((b + o) as i64)
     }
 
-    fn eval_call(&mut self, name: &str, args: &[Expr]) -> Result<f64, EvalError> {
-        // ---- Special forms: control flow with lazy argument evaluation. ----
-        match name {
-            "if" => {
-                expect(name, args, 3)?;
-                return if truthy(self.eval(&args[0])?) {
-                    self.eval(&args[1])
+    fn eval_call(&mut self, op: &CallOp, args: &[Node]) -> Result<f64, EvalError> {
+        use CallOp::*;
+
+        // ---- Special forms: lazy argument evaluation. ----
+        match op {
+            If => {
+                arity(op, args, 3)?;
+                return if truthy(self.execute(&args[0])?) {
+                    self.execute(&args[1])
                 } else {
-                    self.eval(&args[2])
+                    self.execute(&args[2])
                 };
             }
-            "loop" => {
-                expect(name, args, 2)?;
-                let n = self.eval(&args[0])?;
-                let count = (n.max(0.0) as u64).min(MAX_ITERS);
+            Loop => {
+                arity(op, args, 2)?;
+                let count = (self.execute(&args[0])?.max(0.0) as u64).min(MAX_ITERS);
                 let mut last = 0.0;
                 for _ in 0..count {
-                    last = self.eval(&args[1])?;
+                    last = self.execute(&args[1])?;
                 }
                 return Ok(last);
             }
-            "while" => {
-                expect(name, args, 1)?;
+            While => {
+                arity(op, args, 1)?;
                 let mut last = 0.0;
                 let mut iters = 0u64;
                 loop {
-                    let v = self.eval(&args[0])?;
+                    let v = self.execute(&args[0])?;
                     if !truthy(v) {
                         break;
                     }
@@ -259,126 +271,134 @@ impl Context {
                 }
                 return Ok(last);
             }
-            "exec2" => {
-                expect(name, args, 2)?;
-                self.eval(&args[0])?;
-                return self.eval(&args[1]);
+            Exec2 => {
+                arity(op, args, 2)?;
+                self.execute(&args[0])?;
+                return self.execute(&args[1]);
             }
-            "exec3" => {
-                expect(name, args, 3)?;
-                self.eval(&args[0])?;
-                self.eval(&args[1])?;
-                return self.eval(&args[2]);
+            Exec3 => {
+                arity(op, args, 3)?;
+                self.execute(&args[0])?;
+                self.execute(&args[1])?;
+                return self.execute(&args[2]);
             }
-            // ns-eel `assign(dest, value)`: write `value` into the lvalue `dest`
-            // and return it. `dest` is a variable or megabuf/gmegabuf cell.
-            "assign" => {
-                expect(name, args, 2)?;
+            Assign => {
+                arity(op, args, 2)?;
                 return match &args[0] {
-                    Expr::Var(_) | Expr::Mem { .. } => self.eval_assign(&args[0], None, &args[1]),
-                    Expr::Call(n, a) if a.len() == 1 && (n == "megabuf" || n == "gmegabuf") => {
-                        self.eval_assign(&args[0], None, &args[1])
+                    Node::Var(i) => {
+                        let v = self.execute(&args[1])?;
+                        self.slots[*i] = v;
+                        Ok(v)
                     }
-                    // Not an l-value: just evaluate for its side effects/value.
-                    _ => self.eval(&args[1]),
+                    Node::Mem(base, offset) => {
+                        let addr = self.mem_addr(base, offset.as_deref())?;
+                        let v = self.execute(&args[1])?;
+                        self.megabuf.insert(addr, v);
+                        Ok(v)
+                    }
+                    Node::Call(CallOp::Megabuf, a) if a.len() == 1 => {
+                        let idx = self.execute(&a[0])? as i64;
+                        let v = self.execute(&args[1])?;
+                        self.megabuf.insert(idx, v);
+                        Ok(v)
+                    }
+                    Node::Call(CallOp::Gmegabuf, a) if a.len() == 1 => {
+                        let idx = self.execute(&a[0])? as i64;
+                        let v = self.execute(&args[1])?;
+                        self.gmegabuf.insert(idx, v);
+                        Ok(v)
+                    }
+                    _ => self.execute(&args[1]),
                 };
             }
             _ => {}
         }
 
         // ---- Strict functions: evaluate all arguments first. ----
-        let a: Vec<f64> = args.iter().map(|e| self.eval(e)).collect::<Result<_, _>>()?;
-        let n = a.len();
+        // All built-ins take <= 2 args, so evaluate into a stack buffer instead
+        // of allocating a Vec per call (the hot path runs thousands of times
+        // per frame).
+        let len = args.len();
+        let mut buf = [0.0f64; 4];
+        for (i, arg) in args.iter().enumerate().take(4) {
+            buf[i] = self.execute(arg)?;
+        }
+        let a = &buf;
 
-        macro_rules! arity {
-            ($k:expr) => {
-                if n != $k {
-                    return Err(EvalError::Arity {
-                        name: name.into(),
-                        expected: stringify!($k),
-                        got: n,
-                    });
+        macro_rules! arity1 {
+            ($name:expr, $k:expr) => {
+                if len != $k {
+                    return Err(EvalError::Arity { name: $name, expected: stringify!($k), got: len });
                 }
             };
         }
 
-        let v = match name {
-            // Trig
-            "sin" => { arity!(1); a[0].sin() }
-            "cos" => { arity!(1); a[0].cos() }
-            "tan" => { arity!(1); a[0].tan() }
-            "asin" => { arity!(1); a[0].asin() }
-            "acos" => { arity!(1); a[0].acos() }
-            "atan" => { arity!(1); a[0].atan() }
-            "atan2" => { arity!(2); a[0].atan2(a[1]) }
-            "sinh" => { arity!(1); a[0].sinh() }
-            "cosh" => { arity!(1); a[0].cosh() }
-            "tanh" => { arity!(1); a[0].tanh() }
-
-            // Powers / roots / exp / log
-            "sqrt" => { arity!(1); if a[0] < 0.0 { 0.0 } else { a[0].sqrt() } }
-            "sqr" => { arity!(1); a[0] * a[0] }
-            "invsqrt" => { arity!(1); if a[0] <= 0.0 { 0.0 } else { 1.0 / a[0].sqrt() } }
-            "pow" => { arity!(2); a[0].powf(a[1]) }
-            "exp" => { arity!(1); a[0].exp() }
-            "log" => { arity!(1); a[0].ln() }
-            "log10" => { arity!(1); a[0].log10() }
-
-            // Rounding / sign
-            "abs" => { arity!(1); a[0].abs() }
-            "floor" => { arity!(1); a[0].floor() }
-            "ceil" => { arity!(1); a[0].ceil() }
-            "int" => { arity!(1); a[0].trunc() }
-            "sign" => { arity!(1); if a[0] > 0.0 { 1.0 } else if a[0] < 0.0 { -1.0 } else { 0.0 } }
-
-            // Min / max / clamp-ish
-            "min" => { arity!(2); a[0].min(a[1]) }
-            "max" => { arity!(2); a[0].max(a[1]) }
-
-            // Modulo (matches `%`: zero divisor -> 0)
-            "fmod" => { arity!(2); safe_mod(a[0], a[1]) }
-
-            // Boolean helpers (eager — distinct from && / ||)
-            "band" => { arity!(2); bool_f(truthy(a[0]) && truthy(a[1])) }
-            "bor" => { arity!(2); bool_f(truthy(a[0]) || truthy(a[1])) }
-            "bnot" => { arity!(1); bool_f(!truthy(a[0])) }
-            "equal" => { arity!(2); bool_f((a[0] - a[1]).abs() < EPS) }
-            "above" => { arity!(2); bool_f(a[0] > a[1]) }
-            "below" => { arity!(2); bool_f(a[0] < a[1]) }
-
-            // Misc
-            "sigmoid" => { arity!(2); 1.0 / (1.0 + (-a[0] * a[1]).exp()) }
-            "rand" => {
-                arity!(1);
-                let m = a[0];
-                if m <= 0.0 { 0.0 } else { (self.next_rand() * m).floor() }
+        let v = match op {
+            Sin => { arity1!("sin", 1); a[0].sin() }
+            Cos => { arity1!("cos", 1); a[0].cos() }
+            Tan => { arity1!("tan", 1); a[0].tan() }
+            Asin => { arity1!("asin", 1); a[0].asin() }
+            Acos => { arity1!("acos", 1); a[0].acos() }
+            Atan => { arity1!("atan", 1); a[0].atan() }
+            Atan2 => { arity1!("atan2", 2); a[0].atan2(a[1]) }
+            Sinh => { arity1!("sinh", 1); a[0].sinh() }
+            Cosh => { arity1!("cosh", 1); a[0].cosh() }
+            Tanh => { arity1!("tanh", 1); a[0].tanh() }
+            Sqrt => { arity1!("sqrt", 1); if a[0] < 0.0 { 0.0 } else { a[0].sqrt() } }
+            Sqr => { arity1!("sqr", 1); a[0] * a[0] }
+            Invsqrt => { arity1!("invsqrt", 1); if a[0] <= 0.0 { 0.0 } else { 1.0 / a[0].sqrt() } }
+            Pow => { arity1!("pow", 2); a[0].powf(a[1]) }
+            Exp => { arity1!("exp", 1); a[0].exp() }
+            Log => { arity1!("log", 1); a[0].ln() }
+            Log10 => { arity1!("log10", 1); a[0].log10() }
+            Abs => { arity1!("abs", 1); a[0].abs() }
+            Floor => { arity1!("floor", 1); a[0].floor() }
+            Ceil => { arity1!("ceil", 1); a[0].ceil() }
+            Int => { arity1!("int", 1); a[0].trunc() }
+            Sign => { arity1!("sign", 1); if a[0] > 0.0 { 1.0 } else if a[0] < 0.0 { -1.0 } else { 0.0 } }
+            Min => { arity1!("min", 2); a[0].min(a[1]) }
+            Max => { arity1!("max", 2); a[0].max(a[1]) }
+            Fmod => { arity1!("fmod", 2); safe_mod(a[0], a[1]) }
+            Band => { arity1!("band", 2); bool_f(truthy(a[0]) && truthy(a[1])) }
+            Bor => { arity1!("bor", 2); bool_f(truthy(a[0]) || truthy(a[1])) }
+            Bnot => { arity1!("bnot", 1); bool_f(!truthy(a[0])) }
+            Equal => { arity1!("equal", 2); bool_f((a[0] - a[1]).abs() < EPS) }
+            Above => { arity1!("above", 2); bool_f(a[0] > a[1]) }
+            Below => { arity1!("below", 2); bool_f(a[0] < a[1]) }
+            Sigmoid => { arity1!("sigmoid", 2); 1.0 / (1.0 + (-a[0] * a[1]).exp()) }
+            Rand => {
+                arity1!("rand", 1);
+                if a[0] <= 0.0 { 0.0 } else { (self.next_rand() * a[0]).floor() }
             }
-
-            // Explicit memory accessors.
-            "megabuf" => { arity!(1); self.megabuf.get(&(a[0] as i64)).copied().unwrap_or(0.0) }
-            "gmegabuf" => { arity!(1); self.gmegabuf.get(&(a[0] as i64)).copied().unwrap_or(0.0) }
-
-            other => return Err(EvalError::UnknownFunction(other.into())),
+            Megabuf => { arity1!("megabuf", 1); self.megabuf.get(&(a[0] as i64)).copied().unwrap_or(0.0) }
+            Gmegabuf => { arity1!("gmegabuf", 1); self.gmegabuf.get(&(a[0] as i64)).copied().unwrap_or(0.0) }
+            Unknown(name) => return Err(EvalError::UnknownFunction(name.clone())),
+            If | Loop | While | Exec2 | Exec3 | Assign => unreachable!("special forms handled above"),
         };
         Ok(v)
     }
 }
 
-fn expect(name: &str, args: &[Expr], k: usize) -> Result<(), EvalError> {
+fn arity(op: &CallOp, args: &[Node], k: usize) -> Result<(), EvalError> {
     if args.len() == k {
-        Ok(())
-    } else {
-        Err(EvalError::Arity {
-            name: name.into(),
-            expected: match k {
-                1 => "1",
-                2 => "2",
-                3 => "3",
-                _ => "N",
-            },
-            got: args.len(),
-        })
+        return Ok(());
     }
+    let name = match op {
+        CallOp::If => "if",
+        CallOp::Loop => "loop",
+        CallOp::While => "while",
+        CallOp::Exec2 => "exec2",
+        CallOp::Exec3 => "exec3",
+        CallOp::Assign => "assign",
+        _ => "function",
+    };
+    let expected = match k {
+        1 => "1",
+        2 => "2",
+        3 => "3",
+        _ => "N",
+    };
+    Err(EvalError::Arity { name, expected, got: args.len() })
 }
 
 fn bool_f(b: bool) -> f64 {

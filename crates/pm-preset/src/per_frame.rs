@@ -19,10 +19,11 @@ pub struct PerFrameContext {
 impl PerFrameContext {
     /// Compile the per-frame init and per-frame code from the preset state.
     pub fn new(state: &PresetState) -> Result<Self, PresetError> {
-        let init_program = compile_opt(&state.per_frame_init_code, "per_frame_init")?;
-        let frame_program = compile_opt(&state.per_frame_code, "per_frame")?;
+        let mut ctx = Context::new();
+        let init_program = compile_opt(&mut ctx, &state.per_frame_init_code, "per_frame_init")?;
+        let frame_program = compile_opt(&mut ctx, &state.per_frame_code, "per_frame")?;
         Ok(PerFrameContext {
-            ctx: Context::new(),
+            ctx,
             init_program,
             frame_program,
             q_after_init: [0.0; Q_VAR_COUNT],
@@ -233,9 +234,9 @@ impl PerFrameContext {
     }
 }
 
-fn compile_opt(code: &str, block: &'static str) -> Result<Option<Program>, PresetError> {
+fn compile_opt(ctx: &mut Context, code: &str, block: &'static str) -> Result<Option<Program>, PresetError> {
     if code.trim().is_empty() {
         return Ok(None);
     }
-    Program::compile(code).map(Some).map_err(|e| PresetError::compile(block, e))
+    Program::compile(ctx, code).map(Some).map_err(|e| PresetError::compile(block, e))
 }

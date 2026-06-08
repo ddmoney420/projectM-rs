@@ -36,14 +36,18 @@ impl CustomWaveform {
         if !state.custom_waveforms[index].enabled {
             return Ok(None);
         }
-        let init_prog = compile_opt(&state.custom_wave_init_code[index], "wave_init")?;
-        let frame_prog = compile_opt(&state.custom_wave_per_frame_code[index], "wave_per_frame")?;
-        let point_prog = compile_opt(&state.custom_wave_per_point_code[index], "wave_per_point")?;
+        let mut per_frame = Context::new();
+        let mut per_point = Context::new();
+        let init_prog = compile_opt(&mut per_frame, &state.custom_wave_init_code[index], "wave_init")?;
+        let frame_prog =
+            compile_opt(&mut per_frame, &state.custom_wave_per_frame_code[index], "wave_per_frame")?;
+        let point_prog =
+            compile_opt(&mut per_point, &state.custom_wave_per_point_code[index], "wave_per_point")?;
 
         let mut wf = CustomWaveform {
             index,
-            per_frame: Context::new(),
-            per_point: Context::new(),
+            per_frame,
+            per_point,
             init_prog,
             frame_prog,
             point_prog,
@@ -273,9 +277,9 @@ fn smooth_wave(points: &[[f32; 2]], colors: &[[f32; 4]]) -> (Vec<[f32; 2]>, Vec<
     (out_p, out_c)
 }
 
-fn compile_opt(code: &str, block: &'static str) -> Result<Option<Program>, PresetError> {
+fn compile_opt(ctx: &mut Context, code: &str, block: &'static str) -> Result<Option<Program>, PresetError> {
     if code.trim().is_empty() {
         return Ok(None);
     }
-    Program::compile(code).map(Some).map_err(|e| PresetError::compile(block, e))
+    Program::compile(ctx, code).map(Some).map_err(|e| PresetError::compile(block, e))
 }

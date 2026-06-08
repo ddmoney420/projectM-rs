@@ -7,7 +7,47 @@
 
 use crate::error::PresetError;
 use crate::state::{PresetState, Q_VAR_COUNT};
-use pm_eval::{Context, Program};
+use pm_eval::{Context, Program, VarSlot};
+
+/// Cached slot handles for the variables set/read every vertex, so the hot loop
+/// avoids name lookups entirely.
+struct Slots {
+    zoom: VarSlot,
+    zoomexp: VarSlot,
+    rot: VarSlot,
+    warp: VarSlot,
+    cx: VarSlot,
+    cy: VarSlot,
+    dx: VarSlot,
+    dy: VarSlot,
+    sx: VarSlot,
+    sy: VarSlot,
+    x: VarSlot,
+    y: VarSlot,
+    rad: VarSlot,
+    ang: VarSlot,
+}
+
+impl Slots {
+    fn resolve(ctx: &mut Context) -> Self {
+        Slots {
+            zoom: ctx.variable_slot("zoom"),
+            zoomexp: ctx.variable_slot("zoomexp"),
+            rot: ctx.variable_slot("rot"),
+            warp: ctx.variable_slot("warp"),
+            cx: ctx.variable_slot("cx"),
+            cy: ctx.variable_slot("cy"),
+            dx: ctx.variable_slot("dx"),
+            dy: ctx.variable_slot("dy"),
+            sx: ctx.variable_slot("sx"),
+            sy: ctx.variable_slot("sy"),
+            x: ctx.variable_slot("x"),
+            y: ctx.variable_slot("y"),
+            rad: ctx.variable_slot("rad"),
+            ang: ctx.variable_slot("ang"),
+        }
+    }
+}
 
 /// Per-vertex motion outputs that drive the mesh warp.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -27,16 +67,19 @@ pub struct PerPixelOutput {
 pub struct PerPixelContext {
     ctx: Context,
     program: Option<Program>,
+    slots: Slots,
 }
 
 impl PerPixelContext {
     pub fn new(state: &PresetState) -> Result<Self, PresetError> {
+        let mut ctx = Context::new();
         let program = if state.per_pixel_code.trim().is_empty() {
             None
         } else {
-            Some(Program::compile(&state.per_pixel_code).map_err(|e| PresetError::compile("per_pixel", e))?)
+            Some(Program::compile(&mut ctx, &state.per_pixel_code).map_err(|e| PresetError::compile("per_pixel", e))?)
         };
-        Ok(PerPixelContext { ctx: Context::new(), program })
+        let slots = Slots::resolve(&mut ctx);
+        Ok(PerPixelContext { ctx, program, slots })
     }
 
     /// True if the preset has any per-pixel code (otherwise the mesh is uniform).
@@ -80,39 +123,40 @@ impl PerPixelContext {
         rad: f64,
         ang: f64,
     ) -> Result<PerPixelOutput, PresetError> {
+        let s = &self.slots;
         let c = &mut self.ctx;
         // Motion values reload from the per-frame results for every vertex.
-        c.set("zoom", state.zoom as f64);
-        c.set("zoomexp", state.zoom_exponent as f64);
-        c.set("rot", state.rot as f64);
-        c.set("warp", state.warp_amount as f64);
-        c.set("cx", state.rot_cx as f64);
-        c.set("cy", state.rot_cy as f64);
-        c.set("dx", state.x_push as f64);
-        c.set("dy", state.y_push as f64);
-        c.set("sx", state.stretch_x as f64);
-        c.set("sy", state.stretch_y as f64);
+        c.set_slot(s.zoom, state.zoom as f64);
+        c.set_slot(s.zoomexp, state.zoom_exponent as f64);
+        c.set_slot(s.rot, state.rot as f64);
+        c.set_slot(s.warp, state.warp_amount as f64);
+        c.set_slot(s.cx, state.rot_cx as f64);
+        c.set_slot(s.cy, state.rot_cy as f64);
+        c.set_slot(s.dx, state.x_push as f64);
+        c.set_slot(s.dy, state.y_push as f64);
+        c.set_slot(s.sx, state.stretch_x as f64);
+        c.set_slot(s.sy, state.stretch_y as f64);
         // Per-vertex position.
-        c.set("x", x);
-        c.set("y", y);
-        c.set("rad", rad);
-        c.set("ang", ang);
+        c.set_slot(s.x, x);
+        c.set_slot(s.y, y);
+        c.set_slot(s.rad, rad);
+        c.set_slot(s.ang, ang);
 
         if let Some(prog) = &self.program {
             prog.run(c).map_err(|e| PresetError::eval("per_pixel", e))?;
         }
 
         Ok(PerPixelOutput {
-            zoom: c.get("zoom"),
-            zoom_exponent: c.get("zoomexp"),
-            rot: c.get("rot"),
-            warp: c.get("warp"),
-            cx: c.get("cx"),
-            cy: c.get("cy"),
-            dx: c.get("dx"),
-            dy: c.get("dy"),
-            sx: c.get("sx"),
-            sy: c.get("sy"),
+            zoom: c.get_slot(s.zoom),
+            zoom_exponent: c.get_slot(s.zoomexp),
+            rot: c.get_slot(s.rot),
+            warp: c.get_slot(s.warp),
+            cx: c.get_slot(s.cx),
+            cy: c.get_slot(s.cy),
+            dx: c.get_slot(s.dx),
+            dy: c.get_slot(s.dy),
+            sx: c.get_slot(s.sx),
+            sy: c.get_slot(s.sy),
         })
     }
 }
