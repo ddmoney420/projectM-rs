@@ -8,3 +8,5 @@ Cargo.lock.bak
 
 # Generated screenshots from the render examples.
 *.png
+# …but the renderer-regression baseline fixtures are committed.
+!/crates/pm-core/tests/snapshots/*.png

@@ -141,10 +141,29 @@ optimization was warranted by the data. The per-pixel eval is the thing to
 watch if much higher resolutions or weak integrated GPUs become targets.
 On-device frame timing is available live with `PM_PERF=1 cargo run -p pm-app`.
 
+## Regression snapshots
+
+`pm-core`'s `snapshot` example renders a fixed set of presets (simple warp,
+waveform-heavy, custom shape, feedback-textured shape, motion vectors, and a
+crossfade captured at exactly 50%) with fixed inputs — fixed 256×256 canvas,
+deterministic synthetic audio, a fixed frame sequence — and diffs them against
+committed baseline PNGs in `crates/pm-core/tests/snapshots/`. This catches
+visual regressions in *our own* renderer; it is **not** C++/projectM parity.
+
+- `cargo run -p pm-core --example snapshot --release` — check (exit 1 on
+  mismatch; writes actual + amplified-diff PNGs to `target/snapshot-out/`).
+- `... -- --update` (or `PM_SNAPSHOT_UPDATE=1`) — regenerate baselines
+  (intentional, never automatic).
+- Comparison uses a small per-channel tolerance and reports max/mean delta +
+  changed-pixel count. It's an example, not a `cargo test`, so the default
+  suite stays deterministic and GPU-independent; it skips cleanly with no GPU.
+  The renderer is bit-exact run-to-run on a given GPU (observed 0 delta).
+
 ## Parity strategy
 
 Each crate is validated against the C++ original before moving on:
 - `pm-eval`: differential tests vs. ns-eel expected values (see crate tests).
 - `pm-audio`: synthetic-signal FFT/loudness snapshots.
 - `pm-render`/`pm-preset`: per-frame pixel-diff of reference presets vs. C++
-  projectM screenshots (golden-image tests) within a tolerance.
+  projectM screenshots (golden-image tests) within a tolerance — still the main
+  outstanding parity work (distinct from the self-baseline snapshots above).
