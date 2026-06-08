@@ -27,6 +27,9 @@ pub fn generate(items: &[Item]) -> String {
 struct Generator {
     globals: HashMap<String, Type>,
     locals: HashMap<String, Type>,
+    /// User-defined function signatures `(return type, parameter types)`, so
+    /// calls infer correctly and arguments coerce to the declared param types.
+    functions: HashMap<String, (Type, Vec<Type>)>,
     out: String,
     temp: usize,
 }
@@ -34,12 +37,20 @@ struct Generator {
 impl Generator {
     fn new(items: &[Item]) -> Self {
         let mut globals = HashMap::new();
+        let mut functions = HashMap::new();
         for item in items {
-            if let Item::Global { ty, name, .. } = item {
-                globals.insert(name.clone(), *ty);
+            match item {
+                Item::Global { ty, name, .. } => {
+                    globals.insert(name.clone(), *ty);
+                }
+                Item::Function(f) => {
+                    let params = f.params.iter().map(|p| p.ty).collect();
+                    functions.insert(f.name.clone(), (f.ret, params));
+                }
+                _ => {}
             }
         }
-        Generator { globals, locals: HashMap::new(), out: String::new(), temp: 0 }
+        Generator { globals, locals: HashMap::new(), functions, out: String::new(), temp: 0 }
     }
 
     fn run(&mut self, items: &[Item]) {
@@ -468,6 +479,19 @@ impl Generator {
             }
             _ => {}
         }
+        // A user-defined helper: coerce each argument to its declared parameter
+        // type (HLSL broadcasts e.g. a scalar `0.5` to a `float2` param).
+        if let Some((_, params)) = self.functions.get(name) {
+            if params.len() == args.len() {
+                let parts = args
+                    .iter()
+                    .zip(params)
+                    .map(|(a, &pty)| self.emit_broadcast(a, pty))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return format!("{name}({parts})");
+            }
+        }
         // Default: pass through with float-formatted literals.
         self.simple_call(&lower, args)
     }
@@ -513,6 +537,10 @@ impl Generator {
     }
 
     fn call_type(&self, name: &str, args: &[Expr]) -> Type {
+        // A user-defined helper's declared return type wins over the heuristic.
+        if let Some((ret, _)) = self.functions.get(name) {
+            return *ret;
+        }
         match name.to_ascii_lowercase().as_str() {
             "dot" | "length" | "distance" | "determinant" => Type::Float,
             "tex2d" | "tex3d" | "tex2dlod" | "tex2dbias" => Type::Float4,

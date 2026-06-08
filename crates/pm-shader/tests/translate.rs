@@ -223,3 +223,23 @@ fn lerp_broadcasts_to_widest_and_float_increment() {
     validate_wgsl(&wgsl).unwrap();
     assert!(wgsl.contains("n = (n + 1.0)") || wgsl.contains("n = n + 1.0"), "float ++ lowered to add");
 }
+
+#[test]
+fn user_function_signature_inference_and_arg_coercion() {
+    // A user-defined helper's return type drives inference of its call, and
+    // arguments coerce to the declared parameter types (HLSL broadcasts a
+    // scalar `0.5` to a `float2` parameter).
+    let src = r#"
+        float2 polar(float2 domain, float2 center) {
+            return domain - center;
+        }
+        void PS(float2 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            float2 p = polar(_uv, 0.5) * float2(0.5, 1.0);
+            _return_value = float4(p, 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    // The scalar arg is broadcast to the vec2 parameter.
+    assert!(wgsl.contains("polar(_uv, vec2<f32>(0.5))"), "scalar arg broadcast to vec2 param");
+}
