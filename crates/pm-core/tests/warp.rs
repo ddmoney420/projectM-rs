@@ -154,3 +154,35 @@ wave_b=1.0
     let lit = out.chunks_exact(4).filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 60).count();
     assert!(lit > 50, "waveform should inject visible content, only {lit} lit pixels");
 }
+
+#[test]
+fn custom_warp_shader_compiles_and_renders() {
+    let Ok(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let milk = "\
+MILKDROP_PRESET_VERSION=201
+fDecay=0.96
+nWaveMode=0
+bAdditiveWaves=1
+fWaveAlpha=1.0
+fWaveScale=2.0
+warp_1=`shader_body
+warp_2=`{
+warp_3=`ret = tex2D(sampler_main, uv).xyz;
+warp_4=`ret *= 0.98;
+warp_5=`ret.g = ret.g * (1.0 + 0.2*treb);
+warp_6=`}
+";
+    let preset = Preset::load(milk).unwrap();
+    let mut engine = WarpEngine::new(&ctx, preset, 128, 128);
+    assert!(engine.uses_custom_warp(), "custom warp shader should compile to valid WGSL");
+
+    for frame in 0..12 {
+        engine.render_frame(&ctx, frame as f32 / 30.0, frame, loud_audio()).unwrap();
+    }
+    let out = read_rgba8(&ctx, engine.display_texture());
+    let lit = out.chunks_exact(4).filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 30).count();
+    assert!(lit > 50, "custom warp + waveform should produce visible content");
+}

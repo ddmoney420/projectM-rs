@@ -35,6 +35,45 @@ pub fn to_wgsl(body: &str, kind: ShaderKind) -> Result<TranslatedShader, ShaderE
     Ok(TranslatedShader { wgsl, textures })
 }
 
+/// The translated warp shader's core, for the renderer to assemble into a
+/// mesh-vertex pipeline (the warp fragment runs over the warp mesh, not
+/// fullscreen, so the renderer supplies the vertex stage and bindings).
+pub struct WarpShaderParts {
+    /// `var<private>` uniform globals + the `PS` function (no bindings/entry).
+    pub ps_wgsl: String,
+    /// Textures the shader samples, in first-reference order.
+    pub textures: Vec<String>,
+}
+
+/// Translate a preset *warp* shader to its PS core (for mesh rendering).
+pub fn warp_shader_parts(body: &str) -> Result<WarpShaderParts, ShaderError> {
+    let wrapped = wrap(body, ShaderKind::Warp)?;
+    let translated = pm_shader::translate(&wrapped)?;
+    let textures = find_textures(&translated);
+    Ok(WarpShaderParts { ps_wgsl: translated, textures })
+}
+
+/// The `MdUniforms` WGSL struct definition (no `@group`/`@binding`).
+pub fn md_uniforms_struct() -> String {
+    let mut s = String::from("struct MdUniforms {\n");
+    for (_, field, ty) in uniforms() {
+        s.push_str(&format!("    {field}: {ty},\n"));
+    }
+    s.push_str("}\n");
+    s
+}
+
+/// The `load_uniforms()` WGSL that copies the `md` block into the private
+/// globals the PS code reads.
+pub fn md_load_uniforms() -> String {
+    let mut s = String::from("fn load_uniforms() {\n");
+    for (var, field, _) in uniforms() {
+        s.push_str(&format!("    {var} = md.{field};\n"));
+    }
+    s.push_str("}\n");
+    s
+}
+
 /// The fixed list of Milkdrop shader uniforms: `(private var, struct field,
 /// wgsl type)`. The same layout is uploaded by the renderer every frame.
 fn uniforms() -> Vec<(String, String, &'static str)> {

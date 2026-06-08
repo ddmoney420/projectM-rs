@@ -53,19 +53,25 @@ preset format with a `.milk` importer/converter.
    **Corpus shader compat: ~37% composite / ~18% warp produce valid WGSL** — the
    remaining naga rejections (type-inference edge cases, matrix `mul`, intrinsic
    tail) are the main hardening work, tracked by the `shader_report` example.
-   **Custom composite shaders now render** (`pm-core::PresetComposite`): the
-   translated WGSL is wired with a per-frame `MdUniforms` buffer (`_cN`/`q`/rot)
-   and `sampler_main`, swapping in for the default hue composite. Custom *warp*
-   shaders + content generators (custom waveforms/shapes) are still to come.
+   **Custom composite *and* warp shaders now render.** Composite
+   (`pm-core::PresetComposite`): the translated WGSL is wired with a per-frame
+   `MdUniforms` buffer (`_cN`/`q`/rot) and `sampler_main`, swapping in for the
+   default hue composite. Warp (`pm-core::CustomWarp`): the preset's warp
+   `shader_body` runs as the *fragment* over the warp mesh — the vertex stage
+   computes the warped sampling UV (same math as the default warp), the fragment
+   samples `sampler_main` at that UV and runs the preset's color math, fed the
+   same `MdUniforms` block. Both fall back to the built-in pass when the WGSL
+   fails to compile (error-scope guarded).
 5. **pm-preset** — full Milkdrop preset engine wiring eval + render + shader.
    ← *eval + warp + standard & custom waveforms + composite done*. Done: .milk
    parser, PresetState + defaults, per-frame/per-pixel eval; in **pm-core** the
    warp mesh + GPU feedback pass, the Circle/Line **standard waveform**, the
    **custom waveforms** (`wave_N` per-point geometry), the **custom shapes**
    (`shape_N` filled N-gons w/ gradient + border, per-instance per-frame eval),
-   the default **composite** (hue) and **custom composite shaders**. Remaining:
+   the default **composite** (hue), **custom composite shaders**, and **custom
+   warp shaders** (`shader_body` warp fragment over the warp mesh). Remaining:
    more standard waveform modes, textured shapes, motion-vector/border/echo
-   passes, custom **warp** shaders.
+   passes.
 6. **pm-core + pm-format + pm-app** — orchestrator, native format + importer,
    live windowed app (winit + cpal). ← *pm-core + pm-app done*. pm-core's
    WarpEngine drives warp+waveform+composite; **pm-app** is a live winit window

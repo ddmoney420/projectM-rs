@@ -141,6 +141,8 @@ pub struct WarpRenderer {
     current: usize,
     width: u32,
     height: u32,
+    /// The preset's custom warp shader, if it translated successfully.
+    custom: Option<crate::preset_warp::CustomWarp>,
 }
 
 impl WarpRenderer {
@@ -278,7 +280,19 @@ impl WarpRenderer {
             current: 0,
             width,
             height,
+            custom: None,
         }
+    }
+
+    /// Install a custom warp shader (translated to WGSL). Returns `true` on
+    /// success; on failure the default warp is kept.
+    pub fn set_custom_warp(&mut self, ctx: &GpuContext, parts: &pm_preset::WarpShaderParts) -> bool {
+        self.custom = crate::preset_warp::CustomWarp::new(ctx, parts);
+        self.custom.is_some()
+    }
+
+    pub fn has_custom_warp(&self) -> bool {
+        self.custom.is_some()
     }
 
     pub fn width(&self) -> u32 {
@@ -320,7 +334,7 @@ impl WarpRenderer {
 
     /// Render one warp pass: sample the current frame through the warped mesh
     /// into the other buffer, then make it current.
-    pub fn warp_frame(&mut self, ctx: &GpuContext, mesh: &WarpMesh, params: &WarpParams) {
+    pub fn warp_frame(&mut self, ctx: &GpuContext, mesh: &WarpMesh, params: &WarpParams, md_bytes: Option<&[u8]>) {
         let device = &ctx.device;
 
         // Upload vertices (grow buffer if needed).
@@ -365,18 +379,47 @@ impl WarpRenderer {
         let dest = 1 - self.current;
         let sampler = if params.wrap { &self.sampler_repeat } else { &self.sampler_clamp };
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("warp bind group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&self.main[source].view),
-                },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
-            ],
-        });
+        // Use the preset's custom warp shader when available, else the default.
+        let (pipeline, bind_group) = match (&self.custom, md_bytes) {
+            (Some(custom), Some(md)) => {
+                ctx.queue.write_buffer(&custom.md_buf, 0, md);
+                let mut entries = vec![
+                    wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: custom.md_buf.as_entire_binding() },
+                ];
+                for i in 0..custom.texture_count {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: (2 + 2 * i) as u32,
+                        resource: wgpu::BindingResource::TextureView(&self.main[source].view),
+                    });
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: (3 + 2 * i) as u32,
+                        resource: wgpu::BindingResource::Sampler(sampler),
+                    });
+                }
+                let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("custom warp bind group"),
+                    layout: &custom.bind_group_layout,
+                    entries: &entries,
+                });
+                (&custom.pipeline, bg)
+            }
+            _ => {
+                let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("warp bind group"),
+                    layout: &self.bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&self.main[source].view),
+                        },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
+                    ],
+                });
+                (&self.pipeline, bg)
+            }
+        };
 
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("warp encoder") });
@@ -397,7 +440,7 @@ impl WarpRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
             pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);

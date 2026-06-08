@@ -40,7 +40,8 @@ pub use custom_waveform::{CustomWaveform, CustomWaveformOutput};
 pub use error::PresetError;
 pub use parser::PresetFile;
 pub use preset_shader::{
-    to_wgsl as shader_to_wgsl, wrap as wrap_shader, ShaderError, ShaderKind, TranslatedShader,
+    md_load_uniforms, md_uniforms_struct, to_wgsl as shader_to_wgsl, warp_shader_parts,
+    wrap as wrap_shader, ShaderError, ShaderKind, TranslatedShader, WarpShaderParts,
 };
 pub use per_frame::PerFrameContext;
 pub use per_pixel::{PerPixelContext, PerPixelOutput};

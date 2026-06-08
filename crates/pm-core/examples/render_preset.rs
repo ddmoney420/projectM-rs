@@ -89,7 +89,7 @@ fn main() {
         let content = String::from_utf8_lossy(&std::fs::read(path).unwrap()).into_owned();
         let preset = Preset::load(&content).expect("load preset");
         let mut engine = WarpEngine::new(&ctx, preset, SIZE, SIZE);
-        println!("custom composite: {}", engine.uses_custom_composite());
+        println!("custom composite: {}, custom warp: {}", engine.uses_custom_composite(), engine.uses_custom_warp());
         for frame in 0..FRAMES {
             engine.render_frame(&ctx, frame as f32 / 30.0, frame, frame_audio(frame)).expect("render");
         }

@@ -13,6 +13,7 @@ mod colored_line;
 mod composite;
 mod md_uniforms;
 mod preset_composite;
+mod preset_warp;
 mod warp_mesh;
 mod warp_render;
 mod waveform;
@@ -133,10 +134,20 @@ impl WarpEngine {
         let aspect = compute_aspect(width, height);
         let mesh = WarpMesh::new(DEFAULT_MESH_X, DEFAULT_MESH_Y, aspect.0, aspect.1);
         let preset_composite = build_preset_composite(ctx, &preset, width, height);
+
+        // Install the preset's custom warp shader, if it translates.
+        let mut warp = WarpRenderer::new(ctx, width, height);
+        let warp_src = preset.warp_shader_source();
+        if warp_src.contains("shader_body") {
+            if let Ok(parts) = pm_preset::warp_shader_parts(warp_src) {
+                warp.set_custom_warp(ctx, &parts);
+            }
+        }
+
         WarpEngine {
             preset,
             mesh,
-            warp: WarpRenderer::new(ctx, width, height),
+            warp,
             waveform: WaveformRenderer::new(ctx),
             custom_lines: ColoredLineRenderer::new(ctx),
             composite: CompositeRenderer::new(ctx, width, height),
@@ -152,6 +163,11 @@ impl WarpEngine {
     /// Whether this preset is rendering its own (custom) composite shader.
     pub fn uses_custom_composite(&self) -> bool {
         self.preset_composite.is_some()
+    }
+
+    /// Whether this preset is rendering its own (custom) warp shader.
+    pub fn uses_custom_warp(&self) -> bool {
+        self.warp.has_custom_warp()
     }
 
     /// Seed the feedback buffer with an initial RGBA8 image.
@@ -187,7 +203,13 @@ impl WarpEngine {
         self.preset.update_frame(frame_params, audio)?;
         self.mesh.calculate(&mut self.preset)?;
         let params = warp_params(self.preset.state());
-        self.warp.warp_frame(ctx, &self.mesh, &params);
+        // The custom warp shader needs the per-frame MdUniforms block.
+        let md = if self.warp.has_custom_warp() {
+            Some(md_uniforms::MdUniforms::from_state(self.preset.state(), time))
+        } else {
+            None
+        };
+        self.warp.warp_frame(ctx, &self.mesh, &params, md.as_ref().map(bytemuck::bytes_of));
 
         // 1b. Custom shapes (filled N-gons + borders) into the feedback buffer.
         let shapes = self.preset.custom_shapes()?;
