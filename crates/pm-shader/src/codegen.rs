@@ -668,7 +668,10 @@ fn vec_of(scalar: Type, n: u8) -> Type {
     }
 }
 
-/// Common arithmetic result type of two operands (vector wins; float wins over int).
+/// Common arithmetic result type of two operands (float wins over int). When
+/// both are vectors of different widths, HLSL truncates the wider to the
+/// narrower (`float4 * float2` operates on the first two lanes); a scalar
+/// operand broadcasts up to the vector width.
 fn arith_common(a: Type, b: Type) -> Type {
     let scalar = if scalar_of(a) == Type::Float || scalar_of(b) == Type::Float {
         Type::Float
@@ -677,7 +680,12 @@ fn arith_common(a: Type, b: Type) -> Type {
     } else {
         Type::Bool
     };
-    let n = a.vector_len().or_else(|| b.vector_len());
+    let n = match (a.vector_len(), b.vector_len()) {
+        (Some(na), Some(nb)) => Some(na.min(nb)),
+        (Some(na), None) => Some(na),
+        (None, Some(nb)) => Some(nb),
+        (None, None) => None,
+    };
     match n {
         Some(n) => vec_of(scalar, n),
         None => scalar,

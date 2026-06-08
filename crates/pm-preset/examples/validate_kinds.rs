@@ -32,8 +32,9 @@ fn classify(wgsl: &str) -> Option<(String, String)> {
     let dbg = format!("{err:?}");
     // Pull out the inner variant name (e.g. InvalidImageCoordinateType, ...).
     let tag = ["InvalidImageCoordinateType", "InvalidStoreTypes", "InvalidArgumentType",
-               "WrongArgumentCount", "InvalidImageStore", "NotPointer", "InvalidStore",
-               "InvalidSwizzle", "TypeResolution", "Compose", "Call", "EmitResult"]
+               "WrongArgumentCount", "InvalidImageStore", "InvalidBinaryOperandTypes",
+               "InvalidUnaryOperandType", "InvalidSwizzle", "NotPointer", "InvalidStore",
+               "TypeResolution", "Compose", "FunctionArgument", "Call", "EmitResult"]
         .iter()
         .find(|t| dbg.contains(**t))
         .map(|t| t.to_string())
@@ -68,9 +69,12 @@ fn main() {
                 continue;
             }
             if let Ok(t) = shader_to_wgsl(src, kind) {
-                if let Some((tag, full)) = classify(&t.wgsl) {
+                if let Some((tag, _full)) = classify(&t.wgsl) {
                     *tally.entry(tag.clone()).or_default() += 1;
-                    samples.entry(tag).or_insert(full);
+                    let kind_s = if matches!(kind, ShaderKind::Warp) { "warp" } else { "comp" };
+                    samples
+                        .entry(tag)
+                        .or_insert_with(|| format!("{kind_s} {}", path.file_name().unwrap().to_string_lossy()));
                 }
             }
         }

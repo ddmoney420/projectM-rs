@@ -188,3 +188,20 @@ fn comma_operator_statement() {
     let wgsl = translate_ok(src);
     validate_wgsl(&wgsl).unwrap();
 }
+
+#[test]
+fn binary_op_truncates_wider_vector() {
+    // HLSL truncates the wider operand of a binary op to the narrower width:
+    // `tan(vec4) * vec2` operates on the first two lanes -> vec2.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float4 big = float4(1.0, 2.0, 3.0, 4.0);
+            float2 small = float2(0.5, 0.25);
+            float2 rs = big * small;
+            _return_value = float4(rs, rs);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains(").xy"), "wider operand truncated to vec2");
+}
