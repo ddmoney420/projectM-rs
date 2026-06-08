@@ -321,3 +321,36 @@ fn border_frames_gated_on_visible_alpha() {
     // All vertices within the clip square.
     assert!(frames[0].vertices.iter().all(|v| v[0].abs() <= 1.0 && v[1].abs() <= 1.0));
 }
+
+#[test]
+fn motion_vectors_render_into_feedback() {
+    let Ok(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    // Warp flow + a visible motion-vector grid: the overlay must add content and
+    // not panic (it samples the warp motion-field texture in its vertex shader).
+    let milk = "\
+zoom=1.05
+rot=0.08
+warp=0.2
+fDecay=0.95
+mv_x=16
+mv_y=12
+mv_l=2.0
+mv_r=1.0
+mv_g=1.0
+mv_b=1.0
+mv_a=1.0
+fVideoEchoAlpha=0.0
+";
+    let preset = Preset::load(milk).unwrap();
+    let mut engine = WarpEngine::new(&ctx, preset, 128, 128);
+    engine.seed(&ctx, &vec![0u8; 128 * 128 * 4]);
+    for frame in 0..8 {
+        engine.render_frame(&ctx, frame as f32 / 30.0, frame, loud_audio()).unwrap();
+    }
+    let out = read_rgba8(&ctx, engine.display_texture());
+    let lit = out.chunks_exact(4).filter(|p| p[0] as u32 + p[1] as u32 + p[2] as u32 > 60).count();
+    assert!(lit > 50, "motion vectors should inject visible content, only {lit} lit");
+}

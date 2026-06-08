@@ -89,8 +89,12 @@ preset format with a `.milk` importer/converter.
    brighten, and the **brighten/darken/solarize/invert** filters — the original's
    multi-pass GL blend tricks collapsed to closed-form colour math in one
    fragment. The **inner/outer border** frames (`ob_*`/`ib_*`) draw into the
-   feedback buffer on top of the waveforms (`Border`). Remaining: textured
-   shapes, motion vectors (needs a warp motion-field texture).
+   feedback buffer on top of the waveforms (`Border`). **Motion vectors**
+   (`mv_*`, `MotionVectors`): the warp pass writes its per-pixel sampling UV to a
+   motion-field texture, and a grid of `mv_x`×`mv_y` line segments samples it in
+   the vertex stage (port of `PresetMotionVectorsVertexShader`, with the
+   `length_multiplier`/`minimum_length` trail logic) to visualise the optical
+   flow. Remaining: textured shapes (needs external preset image assets).
 6. **pm-core + pm-format + pm-app** — orchestrator, native format + importer,
    live windowed app (winit + cpal). ← *done*. pm-core's WarpEngine drives
    warp+waveform+composite; **pm-app** is a live winit window with a wgpu

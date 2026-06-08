@@ -125,7 +125,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(prev_tex, prev_smp, in.uv);
     return vec4<f32>(c.rgb * in.decay, c.a);
 }
+
+// Motion field: write the warped sampling UV per pixel, so motion vectors can
+// look up where each point came from (Milkdrop's `warp_coordinates` texture).
+@fragment
+fn fs_motion(in: VsOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(in.uv, 0.0, 1.0);
+}
 "#;
+
+/// Format of the motion-field texture (the warped UV per pixel). `16Float` so
+/// UVs slightly outside `0..1` aren't clamped.
+const MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 pub struct WarpRenderer {
     pipeline: wgpu::RenderPipeline,
@@ -143,6 +154,10 @@ pub struct WarpRenderer {
     height: u32,
     /// The preset's custom warp shader, if it translated successfully.
     custom: Option<crate::preset_warp::CustomWarp>,
+    /// Pipeline writing the warped UV into [`Self::motion`] (for motion vectors).
+    motion_pipeline: wgpu::RenderPipeline,
+    /// Per-pixel warped sampling UV, the motion-vector lookup field.
+    motion: Texture,
 }
 
 impl WarpRenderer {
@@ -266,6 +281,38 @@ impl WarpRenderer {
             Texture::new_render_target(device, "main[1]", width, height, TARGET_FORMAT),
         ];
 
+        // Motion-field pipeline: same warp vertex, but the fragment writes the
+        // warped UV instead of sampling. Reuses the warp bind group layout.
+        let motion_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("warp motion pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_main"),
+                buffers: &[WarpVertex::layout()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_motion"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: MOTION_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let motion = Texture::new_render_target(device, "warp motion", width, height, MOTION_FORMAT);
+
         WarpRenderer {
             pipeline,
             bind_group_layout,
@@ -281,6 +328,8 @@ impl WarpRenderer {
             width,
             height,
             custom: None,
+            motion_pipeline,
+            motion,
         }
     }
 
@@ -461,8 +510,51 @@ impl WarpRenderer {
             pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..self.index_count, 0, 0..1);
         }
+
+        // Motion field: same warp mesh, fragment writes the warped UV.
+        let motion_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("warp motion bind group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.main[source].view),
+                },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("warp motion pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.motion.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.motion_pipeline);
+            pass.set_bind_group(0, &motion_bg, &[]);
+            pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
+            pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..self.index_count, 0, 0..1);
+        }
+
         ctx.queue.submit(Some(encoder.finish()));
 
         self.current = dest;
+    }
+
+    /// The motion-field texture (warped sampling UV per pixel) for motion vectors.
+    pub fn motion_texture(&self) -> &Texture {
+        &self.motion
     }
 }

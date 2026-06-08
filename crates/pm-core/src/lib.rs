@@ -14,6 +14,7 @@ mod border;
 mod colored_line;
 mod composite;
 mod md_uniforms;
+mod motion_vectors;
 mod noise;
 mod preset_composite;
 mod preset_warp;
@@ -159,6 +160,8 @@ pub struct WarpEngine {
     noise: noise::NoiseTextures,
     /// Per-frame Gaussian blur chain, bound to `sampler_blur1/2/3` references.
     blur: blur::Blur,
+    /// Motion-vector grid overlay (`mv_*`).
+    motion_vectors: motion_vectors::MotionVectors,
     width: u32,
     height: u32,
     aspect: (f32, f32, f32, f32),
@@ -191,6 +194,7 @@ impl WarpEngine {
             preset_composite,
             noise: noise::NoiseTextures::new(ctx),
             blur: blur::Blur::new(ctx, width, height),
+            motion_vectors: motion_vectors::MotionVectors::new(ctx),
             width,
             height,
             aspect,
@@ -252,6 +256,9 @@ impl WarpEngine {
             None
         };
         self.warp.warp_frame(ctx, &self.mesh, &params, md.as_ref().map(bytemuck::bytes_of), &self.noise, &self.blur);
+
+        // 1a. Motion vectors visualising the warp flow, into the feedback buffer.
+        self.motion_vectors.draw(ctx, self.warp.current_view(), self.warp.motion_texture(), self.preset.state());
 
         // 1b. Custom shapes (filled N-gons + borders) into the feedback buffer.
         let shapes = self.preset.custom_shapes()?;
