@@ -58,11 +58,11 @@ preset format with a `.milk` importer/converter.
    ← *eval + warp + standard & custom waveforms + composite done*. Done: .milk
    parser, PresetState + defaults, per-frame/per-pixel eval; in **pm-core** the
    warp mesh + GPU feedback pass, the Circle/Line **standard waveform**, the
-   **custom waveforms** (`wave_N` per-point geometry via per-frame/per-point
-   eval, drawn with a per-vertex-color line renderer — the main content
-   generator), the default **composite** (hue) and **custom composite shaders**.
-   Remaining: more standard waveform modes, custom **shapes**, motion-vector/
-   border/echo passes, custom **warp** shaders. Perf note: per-point eval in the
+   **custom waveforms** (`wave_N` per-point geometry), the **custom shapes**
+   (`shape_N` filled N-gons w/ gradient + border, per-instance per-frame eval),
+   the default **composite** (hue) and **custom composite shaders**. Remaining:
+   more standard waveform modes, textured shapes, motion-vector/border/echo
+   passes, custom **warp** shaders. Perf note: per-point/per-instance eval in the
    tree-walker is slow at hundreds of points × 60fps — wants the bytecode pass.
 6. **pm-core + pm-format + pm-app** — orchestrator, native format + importer,
    live windowed app (winit + cpal). ← *pm-core + pm-app done*. pm-core's

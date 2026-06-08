@@ -189,6 +189,29 @@ impl WarpEngine {
         let params = warp_params(self.preset.state());
         self.warp.warp_frame(ctx, &self.mesh, &params);
 
+        // 1b. Custom shapes (filled N-gons + borders) into the feedback buffer.
+        let shapes = self.preset.custom_shapes()?;
+        for sh in &shapes {
+            self.custom_lines.draw_triangles(
+                ctx,
+                self.warp.current_view(),
+                &sh.fill_vertices,
+                &sh.fill_colors,
+                sh.additive,
+            );
+            if !sh.border_points.is_empty() {
+                let border_colors = vec![sh.border_color; sh.border_points.len()];
+                self.custom_lines.draw(
+                    ctx,
+                    self.warp.current_view(),
+                    &sh.border_points,
+                    &border_colors,
+                    false,
+                    false,
+                );
+            }
+        }
+
         // 2. Standard waveform drawn into the (now warped) feedback buffer.
         let geometry = generate_waveform(self.preset.state());
         let color = waveform_color(self.preset.state());

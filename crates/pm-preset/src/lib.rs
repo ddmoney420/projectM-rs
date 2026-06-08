@@ -26,6 +26,7 @@
 //! assert!((preset.state().zoom - 1.7).abs() < 1e-5);
 //! ```
 
+mod custom_shape;
 mod custom_waveform;
 mod error;
 mod parser;
@@ -34,6 +35,7 @@ mod per_pixel;
 mod preset_shader;
 mod state;
 
+pub use custom_shape::{CustomShape, CustomShapeOutput};
 pub use custom_waveform::{CustomWaveform, CustomWaveformOutput};
 pub use error::PresetError;
 pub use parser::PresetFile;
@@ -54,6 +56,7 @@ pub struct Preset {
     per_frame: PerFrameContext,
     per_pixel: PerPixelContext,
     custom_waveforms: Vec<CustomWaveform>,
+    custom_shapes: Vec<CustomShape>,
 }
 
 impl Preset {
@@ -73,7 +76,24 @@ impl Preset {
             }
         }
 
-        Ok(Preset { state, per_frame, per_pixel, custom_waveforms })
+        let mut custom_shapes = Vec::new();
+        for i in 0..state::CUSTOM_SHAPE_COUNT {
+            if let Some(sh) = CustomShape::new(&state, i)? {
+                custom_shapes.push(sh);
+            }
+        }
+
+        Ok(Preset { state, per_frame, per_pixel, custom_waveforms, custom_shapes })
+    }
+
+    /// Generate this frame's custom-shape geometry (one entry per instance).
+    /// Call after [`Preset::update_frame`].
+    pub fn custom_shapes(&mut self) -> Result<Vec<CustomShapeOutput>, PresetError> {
+        let mut out = Vec::new();
+        for sh in &mut self.custom_shapes {
+            out.extend(sh.generate(&self.state)?);
+        }
+        Ok(out)
     }
 
     /// Generate this frame's custom-waveform geometry. Call after

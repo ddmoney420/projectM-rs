@@ -33,8 +33,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 "#;
 
 pub struct ColoredLineRenderer {
-    /// `[additive][dots]` pipelines.
+    /// `[additive][dots]` line/point pipelines.
     pipelines: [[wgpu::RenderPipeline; 2]; 2],
+    /// `[additive]` triangle-list pipelines (for filled shapes).
+    tri_pipelines: [wgpu::RenderPipeline; 2],
     vertex_buf: wgpu::Buffer,
     capacity: usize,
 }
@@ -104,11 +106,12 @@ impl ColoredLineRenderer {
             })
         };
 
-        use wgpu::PrimitiveTopology::{LineStrip, PointList};
+        use wgpu::PrimitiveTopology::{LineStrip, PointList, TriangleList};
         let pipelines = [
             [make(alpha, LineStrip), make(alpha, PointList)],
             [make(additive, LineStrip), make(additive, PointList)],
         ];
+        let tri_pipelines = [make(alpha, TriangleList), make(additive, TriangleList)];
 
         let vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("colored line vertices"),
@@ -117,23 +120,29 @@ impl ColoredLineRenderer {
             mapped_at_creation: false,
         });
 
-        ColoredLineRenderer { pipelines, vertex_buf, capacity: 0 }
+        ColoredLineRenderer { pipelines, tri_pipelines, vertex_buf, capacity: 0 }
     }
 
-    /// Draw `points` (with matching `colors`) into `target`.
-    pub fn draw(
+    /// Draw a triangle list (filled, per-vertex color) into `target`.
+    pub fn draw_triangles(
         &mut self,
         ctx: &GpuContext,
         target: &wgpu::TextureView,
         points: &[[f32; 2]],
         colors: &[[f32; 4]],
         additive: bool,
-        dots: bool,
     ) {
         let n = points.len().min(colors.len());
-        if n < 2 {
+        if n < 3 {
             return;
         }
+        self.upload(ctx, points, colors, n);
+        let pipeline = &self.tri_pipelines[additive as usize];
+        self.render(ctx, target, pipeline, n);
+    }
+
+    /// Upload `n` interleaved position+color vertices to the vertex buffer.
+    fn upload(&mut self, ctx: &GpuContext, points: &[[f32; 2]], colors: &[[f32; 4]], n: usize) {
         let verts: Vec<Vertex> = (0..n).map(|i| Vertex { pos: points[i], color: colors[i] }).collect();
         let bytes: &[u8] = bytemuck::cast_slice(&verts);
         if n > self.capacity {
@@ -146,15 +155,15 @@ impl ColoredLineRenderer {
             self.capacity = n;
         }
         ctx.queue.write_buffer(&self.vertex_buf, 0, bytes);
+    }
 
-        let pipeline = &self.pipelines[additive as usize][dots as usize];
-
+    fn render(&self, ctx: &GpuContext, target: &wgpu::TextureView, pipeline: &wgpu::RenderPipeline, n: usize) {
         let mut encoder = ctx
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("colored line encoder") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("colored geometry encoder") });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("colored line pass"),
+                label: Some("colored geometry pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     depth_slice: None,
@@ -171,5 +180,24 @@ impl ColoredLineRenderer {
             pass.draw(0..n as u32, 0..1);
         }
         ctx.queue.submit(Some(encoder.finish()));
+    }
+
+    /// Draw `points` (with matching `colors`) into `target`.
+    pub fn draw(
+        &mut self,
+        ctx: &GpuContext,
+        target: &wgpu::TextureView,
+        points: &[[f32; 2]],
+        colors: &[[f32; 4]],
+        additive: bool,
+        dots: bool,
+    ) {
+        let n = points.len().min(colors.len());
+        if n < 2 {
+            return;
+        }
+        self.upload(ctx, points, colors, n);
+        let pipeline = &self.pipelines[additive as usize][dots as usize];
+        self.render(ctx, target, pipeline, n);
     }
 }

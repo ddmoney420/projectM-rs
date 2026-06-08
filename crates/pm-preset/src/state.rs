@@ -9,6 +9,66 @@ pub const T_VAR_COUNT: usize = 8;
 pub const CUSTOM_WAVEFORM_COUNT: usize = 4;
 pub const CUSTOM_SHAPE_COUNT: usize = 4;
 
+/// Per-shape properties from the `shapecode_N_*` keys.
+#[derive(Debug, Clone)]
+pub struct CustomShapeConfig {
+    pub enabled: bool,
+    pub sides: i32,
+    pub additive: bool,
+    pub thick_outline: bool,
+    pub textured: bool,
+    pub instances: i32,
+    pub x: f32,
+    pub y: f32,
+    pub radius: f32,
+    pub angle: f32,
+    pub tex_ang: f32,
+    pub tex_zoom: f32,
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+    pub r2: f32,
+    pub g2: f32,
+    pub b2: f32,
+    pub a2: f32,
+    pub border_r: f32,
+    pub border_g: f32,
+    pub border_b: f32,
+    pub border_a: f32,
+}
+
+impl Default for CustomShapeConfig {
+    fn default() -> Self {
+        CustomShapeConfig {
+            enabled: false,
+            sides: 4,
+            additive: false,
+            thick_outline: false,
+            textured: false,
+            instances: 1,
+            x: 0.5,
+            y: 0.5,
+            radius: 0.1,
+            angle: 0.0,
+            tex_ang: 0.0,
+            tex_zoom: 1.0,
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+            r2: 0.0,
+            g2: 1.0,
+            b2: 0.0,
+            a2: 0.0,
+            border_r: 1.0,
+            border_g: 1.0,
+            border_b: 1.0,
+            border_a: 0.0,
+        }
+    }
+}
+
 /// Per-waveform properties from the `wavecode_N_*` keys.
 #[derive(Debug, Clone)]
 pub struct CustomWaveformConfig {
@@ -189,6 +249,8 @@ pub struct PresetState {
     pub hue_random_offsets: [f32; 4],
     /// Custom waveform properties (`wavecode_N_*`).
     pub custom_waveforms: [CustomWaveformConfig; CUSTOM_WAVEFORM_COUNT],
+    /// Custom shape properties (`shapecode_N_*`).
+    pub custom_shapes: [CustomShapeConfig; CUSTOM_SHAPE_COUNT],
 
     // Per-frame inputs
     pub frame: FrameParams,
@@ -289,6 +351,7 @@ impl Default for PresetState {
             frame_q_variables: [0.0; Q_VAR_COUNT],
             hue_random_offsets: [0.0; 4],
             custom_waveforms: std::array::from_fn(|_| CustomWaveformConfig::default()),
+            custom_shapes: std::array::from_fn(|_| CustomShapeConfig::default()),
 
             frame: FrameParams::default(),
             audio: FrameAudioData::default(),
@@ -427,6 +490,33 @@ impl PresetState {
             let prefix = format!("shape_{i}_");
             s.custom_shape_init_code[i] = file.get_code_statements(&format!("{prefix}init"));
             s.custom_shape_per_frame_code[i] = file.get_code_statements(&format!("{prefix}per_frame"));
+
+            let sc = format!("shapecode_{i}_");
+            let c = &mut s.custom_shapes[i];
+            c.enabled = file.get_bool(&format!("{sc}enabled"), c.enabled);
+            c.sides = file.get_int(&format!("{sc}sides"), c.sides);
+            c.additive = file.get_bool(&format!("{sc}additive"), c.additive);
+            c.thick_outline = file.get_bool(&format!("{sc}thickOutline"), c.thick_outline);
+            c.textured = file.get_bool(&format!("{sc}textured"), c.textured);
+            c.instances = file.get_int(&format!("{sc}num_inst"), c.instances);
+            c.x = file.get_float(&format!("{sc}x"), c.x);
+            c.y = file.get_float(&format!("{sc}y"), c.y);
+            c.radius = file.get_float(&format!("{sc}rad"), c.radius);
+            c.angle = file.get_float(&format!("{sc}ang"), c.angle);
+            c.tex_ang = file.get_float(&format!("{sc}tex_ang"), c.tex_ang);
+            c.tex_zoom = file.get_float(&format!("{sc}tex_zoom"), c.tex_zoom);
+            c.r = file.get_float(&format!("{sc}r"), c.r);
+            c.g = file.get_float(&format!("{sc}g"), c.g);
+            c.b = file.get_float(&format!("{sc}b"), c.b);
+            c.a = file.get_float(&format!("{sc}a"), c.a);
+            c.r2 = file.get_float(&format!("{sc}r2"), c.r2);
+            c.g2 = file.get_float(&format!("{sc}g2"), c.g2);
+            c.b2 = file.get_float(&format!("{sc}b2"), c.b2);
+            c.a2 = file.get_float(&format!("{sc}a2"), c.a2);
+            c.border_r = file.get_float(&format!("{sc}border_r"), c.border_r);
+            c.border_g = file.get_float(&format!("{sc}border_g"), c.border_g);
+            c.border_b = file.get_float(&format!("{sc}border_b"), c.border_b);
+            c.border_a = file.get_float(&format!("{sc}border_a"), c.border_a);
         }
 
         s.warp_shader = file.get_code("warp_");

@@ -133,6 +133,43 @@ wave_0_per_point3=`r = sample; g = 1; b = 1 - sample; a = 1;
 }
 
 #[test]
+fn custom_shape_generates_instances() {
+    // A 5-sided shape with 3 instances positioned by `instance`.
+    let milk = "\
+shapecode_0_enabled=1
+shapecode_0_sides=5
+shapecode_0_num_inst=3
+shapecode_0_border_a=0.5
+shape_0_per_frame1=`x = 0.3 + 0.2*instance;
+shape_0_per_frame2=`r = 1; g = instance/3; b = 0; a = 1;
+";
+    let mut preset = Preset::load(milk).unwrap();
+    let frame = FrameParams { viewport_width: 512, viewport_height: 512, ..FrameParams::default() };
+    preset.update_frame(frame, FrameAudioData::default()).unwrap();
+
+    let shapes = preset.custom_shapes().unwrap();
+    assert_eq!(shapes.len(), 3, "one output per instance");
+    for s in &shapes {
+        // 5 sides -> 5 triangles -> 15 fill vertices.
+        assert_eq!(s.fill_vertices.len(), 15);
+        assert_eq!(s.fill_colors.len(), 15);
+        // Border requested (border_a = 0.5): a closed loop of 6 points.
+        assert_eq!(s.border_points.len(), 6);
+        assert!(s.fill_vertices.iter().all(|p| p[0].is_finite() && p[1].is_finite()));
+    }
+}
+
+#[test]
+fn shape_sides_clamped_to_minimum() {
+    // sides=1 is clamped up to 3 (a triangle).
+    let milk = "shapecode_0_enabled=1\nshapecode_0_sides=1\nshapecode_0_num_inst=1";
+    let mut preset = Preset::load(milk).unwrap();
+    preset.update_frame(FrameParams::default(), FrameAudioData::default()).unwrap();
+    let shapes = preset.custom_shapes().unwrap();
+    assert_eq!(shapes[0].fill_vertices.len(), 9); // 3 sides * 3
+}
+
+#[test]
 fn disabled_custom_waveform_produces_nothing() {
     let mut preset = Preset::load("wavecode_0_enabled=0\nwave_0_per_point1=`x = sample;").unwrap();
     preset.update_frame(FrameParams::default(), FrameAudioData::default()).unwrap();
