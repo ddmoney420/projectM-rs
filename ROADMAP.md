@@ -79,8 +79,12 @@ preset format with a `.milk` importer/converter.
    built-in **noise textures** (`noise_lq/mq/hq`, `noisevol_lq/hq` 3D volumes,
    generated once and bound to `sampler_noise*` references), and the per-frame
    **blur chain** (`sampler_blur1/2/3` — separable Gaussian at 1/2, 1/4, 1/8
-   res, rebuilt each frame from the feedback; `GetBlur1/2/3`). Remaining: more
-   standard waveform modes, textured shapes, motion-vector/border/echo passes.
+   res, rebuilt each frame from the feedback; `GetBlur1/2/3`). The **standard
+   waveform** now covers the full `nWaveMode` family: Circle (0), XY-oscillation
+   spiral (1), centered spiro (2/3), derivative line (4), explosive hash (5),
+   Line (6) and double line (7), ported from projectM's `Waveforms/`; spectrum
+   line (8) and the Milkdrop2077 modes fall back to Line. Remaining: textured
+   shapes, motion-vector/border/echo passes.
 6. **pm-core + pm-format + pm-app** — orchestrator, native format + importer,
    live windowed app (winit + cpal). ← *done*. pm-core's WarpEngine drives
    warp+waveform+composite; **pm-app** is a live winit window with a wgpu

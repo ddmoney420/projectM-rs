@@ -123,6 +123,29 @@ fn waveform_line_is_not_a_loop() {
 }
 
 #[test]
+fn waveform_all_standard_modes_generate_finite_geometry() {
+    // Every standard mode 0..=8 must produce finite, non-empty geometry, with
+    // the right loop flag and a second line only for the double-line mode.
+    for mode in 0..=8 {
+        let mut preset = Preset::load(&format!("nWaveMode={mode}\nfWaveScale=1.0")).unwrap();
+        let frame = FrameParams { viewport_width: 512, viewport_height: 512, ..FrameParams::default() };
+        preset.update_frame(frame, loud_audio()).unwrap();
+        let geo = generate_waveform(preset.state());
+
+        assert!(!geo.points.is_empty(), "mode {mode}: empty");
+        assert!(
+            geo.points.iter().all(|p| p[0].is_finite() && p[1].is_finite()),
+            "mode {mode}: non-finite vertex"
+        );
+        assert_eq!(geo.is_loop, matches!(mode, 0 | 1), "mode {mode}: loop flag");
+        assert_eq!(geo.points2.is_some(), mode == 7, "mode {mode}: second line only for double-line");
+        if let Some(p2) = &geo.points2 {
+            assert!(p2.iter().all(|p| p[0].is_finite() && p[1].is_finite()), "mode {mode}: w2 non-finite");
+        }
+    }
+}
+
+#[test]
 fn full_pipeline_injects_bright_content() {
     let Ok(ctx) = GpuContext::headless() else {
         eprintln!("no GPU adapter; skipping");

@@ -248,14 +248,12 @@ impl WarpEngine {
         // 2. Standard waveform drawn into the (now warped) feedback buffer.
         let geometry = generate_waveform(self.preset.state());
         let color = waveform_color(self.preset.state());
-        self.waveform.draw(
-            ctx,
-            self.warp.current_view(),
-            &geometry.points,
-            color,
-            self.preset.state().additive_waves,
-            geometry.is_loop,
-        );
+        let additive = self.preset.state().additive_waves;
+        self.waveform.draw(ctx, self.warp.current_view(), &geometry.points, color, additive, geometry.is_loop);
+        // The double-line mode (7) draws a second polyline for the right channel.
+        if let Some(points2) = &geometry.points2 {
+            self.waveform.draw(ctx, self.warp.current_view(), points2, color, additive, geometry.is_loop);
+        }
 
         // 2b. Custom waveforms (wave_N per-point geometry) on top.
         let customs = self.preset.custom_waveforms()?;
