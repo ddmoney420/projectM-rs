@@ -84,7 +84,22 @@ fn main() {
         return;
     }
 
-    // Find the first preset that actually uses a custom composite shader.
+    // Single file: render it directly (no custom-composite filtering).
+    if !path.is_dir() {
+        let content = String::from_utf8_lossy(&std::fs::read(path).unwrap()).into_owned();
+        let preset = Preset::load(&content).expect("load preset");
+        let mut engine = WarpEngine::new(&ctx, preset, SIZE, SIZE);
+        println!("custom composite: {}", engine.uses_custom_composite());
+        for frame in 0..FRAMES {
+            engine.render_frame(&ctx, frame as f32 / 30.0, frame, frame_audio(frame)).expect("render");
+        }
+        let pixels = read_rgba8(&ctx, engine.display_texture());
+        image::RgbaImage::from_raw(SIZE, SIZE, pixels).unwrap().save("pm-custom-composite.png").unwrap();
+        println!("wrote pm-custom-composite.png");
+        return;
+    }
+
+    // Directory: find the first preset that actually uses a custom composite shader.
     let mut chosen = None;
     for (i, p) in candidates.iter().enumerate() {
         if i >= 800 {

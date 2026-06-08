@@ -26,6 +26,7 @@
 //! assert!((preset.state().zoom - 1.7).abs() < 1e-5);
 //! ```
 
+mod custom_waveform;
 mod error;
 mod parser;
 mod per_frame;
@@ -33,6 +34,7 @@ mod per_pixel;
 mod preset_shader;
 mod state;
 
+pub use custom_waveform::{CustomWaveform, CustomWaveformOutput};
 pub use error::PresetError;
 pub use parser::PresetFile;
 pub use preset_shader::{
@@ -51,6 +53,7 @@ pub struct Preset {
     state: PresetState,
     per_frame: PerFrameContext,
     per_pixel: PerPixelContext,
+    custom_waveforms: Vec<CustomWaveform>,
 }
 
 impl Preset {
@@ -63,7 +66,26 @@ impl Preset {
         per_frame.evaluate_init(&mut state)?;
         let per_pixel = PerPixelContext::new(&state)?;
 
-        Ok(Preset { state, per_frame, per_pixel })
+        let mut custom_waveforms = Vec::new();
+        for i in 0..state::CUSTOM_WAVEFORM_COUNT {
+            if let Some(wf) = CustomWaveform::new(&state, i)? {
+                custom_waveforms.push(wf);
+            }
+        }
+
+        Ok(Preset { state, per_frame, per_pixel, custom_waveforms })
+    }
+
+    /// Generate this frame's custom-waveform geometry. Call after
+    /// [`Preset::update_frame`].
+    pub fn custom_waveforms(&mut self) -> Result<Vec<CustomWaveformOutput>, PresetError> {
+        let mut out = Vec::new();
+        for wf in &mut self.custom_waveforms {
+            if let Some(geo) = wf.generate(&self.state)? {
+                out.push(geo);
+            }
+        }
+        Ok(out)
     }
 
     /// Advance one frame: apply the inputs, run the per-frame code, and prepare

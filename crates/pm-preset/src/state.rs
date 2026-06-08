@@ -5,8 +5,47 @@ use crate::parser::PresetFile;
 use pm_audio::FrameAudioData;
 
 pub const Q_VAR_COUNT: usize = 32;
+pub const T_VAR_COUNT: usize = 8;
 pub const CUSTOM_WAVEFORM_COUNT: usize = 4;
 pub const CUSTOM_SHAPE_COUNT: usize = 4;
+
+/// Per-waveform properties from the `wavecode_N_*` keys.
+#[derive(Debug, Clone)]
+pub struct CustomWaveformConfig {
+    pub enabled: bool,
+    pub samples: i32,
+    pub sep: i32,
+    pub spectrum: bool,
+    pub use_dots: bool,
+    pub draw_thick: bool,
+    pub additive: bool,
+    pub scaling: f32,
+    pub smoothing: f32,
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
+
+impl Default for CustomWaveformConfig {
+    fn default() -> Self {
+        CustomWaveformConfig {
+            enabled: false,
+            samples: 512,
+            sep: 0,
+            spectrum: false,
+            use_dots: false,
+            draw_thick: false,
+            additive: false,
+            scaling: 1.0,
+            smoothing: 0.5,
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        }
+    }
+}
 
 /// Per-frame *input* values supplied by the host (the subset of projectM's
 /// `RenderContext` the equations read). Kept here so `pm-preset` needs no GPU
@@ -148,6 +187,8 @@ pub struct PresetState {
     pub frame_q_variables: [f64; Q_VAR_COUNT],
     /// Per-preset constant offsets for the composite hue animation.
     pub hue_random_offsets: [f32; 4],
+    /// Custom waveform properties (`wavecode_N_*`).
+    pub custom_waveforms: [CustomWaveformConfig; CUSTOM_WAVEFORM_COUNT],
 
     // Per-frame inputs
     pub frame: FrameParams,
@@ -247,6 +288,7 @@ impl Default for PresetState {
 
             frame_q_variables: [0.0; Q_VAR_COUNT],
             hue_random_offsets: [0.0; 4],
+            custom_waveforms: std::array::from_fn(|_| CustomWaveformConfig::default()),
 
             frame: FrameParams::default(),
             audio: FrameAudioData::default(),
@@ -363,6 +405,23 @@ impl PresetState {
             s.custom_wave_init_code[i] = file.get_code_statements(&format!("{prefix}init"));
             s.custom_wave_per_frame_code[i] = file.get_code_statements(&format!("{prefix}per_frame"));
             s.custom_wave_per_point_code[i] = file.get_code_statements(&format!("{prefix}per_point"));
+
+            // Properties from the wavecode_N_* keys.
+            let wc = format!("wavecode_{i}_");
+            let c = &mut s.custom_waveforms[i];
+            c.enabled = file.get_bool(&format!("{wc}enabled"), c.enabled);
+            c.samples = file.get_int(&format!("{wc}samples"), c.samples);
+            c.sep = file.get_int(&format!("{wc}sep"), c.sep);
+            c.spectrum = file.get_bool(&format!("{wc}bSpectrum"), c.spectrum);
+            c.use_dots = file.get_bool(&format!("{wc}bUseDots"), c.use_dots);
+            c.draw_thick = file.get_bool(&format!("{wc}bDrawThick"), c.draw_thick);
+            c.additive = file.get_bool(&format!("{wc}bAdditive"), c.additive);
+            c.scaling = file.get_float(&format!("{wc}scaling"), c.scaling);
+            c.smoothing = file.get_float(&format!("{wc}smoothing"), c.smoothing);
+            c.r = file.get_float(&format!("{wc}r"), c.r);
+            c.g = file.get_float(&format!("{wc}g"), c.g);
+            c.b = file.get_float(&format!("{wc}b"), c.b);
+            c.a = file.get_float(&format!("{wc}a"), c.a);
         }
         for i in 0..CUSTOM_SHAPE_COUNT {
             let prefix = format!("shape_{i}_");

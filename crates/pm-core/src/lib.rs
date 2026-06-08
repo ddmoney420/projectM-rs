@@ -9,6 +9,7 @@
 //! Per-frame pipeline (mirrors Milkdrop):
 //! `warp (feedback) → waveform → composite`.
 
+mod colored_line;
 mod composite;
 mod md_uniforms;
 mod preset_composite;
@@ -17,6 +18,7 @@ mod warp_render;
 mod waveform;
 mod waveform_render;
 
+pub use colored_line::ColoredLineRenderer;
 pub use composite::CompositeRenderer;
 pub use preset_composite::PresetComposite;
 pub use warp_mesh::{WarpMesh, WarpVertex};
@@ -115,6 +117,7 @@ pub struct WarpEngine {
     mesh: WarpMesh,
     warp: WarpRenderer,
     waveform: WaveformRenderer,
+    custom_lines: ColoredLineRenderer,
     composite: CompositeRenderer,
     /// The preset's custom composite shader, if it translated successfully.
     preset_composite: Option<PresetComposite>,
@@ -135,6 +138,7 @@ impl WarpEngine {
             mesh,
             warp: WarpRenderer::new(ctx, width, height),
             waveform: WaveformRenderer::new(ctx),
+            custom_lines: ColoredLineRenderer::new(ctx),
             composite: CompositeRenderer::new(ctx, width, height),
             preset_composite,
             width,
@@ -185,7 +189,7 @@ impl WarpEngine {
         let params = warp_params(self.preset.state());
         self.warp.warp_frame(ctx, &self.mesh, &params);
 
-        // 2. Waveform drawn into the (now warped) feedback buffer.
+        // 2. Standard waveform drawn into the (now warped) feedback buffer.
         let geometry = generate_waveform(self.preset.state());
         let color = waveform_color(self.preset.state());
         self.waveform.draw(
@@ -196,6 +200,19 @@ impl WarpEngine {
             self.preset.state().additive_waves,
             geometry.is_loop,
         );
+
+        // 2b. Custom waveforms (wave_N per-point geometry) on top.
+        let customs = self.preset.custom_waveforms()?;
+        for cw in &customs {
+            self.custom_lines.draw(
+                ctx,
+                self.warp.current_view(),
+                &cw.points,
+                &cw.colors,
+                cw.additive,
+                cw.use_dots,
+            );
+        }
 
         // 3. Composite to the display target: the preset's own composite shader
         //    if it has one, otherwise the built-in hue composite.

@@ -108,6 +108,38 @@ comp_1=`shader_body { ret = float3(1,0,0); }
 }
 
 #[test]
+fn custom_waveform_generates_geometry() {
+    // An enabled custom waveform with per-point code placing points on a curve.
+    let milk = "\
+wavecode_0_enabled=1
+wavecode_0_samples=64
+wave_0_per_point1=`x = sample;
+wave_0_per_point2=`y = 0.5 + 0.3 * sin(sample * 6.28);
+wave_0_per_point3=`r = sample; g = 1; b = 1 - sample; a = 1;
+";
+    let mut preset = Preset::load(milk).unwrap();
+    let frame = FrameParams { viewport_width: 512, viewport_height: 512, ..FrameParams::default() };
+    preset.update_frame(frame, FrameAudioData::default()).unwrap();
+
+    let waves = preset.custom_waveforms().unwrap();
+    assert_eq!(waves.len(), 1, "one enabled custom waveform");
+    let w = &waves[0];
+    // 64 samples -> the 4-point smooth doubles to 2*64-1 = 127 vertices.
+    assert_eq!(w.points.len(), 127);
+    assert_eq!(w.colors.len(), w.points.len());
+    assert!(w.points.iter().all(|p| p[0].is_finite() && p[1].is_finite()));
+    // Colors were set per point and are in [0,1].
+    assert!(w.colors.iter().all(|c| c.iter().all(|&v| (0.0..=1.01).contains(&v))));
+}
+
+#[test]
+fn disabled_custom_waveform_produces_nothing() {
+    let mut preset = Preset::load("wavecode_0_enabled=0\nwave_0_per_point1=`x = sample;").unwrap();
+    preset.update_frame(FrameParams::default(), FrameAudioData::default()).unwrap();
+    assert!(preset.custom_waveforms().unwrap().is_empty());
+}
+
+#[test]
 fn rejects_garbage() {
     assert!(Preset::load("\0\0\0").is_err());
 }
