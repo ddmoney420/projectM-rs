@@ -134,3 +134,23 @@ fn texture_sampling_uses_binding_convention() {
     assert!(wgsl.contains("textureSample(sampler_main, sampler_main_sampler, _uv)"));
     assert!(wgsl.contains("sampler_main_sampler"));
 }
+
+#[test]
+fn vector_truncation_on_assignment() {
+    // HLSL implicitly truncates a wider vector to the target width: a vec4
+    // assigned to a float3, and a vec3 compound-assigned to a scalar `.x`.
+    let src = r#"
+        void PS(float2 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            float3 a = float4(0.1, 0.2, 0.3, 0.4);
+            float3 b = float3(1.0, 2.0, 3.0);
+            float s = float3(0.5, 0.6, 0.7);
+            a.x += b;
+            _return_value = float4(a, s);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    // float4 -> float3 keeps .xyz; vec3 -> scalar keeps .x.
+    assert!(wgsl.contains(".xyz"), "vec4 truncated to vec3");
+    assert!(wgsl.contains(").x"), "vec3 truncated to scalar on +=");
+}

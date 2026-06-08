@@ -255,6 +255,12 @@ uniform float4x3 rot_rand1, rot_rand2, rot_rand3, rot_rand4;
 #define q32 _qh.w
 #define aspect   _c0
 #define texsize  _c7
+#define texsize_noise_lq      float4(256.0, 256.0, 0.00390625, 0.00390625)
+#define texsize_noise_lq_lite float4(32.0, 32.0, 0.03125, 0.03125)
+#define texsize_noise_mq      float4(256.0, 256.0, 0.00390625, 0.00390625)
+#define texsize_noise_hq      float4(256.0, 256.0, 0.00390625, 0.00390625)
+#define texsize_noisevol_lq   float4(32.0, 32.0, 0.03125, 0.03125)
+#define texsize_noisevol_hq   float4(32.0, 32.0, 0.03125, 0.03125)
 #define roam_cos _c8
 #define roam_sin _c9
 #define slow_roam_cos _c10

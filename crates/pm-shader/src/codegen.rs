@@ -290,12 +290,21 @@ impl Generator {
 
     // ------------------------------------------------------ expressions ------
 
-    /// Emit `e`, broadcasting a scalar up to `target` if `target` is a vector.
+    /// Emit `e`, coercing it to `target`: broadcast a scalar up to a vector, or
+    /// truncate a wider vector down (HLSL implicitly drops trailing components,
+    /// e.g. `float3 v = tex2D(...)` keeps `.xyz`).
     fn emit_broadcast(&self, e: &Expr, target: Type) -> String {
         let et = self.infer(e);
         let s = self.expr(e, scalar_of(target));
+        let target_w = target.vector_len().map(usize::from).unwrap_or(target.is_scalar() as usize);
+        let expr_w = et.vector_len().map(usize::from).unwrap_or(et.is_scalar() as usize);
         if target.vector_len().is_some() && et.is_scalar() {
+            // broadcast a scalar across the target vector
             format!("{}({})", wgsl_type(target), s)
+        } else if target_w >= 1 && expr_w > target_w {
+            // truncate a wider source to the target width (scalar target -> `.x`)
+            let swizzle = &"xyzw"[..target_w];
+            format!("({s}).{swizzle}")
         } else {
             s
         }

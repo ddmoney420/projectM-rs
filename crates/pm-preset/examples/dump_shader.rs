@@ -27,7 +27,19 @@ fn main() {
         Err(e) => println!("translate error: {e}"),
         Ok(t) => { let wgsl = t.wgsl;
             match naga::front::wgsl::parse_str(&wgsl) {
-                Ok(_) => println!("naga: parsed OK"),
+                Ok(module) => {
+                    let mut v = naga::valid::Validator::new(
+                        naga::valid::ValidationFlags::all(),
+                        naga::valid::Capabilities::all(),
+                    );
+                    match v.validate(&module) {
+                        Ok(_) => println!("naga: parsed + validated OK"),
+                        Err(e) => {
+                            println!("=== naga VALIDATE error ===\n{}", e.emit_to_string(&wgsl));
+                            println!("{e:?}");
+                        }
+                    }
+                }
                 Err(e) => {
                     println!("=== naga error ===\n{}", e.emit_to_string(&wgsl));
                     // Print the offending region of the generated WGSL.
