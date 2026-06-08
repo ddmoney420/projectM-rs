@@ -110,6 +110,29 @@ preset format with a `.milk` importer/converter.
    round-trips losslessly for 99.99%, and the reconstructed `.milk` loads in the
    engine at exactly the original rate (99.65%) — i.e. zero behavioural drift.
 
+## Performance
+
+Measured headless at 1280×720 on a GeForce GTX 960 (`bench_render` example;
+each frame timed for CPU-return and again after a `poll(Wait)` so GPU ≈
+total − CPU). 60 fps budget is 16.67 ms.
+
+| scenario | total avg | cpu / gpu | p99 | ~fps |
+|---|---|---|---|---|
+| simple | 1.2 ms | 1.0 / 0.2 | 3.4 | 805 |
+| heavy warp (per-pixel) | 3.0 ms | 2.8 / 0.2 | 3.5 | 331 |
+| heavy waveform + shapes | 3.0 ms | 2.8 / 0.2 | 3.7 | 332 |
+| heavy shader (warp+comp) | 1.3 ms | 1.0 / 0.3 | 2.0 | 781 |
+| transition warp↔shader | 4.2 ms | 4.0 / 0.2 | 4.8 | 236 |
+| transition shapes↔shader | 4.3 ms | 4.1 / 0.2 | 4.8 | 233 |
+
+Findings: the bottleneck is **CPU, not GPU** — GPU work is ~0.2 ms everywhere,
+and the cost is the per-pixel mesh **eval** (heavy presets 2.8 ms vs 1.0 ms
+baseline). A crossfade costs ≈ the sum of both presets' CPU (as designed) and
+still holds 60 fps with >3× headroom — transitions are not a perf risk. No
+optimization was warranted by the data. The per-pixel eval is the thing to
+watch if much higher resolutions or weak integrated GPUs become targets.
+On-device frame timing is available live with `PM_PERF=1 cargo run -p pm-app`.
+
 ## Parity strategy
 
 Each crate is validated against the C++ original before moving on:

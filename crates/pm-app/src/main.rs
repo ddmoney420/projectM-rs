@@ -71,6 +71,57 @@ struct App {
     start: Instant,
     last: Instant,
     frame: i32,
+    /// Frame-time logging, enabled with the `PM_PERF` env var.
+    perf: Option<Perf>,
+}
+
+/// Rolling per-second frame-timing accumulator (opt-in via `PM_PERF`).
+struct Perf {
+    frames: u32,
+    render_ms: f64,
+    present_ms: f64,
+    worst_ms: f64,
+    transition_frames: u32,
+    last_print: Instant,
+}
+
+impl Perf {
+    fn new() -> Self {
+        Perf {
+            frames: 0,
+            render_ms: 0.0,
+            present_ms: 0.0,
+            worst_ms: 0.0,
+            transition_frames: 0,
+            last_print: Instant::now(),
+        }
+    }
+
+    /// Record one frame; print a rolling summary about once a second.
+    fn tick(&mut self, render_ms: f64, present_ms: f64, transitioning: bool) {
+        self.frames += 1;
+        self.render_ms += render_ms;
+        self.present_ms += present_ms;
+        self.worst_ms = self.worst_ms.max(render_ms + present_ms);
+        if transitioning {
+            self.transition_frames += 1;
+        }
+        let elapsed = self.last_print.elapsed().as_secs_f64();
+        if elapsed >= 1.0 && self.frames > 0 {
+            let n = self.frames as f64;
+            let frame_ms = (self.render_ms + self.present_ms) / n;
+            println!(
+                "[perf] {:.1} fps  frame avg {:.2}ms (render {:.2} / present {:.2})  worst {:.2}ms  {} transition frames",
+                self.frames as f64 / elapsed,
+                frame_ms,
+                self.render_ms / n,
+                self.present_ms / n,
+                self.worst_ms,
+                self.transition_frames,
+            );
+            *self = Perf::new();
+        }
+    }
 }
 
 impl App {
@@ -86,6 +137,7 @@ impl App {
             start: now,
             last: now,
             frame: 0,
+            perf: std::env::var_os("PM_PERF").map(|_| Perf::new()),
         }
     }
 
@@ -170,9 +222,13 @@ impl App {
         let time = (now - self.start).as_secs_f32();
 
         let audio = self.audio.frame_data(dt, self.frame);
+        let perf = self.perf.is_some();
+        let t_render = perf.then(Instant::now);
         render.player.render(&render.ctx, time, audio);
+        let render_ms = t_render.map(|t| t.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0);
         self.frame += 1;
 
+        let t_present = perf.then(Instant::now);
         match render.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -185,6 +241,11 @@ impl App {
             }
             // Timeout / Occluded / Validation: skip this frame.
             _ => {}
+        }
+
+        if let Some(p) = &mut self.perf {
+            let present_ms = t_present.map(|t| t.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0);
+            p.tick(render_ms, present_ms, render.player.is_transitioning());
         }
     }
 
