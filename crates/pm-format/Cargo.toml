@@ -1,0 +1,13 @@
+[package]
+name = "pm-format"
+description = "projectm-rs native preset format (.pmp): a structured, lossless representation of a Milkdrop preset with a .milk importer/exporter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "pm_format"
+
+[dependencies]
+pm-preset = { path = "../pm-preset" }

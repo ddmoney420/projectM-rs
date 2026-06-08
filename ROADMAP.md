@@ -82,11 +82,15 @@ preset format with a `.milk` importer/converter.
    res, rebuilt each frame from the feedback; `GetBlur1/2/3`). Remaining: more
    standard waveform modes, textured shapes, motion-vector/border/echo passes.
 6. **pm-core + pm-format + pm-app** — orchestrator, native format + importer,
-   live windowed app (winit + cpal). ← *pm-core + pm-app done*. pm-core's
-   WarpEngine drives warp+waveform+composite; **pm-app** is a live winit window
-   with a wgpu surface, cpal audio capture (graceful synthetic fallback), preset
-   cycling over the 9,795-preset corpus, and keyboard controls. pm-format (native
-   `.milk`-importing format) still to come.
+   live windowed app (winit + cpal). ← *done*. pm-core's WarpEngine drives
+   warp+waveform+composite; **pm-app** is a live winit window with a wgpu
+   surface, cpal audio capture (graceful synthetic fallback), preset cycling
+   over the corpus, and keyboard controls. **pm-format** is the native `.pmp`
+   preset format: a structured, lossless representation (scalar params + named
+   code blocks) with a `.milk` importer/exporter and a readable text form.
+   Validated over the 14k-preset corpus: `.milk → native → .pmp → native`
+   round-trips losslessly for 99.99%, and the reconstructed `.milk` loads in the
+   engine at exactly the original rate (99.65%) — i.e. zero behavioural drift.
 
 ## Parity strategy
 

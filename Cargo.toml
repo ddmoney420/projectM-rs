@@ -7,6 +7,7 @@ members = [
     "crates/pm-shader",
     "crates/pm-preset",
     "crates/pm-core",
+    "crates/pm-format",
     "crates/pm-app",
 ]
 
