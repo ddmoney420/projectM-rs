@@ -957,6 +957,154 @@ fn f_uninitialized_global_unchanged() {
     assert!(wgsl.contains("var<private> gtmp: f32;"), "uninitialized global unchanged");
 }
 
+// ---------------------------------------------- assignment-target coercion --
+// An assignment coerces its RHS to the inferred LHS type, like a Decl init:
+// wider vector truncates, bool/int convert to float. Covers both a body
+// `Expr::Assign` and a Bucket-F global-init replayed in the PS prologue.
+
+#[test]
+fn assign_vec4_into_vec3_truncates() {
+    let src = r#"
+        uniform float4 _c8;
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            float3 a = float3(0.0, 0.0, 0.0);
+            a = 0.5 + normalize(_c8);
+            _return_value = float4(a, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains(").xyz;"), "vec4 RHS truncated to .xyz on store into vec3:\n{wgsl}");
+}
+
+#[test]
+fn assign_vec4_into_vec2_truncates() {
+    let src = r#"
+        uniform float4 _c8;
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            float2 a = float2(0.0, 0.0);
+            a = _c8 + float4(1.0, 2.0, 3.0, 4.0);
+            _return_value = float4(a, 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains(").xy;"), "vec4 RHS truncated to .xy on store into vec2:\n{wgsl}");
+}
+
+#[test]
+fn assign_bool_into_float_converts() {
+    let src = r#"
+        uniform float4 _c3;
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            float a = 0.0;
+            a = _c3.x > 0.5;
+            _return_value = float4(a, a, a, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("f32(") && wgsl.contains("> 0.5"), "bool comparison coerced to f32 on store:\n{wgsl}");
+}
+
+#[test]
+fn assign_int_into_float_converts() {
+    // `n` is an int loop counter; storing it into a float must cast.
+    let src = r#"
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            float f = 0.0;
+            int n = 3;
+            f = n;
+            _return_value = float4(f, 0.0, 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("f = f32(n)"), "int RHS cast to f32 on store into float:\n{wgsl}");
+}
+
+#[test]
+fn assign_swizzle_lhs_uses_swizzle_target_width() {
+    // `v.xy = <vec4>` coerces the RHS to vec2 (the swizzle width), not vec4.
+    let src = r#"
+        uniform float4 _c8;
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            float3 v = float3(0.0, 0.0, 0.0);
+            v.xy = _c8 + float4(1.0, 1.0, 1.0, 1.0);
+            _return_value = float4(v, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    // multi-swizzle store expands component-wise from a vec2-truncated temp.
+    assert!(wgsl.contains(").xy;") || wgsl.contains("[0]") && wgsl.contains("[1]"), "swizzle target truncates RHS:\n{wgsl}");
+}
+
+#[test]
+fn assign_matching_vector_types_unchanged() {
+    let src = r#"
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            float3 a = float3(1.0, 2.0, 3.0);
+            float3 b = float3(0.0, 0.0, 0.0);
+            b = a;
+            _return_value = float4(b, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("b = a;"), "matching vec3=vec3 unchanged (no truncation):\n{wgsl}");
+}
+
+#[test]
+fn assign_int_to_int_stays_int() {
+    let src = r#"
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            int n = 0;
+            n = 5;
+            float f = float(n);
+            _return_value = float4(f, 0.0, 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("n = 5;"), "int=int store stays integer (no f32 cast):\n{wgsl}");
+    assert!(!wgsl.contains("n = f32(5)"), "no spurious float cast on int store");
+}
+
+#[test]
+fn f_prologue_vec4_global_init_truncates() {
+    // Bucket-F replay path: a vec3 global initialized from a vec4 expression
+    // must truncate in the PS prologue (was the source of 65 InvalidStoreTypes).
+    let src = r#"
+        uniform float4 _c8;
+        float3 gsun = 0.5 + normalize(_c8);
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            _return_value = float4(gsun, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("var<private> gsun: vec3<f32>;"));
+    assert!(pos_in_ps(&wgsl, "gsun = ").wrapping_add(0) > 0 && wgsl.contains(").xyz;"), "global vec4 init truncated in prologue:\n{wgsl}");
+}
+
+#[test]
+fn f_prologue_bool_global_init_converts() {
+    // A float global initialized from a bool comparison must convert in prologue
+    // (was the source of the bool/int auto-convert residual).
+    let src = r#"
+        uniform float4 _c4;
+        float giter = (_c4.z > 0.5);
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            _return_value = float4(giter, 0.0, 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("var<private> giter: f32;"));
+    assert!(pos_in_ps(&wgsl, "giter = f32(") > 0, "global bool init converted to f32 in prologue:\n{wgsl}");
+}
+
 #[test]
 fn f_shader_without_runtime_globals_unaffected() {
     // No runtime globals -> no prologue injection; still validates.

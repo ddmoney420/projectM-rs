@@ -50,7 +50,7 @@ preset format with a `.milk` importer/converter.
    with type inference + param-mutation shadowing; output validated by naga).
    The full preset-shader pipeline (wrap `shader_body` → uniform/intrinsic header
    → transpile → assemble bindings + entry) lives in `pm-preset::preset_shader`.
-   **Corpus shader compat: ~95.4% composite / ~95.1% warp produce valid WGSL** (up
+   **Corpus shader compat: ~95.4% composite / ~96.1% warp produce valid WGSL** (up
    from 37% / 18%), via corpus-driven hardening tracked by the `shader_report`
    example: built-in noise `texsize_*` constants, HLSL implicit vector
    truncation on store *and* in binary ops (`float4 * float2` -> first two
@@ -97,13 +97,25 @@ preset format with a `.milk` importer/converter.
    auto-convert — separate buckets, not regressions). No currently-valid shader
    is touched (only non-compiling shaders have this pattern), so no visual diff
    was required; spot-renders of newly-valid F presets produce coherent output.
+   The Bucket-F prologue assignments then revealed an **assignment-target
+   coercion** gap: the replayed global initializers were emitted with raw
+   `expr()` rather than the `emit_broadcast()` path a `Decl` init / `Expr::Assign`
+   RHS uses, so a vec3 global initialized from a vec4 expression (`float3 suncol
+   = .5 + normalize(roam_cos)`) stored vec4 into vec3 (`InvalidStoreTypes`) and a
+   float global from a bool comparison (`float iter6 = rand_preset.z > .5`) stored
+   bool into f32 (`automatic conversions cannot convert`). Routing the prologue
+   through `emit_broadcast` (truncate wider vector to the declared width, bool/int
+   -> float) cleared `InvalidStoreTypes` 68 -> 3 and the bool/int auto-convert
+   bucket 23 -> 4 for +84 valid shaders, zero regressions. (The 3 residual stores
+   are `mat3x4 * vec3` body products mis-typed as vec3 by `infer` — a matrix-width
+   typing issue, deferred; the body `Expr::Assign` path itself already coerced
+   correctly.)
    The remaining naga rejections, by descending frequency (`parse_buckets` /
-   `validate_kinds` / `bucket_subgroups` examples): `InvalidStoreTypes` (~68,
-   width mismatch on store, mostly F secondary), a `Cope - domains` expression
-   family (~27), `InvalidReturnType` (~20, user functions declared to return a
-   vector but whose body returns a different type), the `cannot cast` vec4->vec2
-   matrix-index E tail (9), and small unary/binary tails. These are the next
-   hardening work.
+   `validate_kinds` / `bucket_subgroups` examples): `InvalidReturnType` (~20, user
+   functions declared to return a vector but whose body returns a different type),
+   a `Cope - domains` expression family (~27), the `cannot cast` vec4->vec2
+   matrix-index E tail (9), the 3 `mat3x4 * vec3` mis-typed-store residual, and
+   small unary/binary tails. These are the next hardening work.
    **Custom composite *and* warp shaders now render.** Composite
    (`pm-core::PresetComposite`): the translated WGSL is wired with a per-frame
    `MdUniforms` buffer (`_cN`/`q`/rot) and `sampler_main`, swapping in for the

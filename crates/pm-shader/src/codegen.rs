@@ -221,7 +221,11 @@ impl Generator {
         if f.name == "PS" && !self.runtime_inits.is_empty() {
             let inits = std::mem::take(&mut self.runtime_inits);
             for (name, ty, init) in &inits {
-                let rhs = self.expr(init, *ty);
+                // Coerce the initializer to the global's declared type, exactly as
+                // a `Decl` initializer or an `Expr::Assign` RHS does — truncating a
+                // wider vector (HLSL `float3 g = <vec4>`) and converting bool/int
+                // to float. Plain `expr()` would store the raw, mistyped value.
+                let rhs = self.emit_broadcast(init, *ty);
                 let _ = writeln!(self.out, "    {name} = {rhs};");
             }
             self.runtime_inits = inits;
