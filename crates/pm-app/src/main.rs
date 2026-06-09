@@ -6,7 +6,7 @@
 //!
 //! Keys: →/Space/N next preset · ←/P previous · R random · F5/L reload current ·
 //! T toggle transitions · F toggle perf overlay · H toggle HUD · Pause/K
-//! freeze · A auto-advance ([ / ] adjust interval) · Esc/Q quit.
+//! freeze · A auto-advance ([ / ] adjust interval) · S shuffle · Esc/Q quit.
 //!
 //! Env: `PM_PERF` starts with the perf overlay on; `PM_SCAN` prints a one-time
 //! corpus compatibility summary (parse + shader-translate rates) at startup.
@@ -22,6 +22,7 @@ use pm_core::{PresetPlayer, WarpEngine, DEFAULT_TRANSITION_SECS};
 use pm_preset::{shader_to_wgsl, Preset, ShaderKind};
 use pm_render::wgpu;
 use pm_render::{read_rgba8, GpuContext};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -68,6 +69,9 @@ const AUTO_STEP_SECS: f32 = 5.0;
 const AUTO_MIN_SECS: f32 = 5.0;
 const AUTO_MAX_SECS: f32 = 600.0;
 
+/// Recent-history length for shuffle no-repeat avoidance.
+const SHUFFLE_HISTORY: usize = 25;
+
 /// Number of warm-up frames to build feedback content before probing.
 const WARMUP_FRAMES: i32 = 8;
 /// Max presets to skip when searching for one that renders visible content.
@@ -105,6 +109,10 @@ struct App {
     auto_interval: f32,
     /// Wall-seconds elapsed toward the next auto-advance (paused-aware).
     auto_elapsed: f32,
+    /// Shuffle mode (toggle `S`): random, no-repeat selection for auto-advance.
+    shuffle: bool,
+    /// Recently shown preset indices (most-recent first) for no-repeat.
+    history: VecDeque<usize>,
 }
 
 /// Rolling per-second frame-timing accumulator (opt-in via `PM_PERF`).
@@ -179,6 +187,43 @@ impl App {
             auto_advance: false,
             auto_interval: AUTO_DEFAULT_SECS,
             auto_elapsed: 0.0,
+            shuffle: false,
+            history: VecDeque::new(),
+        }
+    }
+
+    /// Advance the LCG and return an index in `0..len`.
+    fn next_rng(&mut self, len: usize) -> usize {
+        self.rng = self.rng.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        (self.rng as usize) % len.max(1)
+    }
+
+    /// Pick a random start index avoiding the current preset and recent history;
+    /// degrades to any index != current when the corpus is small.
+    fn pick_shuffle_start(&mut self, len: usize) -> usize {
+        if len <= 1 {
+            return 0;
+        }
+        for _ in 0..16 {
+            let i = self.next_rng(len);
+            if i != self.index && !self.history.contains(&i) {
+                return i;
+            }
+        }
+        let i = self.next_rng(len);
+        if i == self.index {
+            (i + 1) % len
+        } else {
+            i
+        }
+    }
+
+    /// Record the shown preset in the no-repeat history (skipped ones excluded).
+    fn remember(&mut self, idx: usize, len: usize) {
+        self.history.push_front(idx);
+        let cap = SHUFFLE_HISTORY.min(len.saturating_sub(1));
+        while self.history.len() > cap {
+            self.history.pop_back();
         }
     }
 
@@ -195,6 +240,9 @@ impl App {
             status.push_str(" XFADE");
         } else if render.player.duration() <= 0.0 {
             status.push_str(" CUT");
+        }
+        if self.shuffle {
+            status.push_str(" SHUF");
         }
         lines.push(status);
         if self.auto_advance {
@@ -234,8 +282,7 @@ impl App {
         let len = self.presets.len();
         let dir: i64 = if delta < 0 { -1 } else { 1 };
         let start = if random {
-            self.rng = self.rng.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-            (self.rng as usize) % len
+            self.pick_shuffle_start(len)
         } else if !self.on_corpus {
             // First step into the corpus: begin at an end.
             if dir > 0 { 0 } else { len - 1 }
@@ -283,6 +330,7 @@ impl App {
             println!("Showing [{}/{}]: {name}{why}", idx + 1, len);
         }
         self.index = idx;
+        self.remember(idx, len); // record only the shown preset (not skipped ones)
         self.auto_elapsed = 0.0; // newly shown preset gets a full interval
     }
 
@@ -294,6 +342,12 @@ impl App {
             "Auto-advance: {}",
             if self.auto_advance { format!("on (every {:.0}s)", self.auto_interval) } else { "off".into() }
         );
+    }
+
+    /// Toggle shuffle mode (random, no-repeat selection for auto-advance / R).
+    fn toggle_shuffle(&mut self) {
+        self.shuffle = !self.shuffle;
+        println!("Shuffle: {}", if self.shuffle { "on" } else { "off" });
     }
 
     /// Adjust the auto-advance interval by `delta` seconds, clamped.
@@ -401,7 +455,12 @@ impl App {
         if self.auto_advance && !self.paused && !self.presets.is_empty() {
             self.auto_elapsed += wall_dt.as_secs_f32();
             if self.auto_elapsed >= self.auto_interval {
-                self.change_preset(1, false);
+                // Shuffle picks a random no-repeat preset; otherwise sequential.
+                if self.shuffle {
+                    self.change_preset(0, true);
+                } else {
+                    self.change_preset(1, false);
+                }
             }
         }
 
@@ -559,6 +618,7 @@ impl ApplicationHandler for App {
                     }
                     "k" => self.toggle_pause(),
                     "a" => self.toggle_auto(),
+                    "s" => self.toggle_shuffle(),
                     "[" => self.adjust_auto_interval(-AUTO_STEP_SECS),
                     "]" => self.adjust_auto_interval(AUTO_STEP_SECS),
                     "l" => self.reload_current(),
@@ -737,7 +797,7 @@ fn main() {
         scan_corpus(&presets);
     }
     println!(
-        "Keys: Right/Space/N next · Left/P prev · R random · F5/L reload · T transitions · F perf · H hud · Pause/K freeze · A auto ([ ] interval) · Esc/Q quit"
+        "Keys: Right/Space/N next · Left/P prev · R random · F5/L reload · T transitions · F perf · H hud · Pause/K freeze · A auto ([ ] interval) · S shuffle · Esc/Q quit"
     );
 
     let event_loop = EventLoop::new().expect("create event loop");

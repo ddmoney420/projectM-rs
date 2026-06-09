@@ -202,6 +202,11 @@ preset format with a `.milk` importer/converter.
    with freeze and resumes without losing remaining time; any manual nav/reload
    resets it so the shown preset gets a full interval, skipped presets don't
    consume it, and it uses transitions when enabled. The HUD shows `AUTO nS / NS`.
+   **Shuffle** (`S`, off by default) makes auto-advance and manual `R` pick a
+   random preset avoiding the current one and a 25-entry recent-history queue (so
+   it cycles without immediate repeats; degrades gracefully on a small corpus);
+   manual next/prev stay sequential. Only the *shown* (renderable) preset enters
+   the history — skipped candidates don't. The HUD shows `SHUF` on the status line.
    **Freeze** is an exact last-frame hold: while
    paused the app skips `player.render` entirely (so preset time, the frame
    counter, feedback iteration, and transitions all stop — no state mutation) and
