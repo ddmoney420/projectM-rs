@@ -33,14 +33,41 @@ struct Generator {
     /// Declared return type of the function currently being emitted, so a
     /// `return` can coerce its expression to the declared type.
     current_ret: Type,
+    /// Bucket F: module-scope globals whose initializer is a runtime expression
+    /// (references a uniform/global/call), which WGSL forbids at module scope.
+    /// They're emitted as uninitialized `var<private>` and their initializers
+    /// are replayed as assignments at the top of the `PS` entry, in declaration
+    /// order, so they stay visible to helper functions. `(sanitized name, type,
+    /// init)`. Only populated when a `PS` entry exists to host the prologue.
+    runtime_inits: Vec<(String, Type, Expr)>,
+    /// Names (sanitized) of the globals in `runtime_inits`, so module-scope
+    /// emission skips their initializer.
+    runtime_names: std::collections::HashSet<String>,
     out: String,
     temp: usize,
+}
+
+/// Whether an expression is a WGSL const-expression — buildable from literals,
+/// const operators and const constructors only. Anything that reads an
+/// identifier (every module global is a runtime `var<private>`) or calls a
+/// function is a *runtime* expression, illegal in a module-scope initializer.
+fn is_const_expr(e: &Expr) -> bool {
+    match e {
+        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) => true,
+        Expr::Unary(_, a) | Expr::Member(a, _) => is_const_expr(a),
+        Expr::Index(a, b) | Expr::Binary(_, a, b) => is_const_expr(a) && is_const_expr(b),
+        Expr::Ternary(c, a, b) => is_const_expr(c) && is_const_expr(a) && is_const_expr(b),
+        Expr::Construct(_, args) => args.iter().all(is_const_expr),
+        // Ident (reads a var<private>), Call, Assign, ++/-- => runtime.
+        _ => false,
+    }
 }
 
 impl Generator {
     fn new(items: &[Item]) -> Self {
         let mut globals = HashMap::new();
         let mut functions = HashMap::new();
+        let has_ps = items.iter().any(|it| matches!(it, Item::Function(f) if f.name == "PS"));
         for item in items {
             match item {
                 Item::Global { ty, name, .. } => {
@@ -53,18 +80,47 @@ impl Generator {
                 _ => {}
             }
         }
-        Generator { globals, locals: HashMap::new(), functions, current_ret: Type::Void, out: String::new(), temp: 0 }
+        // Bucket F: collect runtime-initialized globals, in declaration order.
+        // Only when a `PS` entry exists to host the replayed assignments — for a
+        // generic translate with no entry, leave the original behaviour.
+        let mut runtime_inits = Vec::new();
+        let mut runtime_names = std::collections::HashSet::new();
+        if has_ps {
+            for item in items {
+                if let Item::Global { ty, name, init: Some(e), .. } = item {
+                    if !is_const_expr(e) {
+                        let sname = sanitize_ident(name);
+                        runtime_names.insert(sname.clone());
+                        runtime_inits.push((sname, *ty, e.clone()));
+                    }
+                }
+            }
+        }
+        Generator {
+            globals,
+            locals: HashMap::new(),
+            functions,
+            current_ret: Type::Void,
+            runtime_inits,
+            runtime_names,
+            out: String::new(),
+            temp: 0,
+        }
     }
 
     fn run(&mut self, items: &[Item]) {
-        // Module-scope globals as private vars (placeholder for uniforms).
+        // Module-scope globals as private vars (placeholder for uniforms). A
+        // runtime initializer (Bucket F) is omitted here and replayed at the top
+        // of `PS` instead, since WGSL forbids runtime exprs in module-scope
+        // initializers.
         for item in items {
             if let Item::Global { ty, name, init, .. } = item {
+                let sname = sanitize_ident(name);
                 let init_s = match init {
-                    Some(e) => format!(" = {}", self.expr(e, *ty)),
-                    None => String::new(),
+                    Some(e) if !self.runtime_names.contains(&sname) => format!(" = {}", self.expr(e, *ty)),
+                    _ => String::new(),
                 };
-                let _ = writeln!(self.out, "var<private> {}: {}{};", sanitize_ident(name), wgsl_type(*ty), init_s);
+                let _ = writeln!(self.out, "var<private> {}: {}{};", sname, wgsl_type(*ty), init_s);
             }
         }
         // Textures/samplers: note the binding convention for the preset engine.
@@ -156,6 +212,20 @@ impl Generator {
             let fields = out_params.iter().map(|p| sanitize_ident(&p.name)).collect::<Vec<_>>().join(", ");
             Some(format!("{struct_name}({fields})"))
         };
+
+        // Bucket F prologue: replay runtime global initializers as assignments at
+        // the top of the `PS` entry, in declaration order. Runs after the entry's
+        // `load_uniforms()` (the uniforms the inits read are already populated)
+        // and before any user body code or helper call, and the globals stay
+        // `var<private>` so helpers that read them see the assigned values.
+        if f.name == "PS" && !self.runtime_inits.is_empty() {
+            let inits = std::mem::take(&mut self.runtime_inits);
+            for (name, ty, init) in &inits {
+                let rhs = self.expr(init, *ty);
+                let _ = writeln!(self.out, "    {name} = {rhs};");
+            }
+            self.runtime_inits = inits;
+        }
 
         for s in &f.body {
             self.stmt(s, 1, return_expr.as_deref());

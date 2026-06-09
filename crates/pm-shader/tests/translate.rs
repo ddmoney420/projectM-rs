@@ -806,3 +806,170 @@ fn matrix_lowering_numeric_proof() {
     // HLSL mul(float2x2(1,2,3,4), (10,20)) == (50,110) == v * mat2x2(1,2,3,4)
     assert_eq!(v_times_m(10.0, 20.0, 1.0, 2.0, 3.0, 4.0), (50.0, 110.0));
 }
+
+// --------------------------------------------------------- Bucket F ----------
+// Module-scope globals with a runtime initializer (referencing a uniform, an
+// inter-global, or a call) are illegal in WGSL at module scope. They're emitted
+// as uninitialized `var<private>` and their initializers are replayed as
+// assignments at the top of the `PS` entry, in declaration order.
+
+/// Index where a substring first appears inside the `PS` function body.
+fn pos_in_ps(wgsl: &str, needle: &str) -> usize {
+    let ps = wgsl.find("fn PS").expect("PS function present");
+    wgsl[ps..].find(needle).unwrap_or_else(|| panic!("`{needle}` not found in PS\n{wgsl}")) + ps
+}
+
+#[test]
+fn f_scalar_global_from_uniform_lowers_to_prologue() {
+    let src = r#"
+        uniform float4 _qa;
+        float gscale = _qa.x;
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            float3 ret = float3(gscale, gscale, gscale);
+            _return_value = float4(ret, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("var<private> gscale: f32;"), "scalar global emitted without init:\n{wgsl}");
+    assert!(!wgsl.contains("var<private> gscale: f32 ="), "no module-scope runtime init");
+    // assignment replayed inside PS.
+    assert!(pos_in_ps(&wgsl, "gscale = _qa.x;") > 0, "prologue assignment present");
+}
+
+#[test]
+fn f_vector_global_from_uniform_lowers() {
+    let src = r#"
+        uniform float4 _qa;
+        float3 gcam = float3(_qa.x, _qa.y, _qa.z);
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            _return_value = float4(gcam, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("var<private> gcam: vec3<f32>;"), "vector global uninitialized:\n{wgsl}");
+    assert!(pos_in_ps(&wgsl, "gcam = vec3<f32>(_qa.x, _qa.y, _qa.z);") > 0);
+}
+
+#[test]
+fn f_matrix_global_from_uniforms_lowers() {
+    let src = r#"
+        uniform float4 _qe;
+        uniform float4 _qf;
+        uniform float4 _qg;
+        float3x3 grot = float3x3(_qe.w, _qf.x, _qf.y, _qf.z, _qf.w, _qg.x, _qg.y, _qg.z, _qg.w);
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            float3 v = grot * float3(_uv.x, _uv.y, 1.0);
+            _return_value = float4(v, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("var<private> grot: mat3x3<f32>;"), "matrix global uninitialized:\n{wgsl}");
+    assert!(pos_in_ps(&wgsl, "grot = mat3x3<f32>(") > 0, "matrix prologue assignment");
+}
+
+#[test]
+fn f_inter_global_dependency_preserves_source_order() {
+    let src = r#"
+        uniform float4 _qc;
+        float gds = _qc.y;
+        float gsus = 0.96 - gds;
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            _return_value = float4(gds, gsus, 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("var<private> gds: f32;") && wgsl.contains("var<private> gsus: f32;"));
+    // `gds` must be assigned before `gsus`, which reads it.
+    let p_ds = pos_in_ps(&wgsl, "gds = _qc.y;");
+    let p_sus = pos_in_ps(&wgsl, "gsus = (0.96 - gds);");
+    assert!(p_ds < p_sus, "source order preserved: gds before gsus\n{wgsl}");
+}
+
+#[test]
+fn f_global_read_in_helper_stays_module_scope() {
+    // The global is read inside a helper function, so it must remain a
+    // `var<private>` (not a PS-local) for the helper to see it.
+    let src = r#"
+        uniform float4 _qa;
+        float gk = _qa.x;
+        float helper(float x) { return x * gk; }
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            float r = helper(_uv.x);
+            _return_value = float4(r, r, r, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("var<private> gk: f32;"), "global stays module-scope for helper visibility");
+    // helper references gk; assignment is in PS prologue.
+    assert!(wgsl.contains("* gk") || wgsl.contains("gk)"), "helper reads the global");
+    assert!(pos_in_ps(&wgsl, "gk = _qa.x;") > 0);
+}
+
+#[test]
+fn f_mutated_global_works_as_var() {
+    let src = r#"
+        uniform float4 _qa;
+        float gm = _qa.x;
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            gm = gm + 1.0;
+            _return_value = float4(gm, gm, gm, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    // `var<private>` is mutable, so the later write is fine.
+    assert!(wgsl.contains("var<private> gm: f32;"));
+    assert!(pos_in_ps(&wgsl, "gm = _qa.x;") > 0);
+}
+
+#[test]
+fn f_const_global_initializer_stays_at_module_scope() {
+    let src = r#"
+        float glimit = 34.0;
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            _return_value = float4(glimit, 0.0, 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("var<private> glimit: f32 = 34.0;"), "const init stays at module scope:\n{wgsl}");
+    // No replayed assignment for a const global.
+    let ps = wgsl.find("fn PS").unwrap();
+    assert!(!wgsl[ps..].contains("glimit = 34.0;"), "const global not replayed in PS");
+}
+
+#[test]
+fn f_uninitialized_global_unchanged() {
+    let src = r#"
+        float gtmp;
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            gtmp = _uv.x;
+            _return_value = float4(gtmp, 0.0, 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("var<private> gtmp: f32;"), "uninitialized global unchanged");
+}
+
+#[test]
+fn f_shader_without_runtime_globals_unaffected() {
+    // No runtime globals -> no prologue injection; still validates.
+    let src = r#"
+        uniform float4 _c2;
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            float2 uv = _uv.xy;
+            float3 ret = float3(uv.x, uv.y, _c2.x);
+            _return_value = float4(ret, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    // The only assignments inside PS are the user's; nothing spurious injected.
+    assert!(wgsl.contains("fn PS"));
+}

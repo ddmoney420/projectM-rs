@@ -50,7 +50,7 @@ preset format with a `.milk` importer/converter.
    with type inference + param-mutation shadowing; output validated by naga).
    The full preset-shader pipeline (wrap `shader_body` → uniform/intrinsic header
    → transpile → assemble bindings + entry) lives in `pm-preset::preset_shader`.
-   **Corpus shader compat: ~95% composite / ~94.5% warp produce valid WGSL** (up
+   **Corpus shader compat: ~95.4% composite / ~95.1% warp produce valid WGSL** (up
    from 37% / 18%), via corpus-driven hardening tracked by the `shader_report`
    example: built-in noise `texsize_*` constants, HLSL implicit vector
    truncation on store *and* in binary ops (`float4 * float2` -> first two
@@ -82,11 +82,27 @@ preset format with a `.milk` importer/converter.
    silently transposed (verified by before/after render snapshots in
    `bucket-e-visuals/`, since a valid-set diff cannot detect a corrected-but-
    still-valid render — swirl/rotation direction flips, output stays coherent).
+   and **runtime global-initializer lowering (Bucket F)**: a module-scope preset
+   global whose initializer is not a WGSL const-expression (reads a uniform,
+   another global, or a call — illegal in a module-scope initializer) is emitted
+   as an uninitialized `var<private>` and its initializer is replayed as an
+   assignment at the top of the `PS` entry, in declaration order (after
+   `load_uniforms`, before the body). Keeping them `var<private>` (not PS-local
+   `let`) preserves visibility for the helper functions that read them — 121 of
+   210 F shaders do; `var` keeps mutated globals writable; declaration order
+   preserves inter-global dependencies. This cleared the "Unexpected
+   runtime-expression" parse bucket (210 -> 0) for +81 valid shaders and zero
+   valid-set regressions (the other ~129 F shaders hit unrelated *secondary*
+   errors once F clears — `modf` arity, `InvalidStoreTypes`, bool/int->vec
+   auto-convert — separate buckets, not regressions). No currently-valid shader
+   is touched (only non-compiling shaders have this pattern), so no visual diff
+   was required; spot-renders of newly-valid F presets produce coherent output.
    The remaining naga rejections, by descending frequency (`parse_buckets` /
-   `validate_kinds` / `bucket_subgroups` examples): global initializers
-   referencing uniforms (Bucket F, ~210), and small tails — `InvalidReturnType`
-   (~11, user functions declared to return a vector but whose body returns a
-   different type) and residual matrix `InvalidBinary` (~6). These are the next
+   `validate_kinds` / `bucket_subgroups` examples): `InvalidStoreTypes` (~68,
+   width mismatch on store, mostly F secondary), a `Cope - domains` expression
+   family (~27), `InvalidReturnType` (~20, user functions declared to return a
+   vector but whose body returns a different type), the `cannot cast` vec4->vec2
+   matrix-index E tail (9), and small unary/binary tails. These are the next
    hardening work.
    **Custom composite *and* warp shaders now render.** Composite
    (`pm-core::PresetComposite`): the translated WGSL is wired with a per-frame
