@@ -599,3 +599,62 @@ fn tex3d_keeps_vec3_coordinate() {
     assert!(wgsl.contains("textureSample(sampler_noisevol_hq, sampler_noisevol_hq_sampler, p)"));
     assert!(!wgsl.contains("(p).xy"), "tex3D coord not truncated");
 }
+
+#[test]
+fn unary_minus_on_bool_coerces_before_negation() {
+    // HLSL `-(a < b)` = `-(0/1)`; the bool must become f32 *before* the minus.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float x = 0.7;
+            float r = -(x > 0.5);              // -(f32(x > 0.5))
+            float3 v = float3(-(x > 0.5));     // constructor path
+            _return_value = float4(v, r);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("-(f32("), "bool coerced before unary minus");
+    assert!(!wgsl.contains("-((") || wgsl.contains("-(f32("), "no bare -(bool)");
+}
+
+#[test]
+fn bool_times_bool_arithmetic_coerces_both() {
+    // `(a > b) * (c > d)` and `(a > b) + (c > d)` are float math in HLSL.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float a = 0.7;
+            float b = 0.3;
+            float c = 0.6;
+            float d = 0.2;
+            float m = (a > b) * (c > d);
+            float s = (a > b) + (c > d);
+            _return_value = float4(m, s, 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("f32((a > b)) * f32((c > d))"), "both bool operands cast");
+    assert!(wgsl.contains("f32((a > b)) + f32((c > d))"));
+}
+
+#[test]
+fn bool_contexts_unaffected_by_unary_and_arith_coercion() {
+    // if/!/&& must stay bool — not numerically coerced.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float a = 0.7;
+            float b = 0.3;
+            float r = 0.0;
+            if (a > b) { r = 1.0; }
+            bool n = !(a > b);
+            if ((a > b) && (b < a)) { r += 1.0; }
+            _return_value = float4(r, float(n), 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("if ((a > b))"), "if condition stays bool");
+    assert!(wgsl.contains("!((a > b))"), "logical not stays bool");
+    assert!(wgsl.contains("&&"), "logical and stays bool");
+    assert!(!wgsl.contains("if (f32("), "no numeric coercion of conditions");
+}

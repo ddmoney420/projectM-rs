@@ -385,6 +385,22 @@ impl Generator {
             Expr::FloatLit(v) => fmt_float(*v),
             Expr::BoolLit(b) => b.to_string(),
             Expr::Ident(name) => sanitize_ident(name),
+            // Unary minus on a bool (a comparison/logical result) needs the bool
+            // coerced to a number *first* (HLSL `-(a < b)` = `-(0/1)`): scalar ->
+            // `-(f32(...))`, bool vector -> `-(vecN<f32>(...))`.
+            Expr::Unary(UnOp::Neg, x) => {
+                let xt = self.infer(x);
+                if scalar_of(xt) == Type::Bool {
+                    let inner = self.expr(x, Type::Float);
+                    let coerced = match xt.vector_len() {
+                        Some(n) => format!("{}({inner})", wgsl_type(vec_of(Type::Float, n))),
+                        None => format!("f32({inner})"),
+                    };
+                    format!("-({coerced})")
+                } else {
+                    format!("-({})", self.expr(x, want))
+                }
+            }
             Expr::Unary(op, x) => {
                 let s = match op {
                     UnOp::Neg => "-",
@@ -453,7 +469,15 @@ impl Generator {
             return format!("({} {} {})", self.emit_broadcast(a, common), o, self.emit_broadcast(b, common));
         }
 
-        let common = arith_common(ta, tb);
+        let mut common = arith_common(ta, tb);
+        // Numeric arithmetic on bools (HLSL `(a > b) * (c > d)`) is float math:
+        // promote a bool common type to float so both operands are cast to 1/0.
+        // (`&&`/`||` and comparisons returned early; bitwise/shift stay integral.)
+        if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod)
+            && matches!(scalar_of(common), Type::Bool)
+        {
+            common = common.vector_len().map_or(Type::Float, |n| vec_of(Type::Float, n));
+        }
         let o = bin_op_str(op);
         format!("({} {} {})", self.emit_broadcast(a, common), o, self.emit_broadcast(b, common))
     }
@@ -575,6 +599,17 @@ impl Generator {
                 .copied()
                 .unwrap_or(Type::Float),
             Expr::Unary(UnOp::Not, _) => Type::Bool,
+            // Unary minus on a bool coerces to a number (see codegen), so its
+            // inferred type is numeric — otherwise the surrounding context would
+            // wrap it in a redundant/invalid second cast.
+            Expr::Unary(UnOp::Neg, x) => {
+                let xt = self.infer(x);
+                if scalar_of(xt) == Type::Bool {
+                    xt.vector_len().map_or(Type::Float, |n| vec_of(Type::Float, n))
+                } else {
+                    xt
+                }
+            }
             Expr::Unary(_, x) => self.infer(x),
             Expr::PreInc(x) | Expr::PostInc(x) | Expr::PreDec(x) | Expr::PostDec(x) => self.infer(x),
             Expr::Binary(op, a, b) => match op {
