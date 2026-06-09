@@ -61,7 +61,7 @@ impl Generator {
                     Some(e) => format!(" = {}", self.expr(e, *ty)),
                     None => String::new(),
                 };
-                let _ = writeln!(self.out, "var<private> {}: {}{};", name, wgsl_type(*ty), init_s);
+                let _ = writeln!(self.out, "var<private> {}: {}{};", sanitize_ident(name), wgsl_type(*ty), init_s);
             }
         }
         // Textures/samplers: note the binding convention for the preset engine.
@@ -104,7 +104,7 @@ impl Generator {
         if !out_params.is_empty() {
             let _ = writeln!(self.out, "struct {struct_name} {{");
             for (i, p) in out_params.iter().enumerate() {
-                let _ = writeln!(self.out, "    @location({i}) {}: {},", p.name, wgsl_type(p.ty));
+                let _ = writeln!(self.out, "    @location({i}) {}: {},", sanitize_ident(&p.name), wgsl_type(p.ty));
             }
             let _ = writeln!(self.out, "}}\n");
         }
@@ -119,7 +119,8 @@ impl Generator {
         let params_s = in_params
             .iter()
             .map(|p| {
-                let pname = if mutated.contains(&p.name) { format!("{}_param", p.name) } else { p.name.clone() };
+                let base = sanitize_ident(&p.name);
+                let pname = if mutated.contains(&p.name) { format!("{base}_param") } else { base };
                 format!("{}: {}", pname, wgsl_type(p.ty))
             })
             .collect::<Vec<_>>()
@@ -131,24 +132,24 @@ impl Generator {
         } else {
             String::new()
         };
-        let _ = writeln!(self.out, "fn {}({}){} {{", f.name, params_s, ret_s);
+        let _ = writeln!(self.out, "fn {}({}){} {{", sanitize_ident(&f.name), params_s, ret_s);
 
         // `out` params become mutable locals initialized to zero.
         for p in &out_params {
-            let _ = writeln!(self.out, "    var {}: {} = {};", p.name, wgsl_type(p.ty), zero_value(p.ty));
+            let _ = writeln!(self.out, "    var {}: {} = {};", sanitize_ident(&p.name), wgsl_type(p.ty), zero_value(p.ty));
         }
 
         // Mutable local copies of written-to parameters.
         for p in &in_params {
             if mutated.contains(&p.name) {
-                let _ = writeln!(self.out, "    var {0} = {0}_param;", p.name);
+                let _ = writeln!(self.out, "    var {0} = {0}_param;", sanitize_ident(&p.name));
             }
         }
 
         let return_expr = if out_params.is_empty() {
             None
         } else {
-            let fields = out_params.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(", ");
+            let fields = out_params.iter().map(|p| sanitize_ident(&p.name)).collect::<Vec<_>>().join(", ");
             Some(format!("{struct_name}({fields})"))
         };
 
@@ -171,6 +172,7 @@ impl Generator {
         match s {
             Stmt::Decl { ty, name, init } => {
                 self.locals.insert(name.clone(), *ty);
+                let name = sanitize_ident(name);
                 match init {
                     Some(e) => {
                         let v = self.emit_broadcast(e, *ty);
@@ -341,7 +343,7 @@ impl Generator {
             }
             Expr::FloatLit(v) => fmt_float(*v),
             Expr::BoolLit(b) => b.to_string(),
-            Expr::Ident(name) => name.clone(),
+            Expr::Ident(name) => sanitize_ident(name),
             Expr::Unary(op, x) => {
                 let s = match op {
                     UnOp::Neg => "-",
@@ -494,7 +496,7 @@ impl Generator {
                     .map(|(a, &pty)| self.emit_broadcast(a, pty))
                     .collect::<Vec<_>>()
                     .join(", ");
-                return format!("{name}({parts})");
+                return format!("{}({parts})", sanitize_ident(name));
             }
         }
         // Default: pass through with float-formatted literals.
@@ -600,6 +602,40 @@ fn collect_mutated_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
             }
             collect_mutated_stmt(body, out);
         }
+    }
+}
+
+/// WGSL keywords + reserved words that are also valid HLSL identifiers, so a
+/// preset variable/function could collide with one (e.g. `mod`, `filter`,
+/// `move`). Generated names (`_cN`, `ret`, `sampler_main`, …) never match.
+const WGSL_RESERVED: &[&str] = &[
+    "NULL", "Self", "abstract", "active", "alias", "as", "asm", "async", "atomic", "auto", "await",
+    "become", "binding_array", "bitcast", "cast", "catch", "class", "co_await", "co_return",
+    "co_yield", "coherent", "common", "compile", "concept", "const_cast", "consteval", "constexpr",
+    "constinit", "crate", "debugger", "decltype", "delete", "demote", "do", "dynamic_cast", "enum",
+    "explicit", "export", "extends", "extern", "external", "fallthrough", "filter", "final",
+    "finally", "friend", "from", "get", "goto", "groupshared", "highp", "impl", "implements",
+    "import", "inline", "instanceof", "interface", "layout", "lowp", "macro", "match", "mediump",
+    "meta", "mod", "module", "move", "mut", "mutable", "namespace", "new", "nil", "noexcept",
+    "noinline", "null", "nullptr", "of", "operator", "override", "package", "packoffset",
+    "partition", "pass", "patch", "pixelfragment", "precise", "precision", "premerge", "priv",
+    "protected", "ptr", "pub", "public", "readonly", "ref", "regardless", "register",
+    "reinterpret_cast", "require", "resource", "restrict", "self", "set", "shared", "signed",
+    "sizeof", "smooth", "snorm", "static_assert", "static_cast", "std", "subroutine", "super",
+    "target", "template", "this", "thread_local", "throw", "trait", "try", "type", "typedef",
+    "typeid", "typename", "typeof", "union", "unless", "unorm", "unsafe", "unsized", "use", "using",
+    "varying", "virtual", "volatile", "where", "with", "writeonly", "yield",
+];
+
+/// Rename an identifier that collides with a WGSL reserved word (`mod` ->
+/// `mod_pm`). Idempotent: the sanitized form is itself not reserved, so applying
+/// it again is a no-op. Used at every WGSL identifier *emission* site;
+/// type-inference maps keep the original names.
+fn sanitize_ident(name: &str) -> String {
+    if WGSL_RESERVED.contains(&name) {
+        format!("{name}_pm")
+    } else {
+        name.to_string()
     }
 }
 

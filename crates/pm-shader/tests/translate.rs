@@ -311,3 +311,69 @@ fn component_wise_intrinsics_regression() {
     validate_wgsl(&wgsl).unwrap();
     assert!(wgsl.contains("mix(") && wgsl.contains("clamp("));
 }
+
+#[test]
+fn reserved_keyword_var_mod_is_renamed() {
+    // A preset variable named `mod` (a WGSL reserved word) must be renamed at
+    // its declaration and every use site.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float3 mod = float3(0.1, 0.2, 0.3);
+            mod = mod * 2.0;
+            float s = mod.x + dot(mod, mod);
+            _return_value = float4(mod, s);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("mod_pm"), "mod renamed to mod_pm");
+    // The bare reserved word must not appear as an identifier token.
+    assert!(!wgsl.contains("var mod:"), "no declaration of bare `mod`");
+}
+
+#[test]
+fn reserved_keywords_filter_and_move_renamed() {
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float filter = 0.5;
+            float move = 0.25;
+            float r = filter * move + filter;
+            _return_value = float4(r, move, filter, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("filter_pm") && wgsl.contains("move_pm"));
+}
+
+#[test]
+fn reserved_keyword_in_function_call_argument() {
+    // A reserved identifier used inside a function-call expression.
+    let src = r#"
+        void PS(float2 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            float2 mod = _uv * 2.0;
+            float3 c = lerp(float3(0,0,0), float3(1,1,1), clamp(mod.x, 0.0, 1.0));
+            _return_value = float4(c, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("mod_pm.x"), "reserved ident sanitized inside call arg");
+}
+
+#[test]
+fn non_reserved_identifier_unchanged_and_idempotent() {
+    // A normal identifier is untouched; repeated references don't double-rename.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float3 color = float3(0.1, 0.2, 0.3);
+            color = color + color;
+            _return_value = float4(color, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("var color:"), "non-reserved name unchanged");
+    assert!(!wgsl.contains("color_pm"), "non-reserved name not sanitized");
+    assert!(!wgsl.contains("_pm_pm"), "no double-sanitizing");
+}
