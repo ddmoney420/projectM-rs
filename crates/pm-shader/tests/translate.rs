@@ -658,3 +658,51 @@ fn bool_contexts_unaffected_by_unary_and_arith_coercion() {
     assert!(wgsl.contains("&&"), "logical and stays bool");
     assert!(!wgsl.contains("if (f32("), "no numeric coercion of conditions");
 }
+
+#[test]
+fn bool_function_returning_numeric_mask_coerces() {
+    // HLSL: a bool-returning function whose body is a numeric mask expression
+    // (`(a > b) * (c < d)`) is true iff nonzero -> `(...) != 0.0` in WGSL.
+    let src = r#"
+        bool maskf(float a, float b, float c, float d) {
+            return (a > b) * (c < d);
+        }
+        bool maski(int a, int b) {
+            return a * b;
+        }
+        bool plainbool(float a, float b) {
+            return a > b;
+        }
+        void PS(out float4 _return_value : COLOR) {
+            float r = 0.0;
+            if (maskf(0.7, 0.3, 0.2, 0.6)) { r += 1.0; }
+            if (maski(2, 3)) { r += 1.0; }
+            if (plainbool(0.5, 0.4)) { r += 1.0; }
+            _return_value = float4(r, r, r, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("!= 0.0"), "float mask return -> != 0.0");
+    assert!(wgsl.contains("!= 0;") || wgsl.contains("!= 0 "), "int mask return -> != 0");
+    // The plain-bool function must NOT get a `!= 0` coercion.
+    assert!(wgsl.contains("fn plainbool"));
+}
+
+#[test]
+fn float_function_returning_numeric_unchanged() {
+    // A float-returning function with a numeric body is not touched.
+    let src = r#"
+        float blend(float a, float b, float c, float d) {
+            return (a > b) * (c < d);
+        }
+        void PS(out float4 _return_value : COLOR) {
+            float r = blend(0.7, 0.3, 0.2, 0.6);
+            _return_value = float4(r, r, r, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    // No `!= 0.0` coercion on a float return.
+    assert!(!wgsl.contains("!= 0.0"), "float return not coerced to bool");
+}

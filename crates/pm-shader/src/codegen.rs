@@ -30,6 +30,9 @@ struct Generator {
     /// User-defined function signatures `(return type, parameter types)`, so
     /// calls infer correctly and arguments coerce to the declared param types.
     functions: HashMap<String, (Type, Vec<Type>)>,
+    /// Declared return type of the function currently being emitted, so a
+    /// `return` can coerce its expression to the declared type.
+    current_ret: Type,
     out: String,
     temp: usize,
 }
@@ -50,7 +53,7 @@ impl Generator {
                 _ => {}
             }
         }
-        Generator { globals, locals: HashMap::new(), functions, out: String::new(), temp: 0 }
+        Generator { globals, locals: HashMap::new(), functions, current_ret: Type::Void, out: String::new(), temp: 0 }
     }
 
     fn run(&mut self, items: &[Item]) {
@@ -91,6 +94,7 @@ impl Generator {
 
     fn function(&mut self, f: &Function) {
         self.locals.clear();
+        self.current_ret = f.ret;
         let out_params: Vec<&Param> = f.params.iter().filter(|p| p.qualifier == ParamQual::Out).collect();
         let in_params: Vec<&Param> = f.params.iter().filter(|p| p.qualifier != ParamQual::Out).collect();
 
@@ -190,7 +194,7 @@ impl Generator {
                     let _ = writeln!(self.out, "{pad}return {re};");
                 }
                 (Some(e), None) => {
-                    let _ = writeln!(self.out, "{pad}return {};", self.expr(e, Type::Float));
+                    let _ = writeln!(self.out, "{pad}return {};", self.emit_return_value(e));
                 }
                 (None, None) => {
                     let _ = writeln!(self.out, "{pad}return;");
@@ -248,6 +252,25 @@ impl Generator {
         } else {
             self.stmt(s, indent, ret);
         }
+    }
+
+    /// Emit a returned expression, coercing it to the function's declared return
+    /// type only where needed. The single coercion implemented is numeric ->
+    /// bool: HLSL lets a `bool`-returning function `return` a numeric mask (e.g.
+    /// `(a > b) * (c < d)`), which is true iff nonzero. A return already inferred
+    /// as bool, and every non-bool return, keep their existing emission.
+    fn emit_return_value(&self, e: &Expr) -> String {
+        if self.current_ret == Type::Bool {
+            match self.infer(e) {
+                Type::Bool => return self.expr(e, Type::Bool),
+                Type::Float => return format!("({}) != 0.0", self.expr(e, Type::Float)),
+                Type::Int => return format!("({}) != 0", self.expr(e, Type::Int)),
+                // Ambiguous (a vector or other type from a `bool` function): leave
+                // it as-is rather than guess a conversion.
+                _ => {}
+            }
+        }
+        self.expr(e, Type::Float)
     }
 
     /// Statement-position expression: handles increment/decrement and the
@@ -469,15 +492,9 @@ impl Generator {
             return format!("({} {} {})", self.emit_broadcast(a, common), o, self.emit_broadcast(b, common));
         }
 
-        let mut common = arith_common(ta, tb);
-        // Numeric arithmetic on bools (HLSL `(a > b) * (c > d)`) is float math:
-        // promote a bool common type to float so both operands are cast to 1/0.
-        // (`&&`/`||` and comparisons returned early; bitwise/shift stay integral.)
-        if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod)
-            && matches!(scalar_of(common), Type::Bool)
-        {
-            common = common.vector_len().map_or(Type::Float, |n| vec_of(Type::Float, n));
-        }
+        // Numeric arithmetic on bools (HLSL `(a > b) * (c > d)`) is float math
+        // (`&&`/`||` and comparisons returned early; bitwise/shift stay integral).
+        let common = arith_binary_type(op, ta, tb);
         let o = bin_op_str(op);
         format!("({} {} {})", self.emit_broadcast(a, common), o, self.emit_broadcast(b, common))
     }
@@ -625,7 +642,8 @@ impl Generator {
                         None => Type::Bool,
                     }
                 }
-                _ => arith_common(self.infer(a), self.infer(b)),
+                // Arithmetic: bool operands promote to float (matches emission).
+                _ => arith_binary_type(*op, self.infer(a), self.infer(b)),
             },
             Expr::Assign(_, lhs, _) => self.infer(lhs),
             Expr::Ternary(_, t, _) => self.infer(t),
@@ -866,6 +884,20 @@ fn arith_common(a: Type, b: Type) -> Type {
     match n {
         Some(n) => vec_of(scalar, n),
         None => scalar,
+    }
+}
+
+/// Result type of an arithmetic binary op, with bool promoted to float for the
+/// numeric ops (`(a > b) * (c < d)` is float math). Shared by `emit_binary` and
+/// `infer` so the emitted code and its inferred type agree.
+fn arith_binary_type(op: BinOp, ta: Type, tb: Type) -> Type {
+    let common = arith_common(ta, tb);
+    if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod)
+        && matches!(scalar_of(common), Type::Bool)
+    {
+        common.vector_len().map_or(Type::Float, |n| vec_of(Type::Float, n))
+    } else {
+        common
     }
 }
 

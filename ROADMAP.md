@@ -63,17 +63,18 @@ preset format with a `.milk` importer/converter.
    -> `<name>_pm`), bool->numeric and int->float coercion in every numeric
    context (HLSL promotes comparison/logical results and ints: `f32(x > 0.5)`,
    `vec3<f32>(v > 0.5)`, `floatVar <= intVar`, `-(a < b)` -> `-(f32(a < b))`,
-   `(a > b) * (c > d)` -> `f32(a > b) * f32(c > d)`), `uv` / `uv_orig` as mutable
-   function-locals (not `#define` macros) so a preset can write `uv.x += d`
-   without an invalid chained-swizzle lvalue (`_uv.xy.x`), and `tex2D`
-   coordinate truncation to `vec2` (HLSL uses only the first two components, so
-   `tex2D(s, GetBlur1(uv))` with a float3 coord becomes `(…).xy`). The remaining
-   naga rejections, by descending frequency (`parse_buckets` / `validate_kinds`
-   / `bucket_subgroups` examples): matrix-from-`float4` / `mul` (Bucket E, ~306),
-   global initializers referencing uniforms (Bucket F, ~210, ~48% blocked by E),
-   and small tails — `InvalidReturnType` (~14, a bool-returning user function
-   whose body is numeric), residual matrix `InvalidBinary` (~6), and ~4 stray
-   unary cases. These are the next hardening work.
+   `(a > b) * (c > d)` -> `f32(a > b) * f32(c > d)`, and a `bool`-returning
+   function whose body is numeric -> `return (…) != 0.0`), `uv` / `uv_orig` as
+   mutable function-locals (not `#define` macros) so a preset can write
+   `uv.x += d` without an invalid chained-swizzle lvalue (`_uv.xy.x`), and
+   `tex2D` coordinate truncation to `vec2` (HLSL uses only the first two
+   components, so `tex2D(s, GetBlur1(uv))` with a float3 coord becomes `(…).xy`).
+   The remaining naga rejections, by descending frequency (`parse_buckets` /
+   `validate_kinds` / `bucket_subgroups` examples): matrix-from-`float4` / `mul`
+   (Bucket E, ~306), global initializers referencing uniforms (Bucket F, ~210,
+   ~48% blocked by E), and small tails — `InvalidReturnType` (~11, user functions
+   declared to return a vector but whose body returns a different type) and
+   residual matrix `InvalidBinary` (~6). These are the next hardening work.
    **Custom composite *and* warp shaders now render.** Composite
    (`pm-core::PresetComposite`): the translated WGSL is wired with a per-frame
    `MdUniforms` buffer (`_cN`/`q`/rot) and `sampler_main`, swapping in for the
