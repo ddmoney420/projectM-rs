@@ -8,16 +8,20 @@
 //! T toggle transitions · F toggle perf overlay · H toggle HUD · Pause/K
 //! freeze · A auto-advance ([ / ] adjust interval) · S shuffle · Esc/Q quit.
 //!
-//! Env: `PM_PERF` starts with the perf overlay on; `PM_SCAN` prints a one-time
-//! corpus compatibility summary (parse + shader-translate rates) at startup.
+//! HUD/transitions/perf/auto-advance(+interval)/shuffle preferences persist
+//! across launches (see `prefs`). Env: `PM_PERF` forces the perf overlay on at
+//! launch (overriding the saved pref, without changing it); `PM_SCAN` prints a
+//! one-time corpus compatibility summary at startup (never persisted).
 
 mod audio;
 mod blit;
 mod hud;
+mod prefs;
 
 use audio::AudioInput;
 use blit::Blit;
 use hud::Hud;
+use prefs::Prefs;
 use pm_core::{PresetPlayer, WarpEngine, DEFAULT_TRANSITION_SECS};
 use pm_preset::{shader_to_wgsl, Preset, ShaderKind};
 use pm_render::wgpu;
@@ -63,8 +67,8 @@ struct Render {
     name: String,
 }
 
-/// Auto-advance defaults: cycle every 30 s, adjust in 5 s steps, min 5 s.
-const AUTO_DEFAULT_SECS: f32 = 30.0;
+/// Auto-advance: adjust in 5 s steps, clamped to 5..600 s (default lives in
+/// `prefs::Prefs::default`).
 const AUTO_STEP_SECS: f32 = 5.0;
 const AUTO_MIN_SECS: f32 = 5.0;
 const AUTO_MAX_SECS: f32 = 600.0;
@@ -113,6 +117,13 @@ struct App {
     shuffle: bool,
     /// Recently shown preset indices (most-recent first) for no-repeat.
     history: VecDeque<usize>,
+    /// Transitions enabled (mirrors the player's duration; persisted).
+    transitions_on: bool,
+    /// The user's persisted perf preference (distinct from the runtime overlay,
+    /// which `PM_PERF` can force on at launch without changing this).
+    perf_pref: bool,
+    /// Where persisted preferences live.
+    prefs_path: PathBuf,
 }
 
 /// Rolling per-second frame-timing accumulator (opt-in via `PM_PERF`).
@@ -165,8 +176,12 @@ impl Perf {
 }
 
 impl App {
-    fn new(presets: Vec<PathBuf>) -> Self {
+    fn new(presets: Vec<PathBuf>, prefs: Prefs, prefs_path: PathBuf) -> Self {
         let now = Instant::now();
+        // `PM_PERF` forces the overlay on at launch even when the saved pref is
+        // off; it does not change the persisted preference.
+        let perf_env = std::env::var_os("PM_PERF").is_some();
+        let perf_on = prefs.perf || perf_env;
         App {
             presets,
             index: 0,
@@ -177,19 +192,35 @@ impl App {
             start: now,
             last: now,
             frame: 0,
-            perf: std::env::var_os("PM_PERF").map(|_| Perf::new()),
+            perf: perf_on.then(Perf::new),
             skipped_black: 0,
             skipped_unparsed: 0,
             shown: 0,
-            hud_visible: true,
+            hud_visible: prefs.hud,
             paused: false,
             force_frame: false,
-            auto_advance: false,
-            auto_interval: AUTO_DEFAULT_SECS,
+            auto_advance: prefs.auto,
+            auto_interval: prefs.auto_interval.clamp(AUTO_MIN_SECS, AUTO_MAX_SECS),
             auto_elapsed: 0.0,
-            shuffle: false,
+            shuffle: prefs.shuffle,
             history: VecDeque::new(),
+            transitions_on: prefs.transitions,
+            perf_pref: prefs.perf,
+            prefs_path,
         }
+    }
+
+    /// Persist the current preference subset (called when a pref toggles).
+    fn save_prefs(&self) {
+        Prefs {
+            hud: self.hud_visible,
+            transitions: self.transitions_on,
+            perf: self.perf_pref,
+            auto: self.auto_advance,
+            auto_interval: self.auto_interval,
+            shuffle: self.shuffle,
+        }
+        .save(&self.prefs_path);
     }
 
     /// Advance the LCG and return an index in `0..len`.
@@ -342,12 +373,14 @@ impl App {
             "Auto-advance: {}",
             if self.auto_advance { format!("on (every {:.0}s)", self.auto_interval) } else { "off".into() }
         );
+        self.save_prefs();
     }
 
     /// Toggle shuffle mode (random, no-repeat selection for auto-advance / R).
     fn toggle_shuffle(&mut self) {
         self.shuffle = !self.shuffle;
         println!("Shuffle: {}", if self.shuffle { "on" } else { "off" });
+        self.save_prefs();
     }
 
     /// Adjust the auto-advance interval by `delta` seconds, clamped.
@@ -357,15 +390,25 @@ impl App {
             self.auto_elapsed = self.auto_interval;
         }
         println!("Auto-advance interval: {:.0}s", self.auto_interval);
+        self.save_prefs();
     }
 
     /// Toggle smooth preset transitions on/off (off = instant hard cut).
     fn toggle_transitions(&mut self) {
+        self.transitions_on = !self.transitions_on;
+        let dur = if self.transitions_on { DEFAULT_TRANSITION_SECS } else { 0.0 };
         if let Some(render) = &mut self.render {
-            let on = render.player.duration() > 0.0;
-            render.player.set_duration(if on { 0.0 } else { DEFAULT_TRANSITION_SECS });
-            println!("Preset transitions: {}", if on { "off (hard cut)" } else { "on (2.7s)" });
+            render.player.set_duration(dur);
         }
+        println!("Preset transitions: {}", if self.transitions_on { "on (2.7s)" } else { "off (hard cut)" });
+        self.save_prefs();
+    }
+
+    /// Toggle the in-window HUD overlay.
+    fn toggle_hud(&mut self) {
+        self.hud_visible = !self.hud_visible;
+        println!("HUD: {}", if self.hud_visible { "on" } else { "off" });
+        self.save_prefs();
     }
 
     /// Reload the current preset from disk and restart it (a hard reset, not a
@@ -397,16 +440,11 @@ impl App {
     /// Toggle the per-second frame-timing overlay (also enabled at launch with
     /// the `PM_PERF` env var).
     fn toggle_perf(&mut self) {
-        self.perf = match self.perf {
-            Some(_) => {
-                println!("Perf overlay: off");
-                None
-            }
-            None => {
-                println!("Perf overlay: on (per-second frame timings)");
-                Some(Perf::new())
-            }
-        };
+        let on = self.perf.is_none();
+        self.perf = on.then(Perf::new);
+        self.perf_pref = on; // explicit toggle updates the persisted preference
+        println!("Perf overlay: {}", if on { "on (per-second frame timings)" } else { "off" });
+        self.save_prefs();
     }
 
     /// Print the cumulative session stats (called on exit).
@@ -581,7 +619,8 @@ impl ApplicationHandler for App {
         let engine = WarpEngine::new(&ctx, preset, w, h);
         let cc = if engine.uses_custom_composite() { " ·custom-comp" } else { "" };
         window.set_title(&format!("pm-app — {name}{cc}  [{}/{}]", self.index + 1, self.presets.len().max(1)));
-        let player = PresetPlayer::new(&ctx, engine, w, h, DEFAULT_TRANSITION_SECS);
+        let duration = if self.transitions_on { DEFAULT_TRANSITION_SECS } else { 0.0 };
+        let player = PresetPlayer::new(&ctx, engine, w, h, duration);
 
         self.render = Some(Render { window, ctx, surface, config, player, blit, hud, name });
     }
@@ -612,10 +651,7 @@ impl ApplicationHandler for App {
                     "r" => self.change_preset(0, true),
                     "t" => self.toggle_transitions(),
                     "f" => self.toggle_perf(),
-                    "h" => {
-                        self.hud_visible = !self.hud_visible;
-                        println!("HUD: {}", if self.hud_visible { "on" } else { "off" });
-                    }
+                    "h" => self.toggle_hud(),
                     "k" => self.toggle_pause(),
                     "a" => self.toggle_auto(),
                     "s" => self.toggle_shuffle(),
@@ -796,12 +832,18 @@ fn main() {
     if std::env::var_os("PM_SCAN").is_some() {
         scan_corpus(&presets);
     }
+    // Load persisted preferences before finalizing startup state. `PM_PERF`
+    // overrides the saved perf pref (forces on); `PM_SCAN` is a one-off, never
+    // persisted.
+    let prefs_path = prefs::config_path();
+    let prefs = Prefs::load(&prefs_path);
     println!(
         "Keys: Right/Space/N next · Left/P prev · R random · F5/L reload · T transitions · F perf · H hud · Pause/K freeze · A auto ([ ] interval) · S shuffle · Esc/Q quit"
     );
+    println!("Prefs: {}", prefs_path.display());
 
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::new(presets);
+    let mut app = App::new(presets, prefs, prefs_path);
     event_loop.run_app(&mut app).expect("run app");
 }

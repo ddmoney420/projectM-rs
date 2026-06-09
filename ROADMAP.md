@@ -207,6 +207,14 @@ preset format with a `.milk` importer/converter.
    it cycles without immediate repeats; degrades gracefully on a small corpus);
    manual next/prev stay sequential. Only the *shown* (renderable) preset enters
    the history — skipped candidates don't. The HUD shows `SHUF` on the status line.
+   **Preferences persist** across launches (HUD, transitions, perf, auto-advance +
+   interval, shuffle) as a human-readable `key=value` file in the OS app-config
+   dir (`%APPDATA%\pm-app\config.txt` / `~/.config/pm-app/config.txt`), saved on
+   each toggle and loaded at startup; a missing file means defaults and a
+   malformed one warns per-key and falls back. `PM_PERF` still forces the perf
+   overlay on at launch (overriding the saved pref without changing it); `PM_SCAN`
+   stays a one-off and is never persisted; pause/freeze and session counters are
+   not persisted.
    **Freeze** is an exact last-frame hold: while
    paused the app skips `player.render` entirely (so preset time, the frame
    counter, feedback iteration, and transitions all stop — no state mutation) and
