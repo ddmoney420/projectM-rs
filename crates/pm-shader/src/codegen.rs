@@ -311,26 +311,29 @@ impl Generator {
 
     // ------------------------------------------------------ expressions ------
 
-    /// Emit `e` as a numeric scalar of type `want`, inserting an explicit
-    /// `f32()` / `i32()` when `e` is a bool (a comparison/logical result) reaching
-    /// a float/int context. Returns the *effective* type (the numeric scalar
-    /// after a cast, else the original inferred type) and the emitted text.
-    /// Bool→bool and non-bool expressions are left exactly as before.
-    fn emit_bool_coerced(&self, e: &Expr, want: Type) -> (Type, String) {
+    /// Emit `e` as a numeric scalar of type `want`, inserting an explicit cast
+    /// when HLSL would implicitly convert and WGSL won't: a bool (comparison /
+    /// logical result) used numerically becomes `f32`/`i32`, and a scalar `int`
+    /// reaching a `float` context becomes `f32` (HLSL int->float promotion, e.g.
+    /// `floatVar <= intVar`). Returns the *effective* type (the numeric scalar
+    /// after a cast, else the original inferred type) and the emitted text. Int
+    /// stays int in int contexts (`want == Int`), and integer literals — already
+    /// emitted as floats by `expr` when a float is wanted — are left alone.
+    fn emit_numeric_coerced(&self, e: &Expr, want: Type) -> (Type, String) {
         let et = self.infer(e);
         let s = self.expr(e, want);
-        if et == Type::Bool && matches!(want, Type::Float | Type::Int) {
-            let conv = if want == Type::Int { "i32" } else { "f32" };
-            (want, format!("{conv}({s})"))
-        } else {
-            (et, s)
+        match (et, want) {
+            (Type::Bool, Type::Float) => (Type::Float, format!("f32({s})")),
+            (Type::Bool, Type::Int) => (Type::Int, format!("i32({s})")),
+            (Type::Int, Type::Float) if !matches!(e, Expr::IntLit(_)) => (Type::Float, format!("f32({s})")),
+            _ => (et, s),
         }
     }
 
     /// Emit `e` for a numeric context (e.g. a `floatN(…)` constructor argument),
-    /// coercing a bool to `f32`/`i32` as HLSL does.
+    /// coercing bool/int to `f32`/`i32` as HLSL does.
     fn emit_numeric(&self, e: &Expr, want: Type) -> String {
-        self.emit_bool_coerced(e, want).1
+        self.emit_numeric_coerced(e, want).1
     }
 
     /// Emit `e`, coercing it to `target`: broadcast a scalar up to a vector, or
@@ -341,13 +344,17 @@ impl Generator {
         // explicit cast when a bool reaches a float/int context. After the cast
         // the value is a numeric scalar, so the broadcast/truncate logic below
         // proceeds as usual.
-        let (et, s) = self.emit_bool_coerced(e, scalar_of(target));
-        // A bool *vector* (a component-wise comparison) reaching a numeric vector:
-        // `vecN<f32>(vecN<bool>)` is WGSL's component-wise true/false -> 1.0/0.0.
-        if matches!(scalar_of(et), Type::Bool)
-            && matches!(scalar_of(target), Type::Float | Type::Int)
-            && et.vector_len().is_some()
+        let (et, s) = self.emit_numeric_coerced(e, scalar_of(target));
+        // A bool/int *vector* reaching a numeric vector of a different scalar
+        // kind: WGSL's component-wise conversion (`vec3<f32>(vec3<bool>)` -> 1/0,
+        // `vec3<f32>(vec3<i32>)` -> int->float). Identity (int->int, float->...)
+        // is excluded.
+        if et.vector_len().is_some()
             && et.vector_len() == target.vector_len()
+            && matches!(
+                (scalar_of(et), scalar_of(target)),
+                (Type::Bool, Type::Float) | (Type::Bool, Type::Int) | (Type::Int, Type::Float)
+            )
         {
             return format!("{}({})", wgsl_type(target), s);
         }
@@ -592,9 +599,14 @@ impl Generator {
             "dot" | "length" | "distance" | "determinant" => Type::Float,
             "tex2d" | "tex3d" | "tex2dlod" | "tex2dbias" => Type::Float4,
             "cross" => Type::Float3,
-            // `smoothstep` is component-wise: its result matches the (coerced)
-            // common width of its arguments, not just the first edge.
-            "smoothstep" => args.iter().map(|a| self.infer(a)).fold(Type::Float, arith_common),
+            // Component-wise intrinsics: the result is the common type across
+            // *all* arguments, not just the first — e.g. `lerp(0, vec3, vec3)`
+            // returns vec3 (the int `0` broadcasts), while `min(intA, intB)`
+            // stays int. `reduce` seeds from the first arg so a vector arg wins
+            // over a leading scalar without forcing the whole thing to float.
+            "smoothstep" | "lerp" | "min" | "max" | "clamp" | "step" | "pow" | "reflect" | "atan" | "fmod" => {
+                args.iter().map(|a| self.infer(a)).reduce(arith_common).unwrap_or(Type::Float)
+            }
             "any" | "all" => Type::Bool,
             "mul" => args.iter().map(|a| self.infer(a)).find(|t| t.vector_len().is_some()).unwrap_or(Type::Float4),
             _ => args.first().map(|a| self.infer(a)).unwrap_or(Type::Float),

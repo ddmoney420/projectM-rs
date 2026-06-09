@@ -467,3 +467,97 @@ fn valid_numeric_constructor_unchanged() {
     assert!(wgsl.contains("vec3<f32>(a,"), "numeric constructor unchanged");
     assert!(!wgsl.contains("f32(a)"), "no spurious cast on a float arg");
 }
+
+#[test]
+fn int_to_float_in_mixed_binary_ops() {
+    // HLSL promotes int->float in mixed arithmetic/comparisons; WGSL needs f32().
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float x = 0.7;
+            int n = 3;
+            float a = x * n;          // float * int
+            float b = n * x;          // int * float
+            float c = x + n;          // float + int
+            bool  le = x <= n;        // float <= int
+            bool  lt = n < x;         // int < float
+            float r = a + b + c + float(le) + float(lt);
+            _return_value = float4(r, r, r, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("f32(n)"), "int variable cast to f32 in float context");
+}
+
+#[test]
+fn int_in_float_constructors_and_broadcast() {
+    // float3(intVar) and `float3 v = intVar` (scalar int broadcast).
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            int n = 2;
+            float3 a = float3(n);     // construct: vec3<f32>(f32(n))
+            float3 b = n;             // broadcast: vec3<f32>(f32(n))
+            _return_value = float4(a + b, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("f32(n)"));
+}
+
+#[test]
+fn int_vector_to_float_vector_conversion() {
+    // `float3 fv = intVec3` -> component-wise vec3<f32>(vec3<i32>).
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            int3 iv = int3(1, 2, 3);
+            float3 fv = iv;
+            _return_value = float4(fv, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("vec3<f32>(iv)") || wgsl.contains("vec3<f32>(vec3<i32>"), "int vec -> float vec conversion");
+}
+
+#[test]
+fn integer_contexts_stay_int() {
+    // Loop counter, integer-only comparison, and bitwise/modulo must stay i32 —
+    // no spurious f32() that would make the WGSL invalid.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float acc = 0.0;
+            for (int i = 0; i < 4; i = i + 1) {
+                acc += 0.1;
+            }
+            int a = 6;
+            int b = 4;
+            bool icmp = a < b;        // int < int stays int comparison
+            int band = a & b;         // bitwise stays int
+            int bmod = a % b;         // modulo stays int
+            float r = acc + float(icmp) + float(band) + float(bmod);
+            _return_value = float4(r, r, r, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    // The loop counter and int ops must not be cast to f32.
+    assert!(!wgsl.contains("f32(i)"), "loop counter stays int");
+    assert!(wgsl.contains("(a & b)") || wgsl.contains("a & b"), "bitwise stays int");
+}
+
+#[test]
+fn already_valid_numeric_unchanged_by_int_coercion() {
+    // Pure-float and int-literal math must not gain spurious casts.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float x = 0.5;
+            float a = x * 2.0;        // float * float-literal
+            float b = x * 3;          // float * int-literal -> 3.0, no f32()
+            _return_value = float4(a, b, 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(!wgsl.contains("f32(3"), "int literal stays a float literal, no f32() wrap");
+}
