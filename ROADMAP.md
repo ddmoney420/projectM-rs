@@ -50,7 +50,7 @@ preset format with a `.milk` importer/converter.
    with type inference + param-mutation shadowing; output validated by naga).
    The full preset-shader pipeline (wrap `shader_body` → uniform/intrinsic header
    → transpile → assemble bindings + entry) lives in `pm-preset::preset_shader`.
-   **Corpus shader compat: ~95.4% composite / ~96.6% warp produce valid WGSL** (up
+   **Corpus shader compat: ~96.0% composite / ~97.0% warp produce valid WGSL** (up
    from 37% / 18%), via corpus-driven hardening tracked by the `shader_report`
    example: built-in noise `texsize_*` constants, HLSL implicit vector
    truncation on store *and* in binary ops (`float4 * float2` -> first two
@@ -127,10 +127,21 @@ preset format with a `.milk` importer/converter.
    `validate_kinds` / `bucket_subgroups` examples): the `cannot cast` vec4->vec2
    matrix-index E tail (9), the 3 `mat3x4 * vec3` mis-typed-store residual, 2
    valueless returns, and small unary/binary tails (~15 validate-stage total).
-   The larger remaining work is the translate-stage *parser* long-tail
-   (unsupported HLSL syntax: stray commas, `sampler_state`/`blur` keywords,
-   bracket forms) and the composite `noise`/scope parse bucket — a separate
-   parser-coverage effort, not naga typing.
+   The larger remaining work is the translate-stage *parser* long-tail. The first
+   slice of that is done: **`double`/`doubleN` are aliased to `float`/`floatN`**
+   in the parser's type table (Milkdrop/projectM treat double as float on the
+   GPU), so `double3 blur = GetBlur1(uv)` parses as a `float3` declaration. This
+   cleared the largest parser cluster (~127 shaders failing at a `double`-typed
+   identifier — `ist`/`crisp`/`zz`/`blur`) for +82 valid shaders, zero
+   regressions (no valid shader used `double`, which didn't parse before); the
+   other ~45 cascaded to unrelated secondary errors. The remaining translate-
+   stage buckets are deferred by nature: **sampler/`sampler_state` declarations**
+   (external texture assets, ~51), the parenthesized **comma operator** `(a,b)`
+   (ambiguous C-comma vs vector, ~81), **array declarations + initializer lists**
+   `float4 s[5]={…}` + indexing (~75), **brace initializers** `={…}` (~53), and
+   empty-statement `;;` (~67); plus the composite `noise`/scope name-collision
+   parse bucket (naga side). These need an asset system, array support, or
+   semantic disambiguation rather than narrow coverage.
    **Custom composite *and* warp shaders now render.** Composite
    (`pm-core::PresetComposite`): the translated WGSL is wired with a per-frame
    `MdUniforms` buffer (`_cN`/`q`/rot) and `sampler_main`, swapping in for the

@@ -1331,3 +1331,75 @@ fn any_bool_vector_unchanged() {
     assert!(wgsl.contains("any((m < vec3<f32>(1.0, 1.0, 1.0)))"), "bool-vector any() unchanged:\n{wgsl}");
     assert!(!wgsl.contains("!= vec3"), "no nonzero comparison added to a bool arg");
 }
+
+// --------------------------------------------------- double type aliasing ----
+// HLSL `double`/`doubleN` are aliased to `float`/`floatN` (Milkdrop/projectM
+// treat them as float precision on the GPU).
+
+#[test]
+fn double_scalar_aliases_float() {
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            double x = 1.0;
+            _return_value = float4(x, x, x, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("var x: f32"), "double -> f32:\n{wgsl}");
+}
+
+#[test]
+fn double2_aliases_float2() {
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            double2 v = float2(1.0, 2.0);
+            _return_value = float4(v, 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("var v: vec2<f32>"), "double2 -> vec2<f32>:\n{wgsl}");
+}
+
+#[test]
+fn double3_aliases_float3() {
+    // Mirrors the real `double3 blur = <vec3 expr>;` corpus pattern.
+    let src = r#"
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            double3 blur = float3(_uv.x, _uv.y, 0.5) + float3(0.1, 0.1, 0.1);
+            _return_value = float4(blur, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("var blur: vec3<f32>"), "double3 -> vec3<f32>:\n{wgsl}");
+}
+
+#[test]
+fn double4_aliases_float4() {
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            double4 v = float4(1.0, 1.0, 1.0, 1.0);
+            _return_value = v;
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("var v: vec4<f32>"), "double4 -> vec4<f32>:\n{wgsl}");
+}
+
+#[test]
+fn float_types_unchanged_alongside_double() {
+    // A shader mixing float and double types: floats keep their emission.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float3 a = float3(0.2, 0.4, 0.6);
+            double3 b = a * 2.0;
+            _return_value = float4(a + b, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("var a: vec3<f32>") && wgsl.contains("var b: vec3<f32>"), "float + double both vec3<f32>:\n{wgsl}");
+}

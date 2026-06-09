@@ -44,12 +44,14 @@ fn type_from_ident(s: &str) -> Option<Type> {
     use Type::*;
     Some(match s {
         "void" => Void,
-        "float" | "half" | "float1" | "half1" => Float,
+        // `double`/`half` are aliased to `float`: Milkdrop/projectM GPU shader
+        // paths treat all of these as float precision.
+        "float" | "half" | "double" | "float1" | "half1" | "double1" => Float,
         "int" | "uint" | "dword" | "int1" | "uint1" => Int,
         "bool" | "bool1" => Bool,
-        "float2" | "half2" => Float2,
-        "float3" | "half3" => Float3,
-        "float4" | "half4" => Float4,
+        "float2" | "half2" | "double2" => Float2,
+        "float3" | "half3" | "double3" => Float3,
+        "float4" | "half4" | "double4" => Float4,
         "int2" | "uint2" => Int2,
         "int3" | "uint3" => Int3,
         "int4" | "uint4" => Int4,
