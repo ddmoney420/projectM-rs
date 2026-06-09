@@ -196,7 +196,13 @@ preset format with a `.milk` importer/converter.
    (graceful synthetic fallback), transition-blended preset cycling over the
    corpus, and keyboard controls: →/Space/N next · ←/P prev · R random · **F5/L
    reload current** · T transitions · **F perf overlay** · **H in-window HUD** ·
-   **Pause/K freeze** · Esc/Q quit. **Freeze** is an exact last-frame hold: while
+   **Pause/K freeze** · **A auto-advance (`[`/`]` interval)** · Esc/Q quit.
+   **Auto-advance** (off by default, default 30 s, adjustable in 5 s steps down to
+   5 s) cycles to the next *renderable* preset on a wall-clock timer that pauses
+   with freeze and resumes without losing remaining time; any manual nav/reload
+   resets it so the shown preset gets a full interval, skipped presets don't
+   consume it, and it uses transitions when enabled. The HUD shows `AUTO nS / NS`.
+   **Freeze** is an exact last-frame hold: while
    paused the app skips `player.render` entirely (so preset time, the frame
    counter, feedback iteration, and transitions all stop — no state mutation) and
    re-presents the last frame, keeping the window responsive; the time base is

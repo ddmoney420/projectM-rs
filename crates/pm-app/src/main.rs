@@ -6,7 +6,7 @@
 //!
 //! Keys: →/Space/N next preset · ←/P previous · R random · F5/L reload current ·
 //! T toggle transitions · F toggle perf overlay · H toggle HUD · Pause/K
-//! freeze · Esc/Q quit.
+//! freeze · A auto-advance ([ / ] adjust interval) · Esc/Q quit.
 //!
 //! Env: `PM_PERF` starts with the perf overlay on; `PM_SCAN` prints a one-time
 //! corpus compatibility summary (parse + shader-translate rates) at startup.
@@ -62,6 +62,12 @@ struct Render {
     name: String,
 }
 
+/// Auto-advance defaults: cycle every 30 s, adjust in 5 s steps, min 5 s.
+const AUTO_DEFAULT_SECS: f32 = 30.0;
+const AUTO_STEP_SECS: f32 = 5.0;
+const AUTO_MIN_SECS: f32 = 5.0;
+const AUTO_MAX_SECS: f32 = 600.0;
+
 /// Number of warm-up frames to build feedback content before probing.
 const WARMUP_FRAMES: i32 = 8;
 /// Max presets to skip when searching for one that renders visible content.
@@ -94,6 +100,11 @@ struct App {
     /// Render exactly one more frame even while paused (set after a preset
     /// change so the new selection becomes visible, then frozen).
     force_frame: bool,
+    /// Timed auto-advance (toggle `A`; interval adjusted with `[` / `]`).
+    auto_advance: bool,
+    auto_interval: f32,
+    /// Wall-seconds elapsed toward the next auto-advance (paused-aware).
+    auto_elapsed: f32,
 }
 
 /// Rolling per-second frame-timing accumulator (opt-in via `PM_PERF`).
@@ -165,6 +176,9 @@ impl App {
             hud_visible: true,
             paused: false,
             force_frame: false,
+            auto_advance: false,
+            auto_interval: AUTO_DEFAULT_SECS,
+            auto_elapsed: 0.0,
         }
     }
 
@@ -183,6 +197,10 @@ impl App {
             status.push_str(" CUT");
         }
         lines.push(status);
+        if self.auto_advance {
+            let remaining = (self.auto_interval - self.auto_elapsed).max(0.0).ceil() as u32;
+            lines.push(format!("AUTO {remaining}S / {:.0}S", self.auto_interval));
+        }
         if self.skipped_black + self.skipped_unparsed > 0 {
             lines.push(format!("SKIPPED {} / {} UNPARSED", self.skipped_black, self.skipped_unparsed));
         }
@@ -265,6 +283,26 @@ impl App {
             println!("Showing [{}/{}]: {name}{why}", idx + 1, len);
         }
         self.index = idx;
+        self.auto_elapsed = 0.0; // newly shown preset gets a full interval
+    }
+
+    /// Toggle timed auto-advance; reset the timer so the change is predictable.
+    fn toggle_auto(&mut self) {
+        self.auto_advance = !self.auto_advance;
+        self.auto_elapsed = 0.0;
+        println!(
+            "Auto-advance: {}",
+            if self.auto_advance { format!("on (every {:.0}s)", self.auto_interval) } else { "off".into() }
+        );
+    }
+
+    /// Adjust the auto-advance interval by `delta` seconds, clamped.
+    fn adjust_auto_interval(&mut self, delta: f32) {
+        self.auto_interval = (self.auto_interval + delta).clamp(AUTO_MIN_SECS, AUTO_MAX_SECS);
+        if self.auto_elapsed > self.auto_interval {
+            self.auto_elapsed = self.auto_interval;
+        }
+        println!("Auto-advance interval: {:.0}s", self.auto_interval);
     }
 
     /// Toggle smooth preset transitions on/off (off = instant hard cut).
@@ -291,6 +329,7 @@ impl App {
             println!("Reloaded: {name}");
         }
         self.force_frame = true; // repaint once even if frozen
+        self.auto_elapsed = 0.0; // reload restarts the interval
     }
 
     /// Toggle the frozen/paused state. While paused the visualizer holds its last
@@ -345,9 +384,7 @@ impl App {
     }
 
     fn render(&mut self) {
-        // Build HUD text + advance the clock before borrowing `self.render`.
-        let hud_lines = self.hud_visible.then(|| self.hud_lines());
-
+        // Advance the clock before borrowing `self.render`.
         let now = Instant::now();
         let wall_dt = now.saturating_duration_since(self.last);
         self.last = now;
@@ -357,6 +394,19 @@ impl App {
             self.start += wall_dt;
         }
         let time = (now - self.start).as_secs_f32();
+
+        // Auto-advance timer: accumulate only when running (not paused) with a
+        // corpus to cycle. `change_preset` resets `auto_elapsed`, so the freshly
+        // shown preset always gets a full interval (skipped presets don't count).
+        if self.auto_advance && !self.paused && !self.presets.is_empty() {
+            self.auto_elapsed += wall_dt.as_secs_f32();
+            if self.auto_elapsed >= self.auto_interval {
+                self.change_preset(1, false);
+            }
+        }
+
+        // Build HUD text after any auto-advance, so it reflects the shown preset.
+        let hud_lines = self.hud_visible.then(|| self.hud_lines());
 
         // Advance preset state only when not frozen (or for the single frame
         // requested after a preset change while paused). Skipping `player.render`
@@ -508,6 +558,9 @@ impl ApplicationHandler for App {
                         println!("HUD: {}", if self.hud_visible { "on" } else { "off" });
                     }
                     "k" => self.toggle_pause(),
+                    "a" => self.toggle_auto(),
+                    "[" => self.adjust_auto_interval(-AUTO_STEP_SECS),
+                    "]" => self.adjust_auto_interval(AUTO_STEP_SECS),
                     "l" => self.reload_current(),
                     "q" => {
                         self.log_session();
@@ -684,7 +737,7 @@ fn main() {
         scan_corpus(&presets);
     }
     println!(
-        "Keys: Right/Space/N next · Left/P prev · R random · F5/L reload · T transitions · F perf · H hud · Pause/K freeze · Esc/Q quit"
+        "Keys: Right/Space/N next · Left/P prev · R random · F5/L reload · T transitions · F perf · H hud · Pause/K freeze · A auto ([ ] interval) · Esc/Q quit"
     );
 
     let event_loop = EventLoop::new().expect("create event loop");
