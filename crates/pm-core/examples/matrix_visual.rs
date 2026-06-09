@@ -1,10 +1,12 @@
-//! Bucket E visual verification harness (temporary).
+//! Developer visual-diff tool for the matrix / `mul` shader lowering.
 //!
 //! Renders a fixed list of matrix/`mul`-using presets to PNGs under
 //! `bucket-e-visuals/<label>-<TAG>.png`, with deterministic audio + a fixed
 //! frame sequence so the ONLY difference between two runs is the shader
 //! codegen. Run once on the new code (TAG=after) and once after git-stashing
-//! the codegen change (TAG=before), then eyeball the pairs.
+//! the codegen change (TAG=before), then eyeball the pairs. Originally built to
+//! verify the matrix-lowering ("Bucket E") work; kept as a reusable harness for
+//! future matrix-proof / visual-regression checks.
 //!
 //! ```text
 //! cargo run -p pm-core --example matrix_visual --release -- <TAG>
