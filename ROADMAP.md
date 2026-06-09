@@ -58,13 +58,15 @@ preset format with a `.milk` importer/converter.
    operator, scalar swizzles, 3D noise-volume textures, intrinsic argument-width
    coercion (`dot`/`distance`/`cross`/`reflect`/`smoothstep` and
    `min`/`max`/`clamp`/`lerp`/`pow` — truncate the wider operand, e.g.
-   `dot(float4, float3)`), float `++`/`--` lowered to `+= 1`, and WGSL
+   `dot(float4, float3)`), float `++`/`--` lowered to `+= 1`, WGSL
    reserved-word identifier escaping (a preset var named `mod`/`filter`/`move`
-   -> `<name>_pm`). The remaining naga rejections, by descending frequency
-   (`parse_buckets` example): non-lvalue assignment from macro-expanded
-   swizzles, matrix-from-`float4` / `mul`, global initializers referencing
-   uniforms, and bool->float in vector constructors. These are the next
-   hardening work.
+   -> `<name>_pm`), and bool->numeric coercion (HLSL uses comparison results as
+   `1.0`/`0.0`: scalar `f32(x > 0.5)`, vector `vec3<f32>(v > 0.5)`). The
+   remaining naga rejections, by descending frequency (`parse_buckets` /
+   `validate_kinds` examples): validate-stage `InvalidBinaryOperandTypes`,
+   non-lvalue assignment from macro-expanded swizzles, matrix-from-`float4` /
+   `mul`, `int`->vec constructor conversions, and global initializers
+   referencing uniforms. These are the next hardening work.
    **Custom composite *and* warp shaders now render.** Composite
    (`pm-core::PresetComposite`): the translated WGSL is wired with a per-frame
    `MdUniforms` buffer (`_cN`/`q`/rot) and `sampler_main`, swapping in for the

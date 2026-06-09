@@ -377,3 +377,93 @@ fn non_reserved_identifier_unchanged_and_idempotent() {
     assert!(!wgsl.contains("color_pm"), "non-reserved name not sanitized");
     assert!(!wgsl.contains("_pm_pm"), "no double-sanitizing");
 }
+
+#[test]
+fn bool_to_float_in_vector_constructors() {
+    // HLSL `floatN(cond)` -> 1.0/0.0; WGSL needs an explicit f32(bool).
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float x = 0.7;
+            float  a = float (x > 0.5);
+            float2 b = float2(x > 0.5);
+            float3 c = float3(x > 0.5);
+            float4 d = float4(x > 0.5);
+            _return_value = d + float4(c, 0.0) + float4(b, b) + a;
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("f32("), "bool wrapped in f32()");
+    assert!(wgsl.contains("vec3<f32>(f32("), "float3(bool) -> vec3<f32>(f32(bool))");
+}
+
+#[test]
+fn bool_as_arithmetic_operand_coerces() {
+    // A comparison used numerically: `a * (x > 0.5)`, `(x > 0.5) * a`, `a + (...)`.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float x = 0.7;
+            float a = 2.0;
+            float p = a * (x > 0.5);
+            float q = (x > 0.5) * a;
+            float r = a + (x > 0.5);
+            _return_value = float4(p, q, r, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("f32("), "bool operand cast to f32 in arithmetic");
+}
+
+#[test]
+fn bool_in_lerp_vector_third_arg() {
+    // `lerp(a, b, float3(cond))` routes the bool through the same coercion.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float3 a = float3(0.0, 0.0, 0.0);
+            float3 b = float3(1.0, 1.0, 1.0);
+            float x = 0.7;
+            float3 m = lerp(a, b, float3(x > 0.5));
+            _return_value = float4(m, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+}
+
+#[test]
+fn genuine_bool_contexts_stay_bool() {
+    // if/ternary/&&/|| conditions must remain bool (no numeric cast).
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float x = 0.7;
+            float y = 0.2;
+            float r = 0.0;
+            if (x > 0.5 && y < 0.5) { r = 1.0; }
+            float s = (x > 0.5) ? 2.0 : 3.0;
+            _return_value = float4(r, s, 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("if (") && wgsl.contains("&&"), "bool condition kept");
+    assert!(wgsl.contains("select("), "ternary -> select with bool condition");
+    // The if/&& condition itself must not be wrapped in f32(...).
+    assert!(!wgsl.contains("if (f32("), "if condition not numerically coerced");
+}
+
+#[test]
+fn valid_numeric_constructor_unchanged() {
+    // A plain numeric constructor must not gain a spurious f32() cast.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float a = 0.3;
+            float3 v = float3(a, a * 2.0, 0.5);
+            _return_value = float4(v, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("vec3<f32>(a,"), "numeric constructor unchanged");
+    assert!(!wgsl.contains("f32(a)"), "no spurious cast on a float arg");
+}

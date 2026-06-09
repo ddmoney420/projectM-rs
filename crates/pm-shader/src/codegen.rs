@@ -311,12 +311,46 @@ impl Generator {
 
     // ------------------------------------------------------ expressions ------
 
+    /// Emit `e` as a numeric scalar of type `want`, inserting an explicit
+    /// `f32()` / `i32()` when `e` is a bool (a comparison/logical result) reaching
+    /// a float/int context. Returns the *effective* type (the numeric scalar
+    /// after a cast, else the original inferred type) and the emitted text.
+    /// Bool→bool and non-bool expressions are left exactly as before.
+    fn emit_bool_coerced(&self, e: &Expr, want: Type) -> (Type, String) {
+        let et = self.infer(e);
+        let s = self.expr(e, want);
+        if et == Type::Bool && matches!(want, Type::Float | Type::Int) {
+            let conv = if want == Type::Int { "i32" } else { "f32" };
+            (want, format!("{conv}({s})"))
+        } else {
+            (et, s)
+        }
+    }
+
+    /// Emit `e` for a numeric context (e.g. a `floatN(…)` constructor argument),
+    /// coercing a bool to `f32`/`i32` as HLSL does.
+    fn emit_numeric(&self, e: &Expr, want: Type) -> String {
+        self.emit_bool_coerced(e, want).1
+    }
+
     /// Emit `e`, coercing it to `target`: broadcast a scalar up to a vector, or
     /// truncate a wider vector down (HLSL implicitly drops trailing components,
     /// e.g. `float3 v = tex2D(...)` keeps `.xyz`).
     fn emit_broadcast(&self, e: &Expr, target: Type) -> String {
-        let et = self.infer(e);
-        let s = self.expr(e, scalar_of(target));
+        // HLSL uses comparison/logical (bool) results numerically; WGSL needs an
+        // explicit cast when a bool reaches a float/int context. After the cast
+        // the value is a numeric scalar, so the broadcast/truncate logic below
+        // proceeds as usual.
+        let (et, s) = self.emit_bool_coerced(e, scalar_of(target));
+        // A bool *vector* (a component-wise comparison) reaching a numeric vector:
+        // `vecN<f32>(vecN<bool>)` is WGSL's component-wise true/false -> 1.0/0.0.
+        if matches!(scalar_of(et), Type::Bool)
+            && matches!(scalar_of(target), Type::Float | Type::Int)
+            && et.vector_len().is_some()
+            && et.vector_len() == target.vector_len()
+        {
+            return format!("{}({})", wgsl_type(target), s);
+        }
         let target_w = target.vector_len().map(usize::from).unwrap_or(target.is_scalar() as usize);
         let expr_w = et.vector_len().map(usize::from).unwrap_or(et.is_scalar() as usize);
         if target.vector_len().is_some() && et.is_scalar() {
@@ -386,8 +420,9 @@ impl Generator {
                 format!("{}[{}]", self.expr(base, Type::Float), self.expr(idx, Type::Int))
             }
             Expr::Construct(ty, args) => {
+                // HLSL `float3(x > 0.5)` etc.: a bool argument becomes 1.0/0.0.
                 let scalar = scalar_of(*ty);
-                let parts = args.iter().map(|a| self.expr(a, scalar)).collect::<Vec<_>>().join(", ");
+                let parts = args.iter().map(|a| self.emit_numeric(a, scalar)).collect::<Vec<_>>().join(", ");
                 format!("{}({})", wgsl_type(*ty), parts)
             }
             Expr::Call(name, args) => self.emit_call(name, args),
@@ -524,16 +559,21 @@ impl Generator {
             Expr::Unary(UnOp::Not, _) => Type::Bool,
             Expr::Unary(_, x) => self.infer(x),
             Expr::PreInc(x) | Expr::PostInc(x) | Expr::PreDec(x) | Expr::PostDec(x) => self.infer(x),
-            Expr::Binary(op, a, b) => {
-                if matches!(
-                    op,
-                    BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::And | BinOp::Or
-                ) {
-                    Type::Bool
-                } else {
-                    arith_common(self.infer(a), self.infer(b))
+            Expr::Binary(op, a, b) => match op {
+                // Logical operators take/return scalar bool.
+                BinOp::And | BinOp::Or => Type::Bool,
+                // Comparisons are component-wise: a vector comparison yields a
+                // bool *vector* (`vec3 > vec3` -> `vec3<bool>`), which matters
+                // for whether a `f32()` (scalar) or `vecN<f32>()` (vector)
+                // conversion is needed when it reaches a numeric context.
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
+                    match arith_common(self.infer(a), self.infer(b)).vector_len() {
+                        Some(n) => vec_of(Type::Bool, n),
+                        None => Type::Bool,
+                    }
                 }
-            }
+                _ => arith_common(self.infer(a), self.infer(b)),
+            },
             Expr::Assign(_, lhs, _) => self.infer(lhs),
             Expr::Ternary(_, t, _) => self.infer(t),
             Expr::Member(base, field) => member_type(self.infer(base), field),
