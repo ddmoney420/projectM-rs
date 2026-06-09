@@ -5,7 +5,8 @@
 //! ```
 //!
 //! Keys: →/Space/N next preset · ←/P previous · R random · F5/L reload current ·
-//! T toggle transitions · F toggle perf overlay · H toggle HUD · Esc/Q quit.
+//! T toggle transitions · F toggle perf overlay · H toggle HUD · Pause/K
+//! freeze · Esc/Q quit.
 //!
 //! Env: `PM_PERF` starts with the perf overlay on; `PM_SCAN` prints a one-time
 //! corpus compatibility summary (parse + shader-translate rates) at startup.
@@ -87,6 +88,12 @@ struct App {
     shown: usize,
     /// In-window HUD overlay visibility (toggle with `H`). Default on.
     hud_visible: bool,
+    /// Frozen state (toggle with `Pause`/`K`): preset time + feedback stop
+    /// advancing while the window keeps presenting the last frame.
+    paused: bool,
+    /// Render exactly one more frame even while paused (set after a preset
+    /// change so the new selection becomes visible, then frozen).
+    force_frame: bool,
 }
 
 /// Rolling per-second frame-timing accumulator (opt-in via `PM_PERF`).
@@ -156,6 +163,8 @@ impl App {
             skipped_unparsed: 0,
             shown: 0,
             hud_visible: true,
+            paused: false,
+            force_frame: false,
         }
     }
 
@@ -164,6 +173,9 @@ impl App {
         let Some(render) = &self.render else { return Vec::new() };
         let total = self.presets.len().max(1);
         let mut lines = vec![render.name.clone()];
+        if self.paused {
+            lines.push("PAUSED".to_string());
+        }
         let mut status = format!("[{}/{}]", self.index + 1, total);
         if render.player.is_transitioning() {
             status.push_str(" XFADE");
@@ -220,7 +232,18 @@ impl App {
             find_renderable(&render.ctx, w, h, &self.presets, &mut self.audio, self.frame, start, dir);
         let Found { engine, idx, name, black, unparsed, fell_back } = found;
         let cc = if engine.uses_custom_composite() { " ·custom-comp" } else { "" };
-        render.player.switch_to(engine);
+        if self.paused {
+            // Frozen: hard-cut to the new preset (a crossfade can't advance while
+            // paused) and request one frame so it becomes visible, then frozen.
+            let d = render.player.duration();
+            render.player.set_duration(0.0);
+            render.player.switch_to(engine);
+            render.player.set_duration(d);
+            self.force_frame = true;
+        } else {
+            render.player.switch_to(engine);
+        }
+        let Some(render) = self.render.as_mut() else { return };
         render.name = name.clone();
         render.window.set_title(&format!("pm-app — {name}{cc}  [{}/{}]", idx + 1, len));
 
@@ -267,6 +290,15 @@ impl App {
             render.window.set_title(&format!("pm-app — {name}{cc}  [{}/{}]", self.index + 1, self.presets.len().max(1)));
             println!("Reloaded: {name}");
         }
+        self.force_frame = true; // repaint once even if frozen
+    }
+
+    /// Toggle the frozen/paused state. While paused the visualizer holds its last
+    /// frame; navigation/reload still work and stay frozen until unpaused.
+    fn toggle_pause(&mut self) {
+        self.paused = !self.paused;
+        self.force_frame = true; // refresh the HUD (PAUSED) immediately
+        println!("Playback: {}", if self.paused { "PAUSED (frozen)" } else { "running" });
     }
 
     /// Toggle the per-second frame-timing overlay (also enabled at launch with
@@ -309,24 +341,39 @@ impl App {
                 self.presets.len().max(1)
             ));
         }
+        self.force_frame = true; // repaint once even if frozen
     }
 
     fn render(&mut self) {
-        // Build HUD text before the mutable borrow of `self.render`.
+        // Build HUD text + advance the clock before borrowing `self.render`.
         let hud_lines = self.hud_visible.then(|| self.hud_lines());
-        let Some(render) = &mut self.render else { return };
 
         let now = Instant::now();
-        let dt = (now - self.last).as_secs_f64().min(0.1);
+        let wall_dt = now.saturating_duration_since(self.last);
         self.last = now;
+        // While paused, push the time base forward by the wall delta so preset
+        // `time` stays frozen and resumes without a jump when unpaused.
+        if self.paused {
+            self.start += wall_dt;
+        }
         let time = (now - self.start).as_secs_f32();
 
-        let audio = self.audio.frame_data(dt, self.frame);
+        // Advance preset state only when not frozen (or for the single frame
+        // requested after a preset change while paused). Skipping `player.render`
+        // entirely freezes time, the frame counter, feedback iteration *and*
+        // transitions exactly — the last frame is simply re-presented.
+        let do_render = !self.paused || self.force_frame;
+        let audio = do_render.then(|| self.audio.frame_data(wall_dt.as_secs_f64().min(0.1), self.frame));
         let perf = self.perf.is_some();
-        let t_render = perf.then(Instant::now);
-        render.player.render(&render.ctx, time, audio);
-        let render_ms = t_render.map(|t| t.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0);
-        self.frame += 1;
+
+        let Some(render) = &mut self.render else { return };
+
+        let mut render_ms = 0.0;
+        if let Some(audio) = audio {
+            let t_render = perf.then(Instant::now);
+            render.player.render(&render.ctx, time, audio);
+            render_ms = t_render.map(|t| t.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0);
+        }
 
         let t_present = perf.then(Instant::now);
         match render.surface.get_current_texture() {
@@ -346,10 +393,15 @@ impl App {
             // Timeout / Occluded / Validation: skip this frame.
             _ => {}
         }
+        let present_ms = t_present.map(|t| t.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0);
+        let transitioning = render.player.is_transitioning();
 
-        if let Some(p) = &mut self.perf {
-            let present_ms = t_present.map(|t| t.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0);
-            p.tick(render_ms, present_ms, render.player.is_transitioning());
+        if do_render {
+            self.frame += 1;
+            self.force_frame = false;
+            if let Some(p) = &mut self.perf {
+                p.tick(render_ms, present_ms, transitioning);
+            }
         }
     }
 
@@ -444,6 +496,7 @@ impl ApplicationHandler for App {
                 Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::Space) => self.change_preset(1, false),
                 Key::Named(NamedKey::ArrowLeft) => self.change_preset(-1, false),
                 Key::Named(NamedKey::F5) => self.reload_current(),
+                Key::Named(NamedKey::Pause) => self.toggle_pause(),
                 Key::Character(c) => match c.as_str() {
                     "n" => self.change_preset(1, false),
                     "p" => self.change_preset(-1, false),
@@ -454,6 +507,7 @@ impl ApplicationHandler for App {
                         self.hud_visible = !self.hud_visible;
                         println!("HUD: {}", if self.hud_visible { "on" } else { "off" });
                     }
+                    "k" => self.toggle_pause(),
                     "l" => self.reload_current(),
                     "q" => {
                         self.log_session();
@@ -630,7 +684,7 @@ fn main() {
         scan_corpus(&presets);
     }
     println!(
-        "Keys: Right/Space/N next · Left/P prev · R random · F5/L reload · T transitions · F perf · H hud · Esc/Q quit"
+        "Keys: Right/Space/N next · Left/P prev · R random · F5/L reload · T transitions · F perf · H hud · Pause/K freeze · Esc/Q quit"
     );
 
     let event_loop = EventLoop::new().expect("create event loop");

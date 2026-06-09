@@ -196,7 +196,13 @@ preset format with a `.milk` importer/converter.
    (graceful synthetic fallback), transition-blended preset cycling over the
    corpus, and keyboard controls: →/Space/N next · ←/P prev · R random · **F5/L
    reload current** · T transitions · **F perf overlay** · **H in-window HUD** ·
-   Esc/Q quit. The **HUD** (on by default) draws the current preset name,
+   **Pause/K freeze** · Esc/Q quit. **Freeze** is an exact last-frame hold: while
+   paused the app skips `player.render` entirely (so preset time, the frame
+   counter, feedback iteration, and transitions all stop — no state mutation) and
+   re-presents the last frame, keeping the window responsive; the time base is
+   advanced by the wall delta so playback resumes without a jump. Navigation /
+   reload still work while frozen (hard-cut to the new preset, shown frozen until
+   unpaused), and the HUD shows `PAUSED`. The **HUD** (on by default) draws the current preset name,
    `[idx/total]`, transition state (XFADE/CUT), session skip counts, and a perf
    indicator in the top-left corner via a dependency-free embedded 5×7 bitmap
    font — CPU-rasterized into a small texture only when the text changes, then
