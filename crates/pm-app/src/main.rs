@@ -6,7 +6,8 @@
 //!
 //! Keys: →/Space/N next preset · ←/P previous · R random · F5/L reload current ·
 //! T toggle transitions · F toggle perf overlay · H toggle HUD · Pause/K
-//! freeze · A auto-advance ([ / ] adjust interval) · S shuffle · Esc/Q quit.
+//! freeze (`.` step one frame while paused) · A auto-advance ([ / ] adjust
+//! interval) · S shuffle · Esc/Q quit.
 //!
 //! HUD/transitions/perf/auto-advance(+interval)/shuffle preferences persist
 //! across launches (see `prefs`). Env: `PM_PERF` forces the perf overlay on at
@@ -29,7 +30,7 @@ use pm_render::{read_rgba8, GpuContext};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -76,6 +77,9 @@ const AUTO_MAX_SECS: f32 = 600.0;
 /// Recent-history length for shuffle no-repeat avoidance.
 const SHUFFLE_HISTORY: usize = 25;
 
+/// Time increment for one stepped frame while paused (a normal ~60fps frame).
+const STEP_DT: f32 = 1.0 / 60.0;
+
 /// Number of warm-up frames to build feedback content before probing.
 const WARMUP_FRAMES: i32 = 8;
 /// Max presets to skip when searching for one that renders visible content.
@@ -108,6 +112,11 @@ struct App {
     /// Render exactly one more frame even while paused (set after a preset
     /// change so the new selection becomes visible, then frozen).
     force_frame: bool,
+    /// User-requested single-frame step while paused (advances preset time +
+    /// feedback by one frame, then re-freezes).
+    step: bool,
+    /// Held preset `time` (seconds) while paused, advanced by `STEP_DT` per step.
+    frozen_time: f32,
     /// Timed auto-advance (toggle `A`; interval adjusted with `[` / `]`).
     auto_advance: bool,
     auto_interval: f32,
@@ -199,6 +208,8 @@ impl App {
             hud_visible: prefs.hud,
             paused: false,
             force_frame: false,
+            step: false,
+            frozen_time: 0.0,
             auto_advance: prefs.auto,
             auto_interval: prefs.auto_interval.clamp(AUTO_MIN_SECS, AUTO_MAX_SECS),
             auto_elapsed: 0.0,
@@ -264,7 +275,7 @@ impl App {
         let total = self.presets.len().max(1);
         let mut lines = vec![render.name.clone()];
         if self.paused {
-            lines.push("PAUSED".to_string());
+            lines.push("PAUSED · STEP .".to_string());
         }
         let mut status = format!("[{}/{}]", self.index + 1, total);
         if render.player.is_transitioning() {
@@ -437,6 +448,15 @@ impl App {
         println!("Playback: {}", if self.paused { "PAUSED (frozen)" } else { "running" });
     }
 
+    /// Step exactly one visual frame — only while paused (otherwise a no-op hint).
+    fn step_frame(&mut self) {
+        if self.paused {
+            self.step = true;
+        } else {
+            println!("Step (.) only works while paused (Pause/K to freeze)");
+        }
+    }
+
     /// Toggle the per-second frame-timing overlay (also enabled at launch with
     /// the `PM_PERF` env var).
     fn toggle_perf(&mut self) {
@@ -480,12 +500,20 @@ impl App {
         let now = Instant::now();
         let wall_dt = now.saturating_duration_since(self.last);
         self.last = now;
-        // While paused, push the time base forward by the wall delta so preset
-        // `time` stays frozen and resumes without a jump when unpaused.
-        if self.paused {
-            self.start += wall_dt;
-        }
-        let time = (now - self.start).as_secs_f32();
+        // Preset `time`: while paused it's held at `frozen_time`, advancing by one
+        // `STEP_DT` only when the user steps (`.`); `start` is re-anchored so the
+        // value is deterministic and resumes seamlessly on unpause.
+        let time = if self.paused {
+            if self.step {
+                self.frozen_time += STEP_DT;
+            }
+            self.start = now - Duration::from_secs_f32(self.frozen_time);
+            self.frozen_time
+        } else {
+            let t = (now - self.start).as_secs_f32();
+            self.frozen_time = t;
+            t
+        };
 
         // Auto-advance timer: accumulate only when running (not paused) with a
         // corpus to cycle. `change_preset` resets `auto_elapsed`, so the freshly
@@ -505,12 +533,16 @@ impl App {
         // Build HUD text after any auto-advance, so it reflects the shown preset.
         let hud_lines = self.hud_visible.then(|| self.hud_lines());
 
-        // Advance preset state only when not frozen (or for the single frame
-        // requested after a preset change while paused). Skipping `player.render`
-        // entirely freezes time, the frame counter, feedback iteration *and*
-        // transitions exactly — the last frame is simply re-presented.
-        let do_render = !self.paused || self.force_frame;
-        let audio = do_render.then(|| self.audio.frame_data(wall_dt.as_secs_f64().min(0.1), self.frame));
+        // Render a frame when running, on the single forced frame after a paused
+        // navigation, or on a user step. Otherwise `player.render` is skipped
+        // entirely — time, the frame counter, feedback iteration and transitions
+        // all hold, and the last frame is simply re-presented.
+        let do_render = !self.paused || self.force_frame || self.step;
+        // Deterministic one-frame audio delta while paused (step/force), else wall.
+        let audio = do_render.then(|| {
+            let dt = if self.paused { STEP_DT as f64 } else { wall_dt.as_secs_f64().min(0.1) };
+            self.audio.frame_data(dt, self.frame)
+        });
         let perf = self.perf.is_some();
 
         let Some(render) = &mut self.render else { return };
@@ -546,6 +578,7 @@ impl App {
         if do_render {
             self.frame += 1;
             self.force_frame = false;
+            self.step = false; // a step renders exactly one frame, then re-freezes
             if let Some(p) = &mut self.perf {
                 p.tick(render_ms, present_ms, transitioning);
             }
@@ -655,6 +688,7 @@ impl ApplicationHandler for App {
                     "k" => self.toggle_pause(),
                     "a" => self.toggle_auto(),
                     "s" => self.toggle_shuffle(),
+                    "." => self.step_frame(),
                     "[" => self.adjust_auto_interval(-AUTO_STEP_SECS),
                     "]" => self.adjust_auto_interval(AUTO_STEP_SECS),
                     "l" => self.reload_current(),
@@ -838,7 +872,7 @@ fn main() {
     let prefs_path = prefs::config_path();
     let prefs = Prefs::load(&prefs_path);
     println!(
-        "Keys: Right/Space/N next · Left/P prev · R random · F5/L reload · T transitions · F perf · H hud · Pause/K freeze · A auto ([ ] interval) · S shuffle · Esc/Q quit"
+        "Keys: Right/Space/N next · Left/P prev · R random · F5/L reload · T transitions · F perf · H hud · Pause/K freeze (. step) · A auto ([ ] interval) · S shuffle · Esc/Q quit"
     );
     println!("Prefs: {}", prefs_path.display());
 

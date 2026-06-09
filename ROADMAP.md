@@ -196,7 +196,8 @@ preset format with a `.milk` importer/converter.
    (graceful synthetic fallback), transition-blended preset cycling over the
    corpus, and keyboard controls: →/Space/N next · ←/P prev · R random · **F5/L
    reload current** · T transitions · **F perf overlay** · **H in-window HUD** ·
-   **Pause/K freeze** · **A auto-advance (`[`/`]` interval)** · Esc/Q quit.
+   **Pause/K freeze** (**`.` steps one frame while paused**) ·
+   **A auto-advance (`[`/`]` interval)** · Esc/Q quit.
    **Auto-advance** (off by default, default 30 s, adjustable in 5 s steps down to
    5 s) cycles to the next *renderable* preset on a wall-clock timer that pauses
    with freeze and resumes without losing remaining time; any manual nav/reload
@@ -221,7 +222,11 @@ preset format with a `.milk` importer/converter.
    re-presents the last frame, keeping the window responsive; the time base is
    advanced by the wall delta so playback resumes without a jump. Navigation /
    reload still work while frozen (hard-cut to the new preset, shown frozen until
-   unpaused), and the HUD shows `PAUSED`. The **HUD** (on by default) draws the current preset name,
+   unpaused), and the HUD shows `PAUSED · STEP .`. While paused, **`.` steps
+   exactly one frame**: preset `time` is held at `frozen_time` and advanced by one
+   `STEP_DT` (1/60 s) per press — `player.render` runs once (advancing the frame
+   counter, one feedback iteration, and any active transition by one frame), then
+   it re-freezes; the auto-advance timer is untouched. The **HUD** (on by default) draws the current preset name,
    `[idx/total]`, transition state (XFADE/CUT), session skip counts, and a perf
    indicator in the top-left corner via a dependency-free embedded 5×7 bitmap
    font — CPU-rasterized into a small texture only when the text changes, then
