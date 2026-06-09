@@ -7,7 +7,7 @@
 //! Keys: →/Space/N next preset · ←/P previous · R random · F5/L reload current ·
 //! T toggle transitions · F toggle perf overlay · H toggle HUD · Pause/K
 //! freeze (`.` step one frame while paused) · A auto-advance ([ / ] adjust
-//! interval) · S shuffle · C screenshot · Esc/Q quit.
+//! interval) · S shuffle · C screenshot · `/` help · Esc/Q quit.
 //!
 //! HUD/transitions/perf/auto-advance(+interval)/shuffle preferences persist
 //! across launches (see `prefs`), and the last shown preset is remembered (in a
@@ -109,6 +109,8 @@ struct App {
     shown: usize,
     /// In-window HUD overlay visibility (toggle with `H`). Default on.
     hud_visible: bool,
+    /// On-screen help overlay (toggle with `/`); transient, not persisted.
+    help_open: bool,
     /// Frozen state (toggle with `Pause`/`K`): preset time + feedback stop
     /// advancing while the window keeps presenting the last frame.
     paused: bool,
@@ -223,6 +225,7 @@ impl App {
             skipped_unparsed: 0,
             shown: 0,
             hud_visible: prefs.hud,
+            help_open: false,
             paused: false,
             force_frame: false,
             step: false,
@@ -296,6 +299,38 @@ impl App {
         while self.history.len() > cap {
             self.history.pop_back();
         }
+    }
+
+    /// The help overlay: the current key bindings (uppercase to suit the HUD
+    /// bitmap font, which has no arrow glyphs — so directions are spelled out).
+    fn help_lines(&self) -> Vec<String> {
+        [
+            "CONTROLS",
+            "NEXT: RIGHT/SPACE/N",
+            "PREV: LEFT/P",
+            "RANDOM: R",
+            "RELOAD: F5/L",
+            "TRANSITIONS: T",
+            "PERF OVERLAY: F",
+            "HUD: H",
+            "FREEZE: PAUSE/K",
+            "STEP (PAUSED): .",
+            "AUTO-ADVANCE: A",
+            "INTERVAL: [ / ]",
+            "SHUFFLE: S",
+            "SCREENSHOT: C",
+            "HELP: /",
+            "QUIT: ESC/Q",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
+    /// Toggle the on-screen help overlay (transient; not persisted).
+    fn toggle_help(&mut self) {
+        self.help_open = !self.help_open;
+        println!("Help overlay: {}", if self.help_open { "on" } else { "off" });
     }
 
     /// Build the HUD text lines from current runtime state.
@@ -595,8 +630,15 @@ impl App {
             }
         }
 
-        // Build HUD text after any auto-advance, so it reflects the shown preset.
-        let hud_lines = self.hud_visible.then(|| self.hud_lines());
+        // Pick the overlay text: the help list takes over the overlay while open
+        // (so it shows even when the HUD is off); otherwise the normal HUD when
+        // visible. Either way it's drawn only to the surface, never the engine
+        // textures, so feedback and screenshots stay clean.
+        let overlay_lines = if self.help_open {
+            Some(self.help_lines())
+        } else {
+            self.hud_visible.then(|| self.hud_lines())
+        };
 
         // Render a frame when running, on the single forced frame after a paused
         // navigation, or on a user step. Otherwise `player.render` is skipped
@@ -625,7 +667,7 @@ impl App {
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
                 let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
                 render.blit.draw(&render.ctx, render.player.output_texture(), &view);
-                if let Some(lines) = &hud_lines {
+                if let Some(lines) = &overlay_lines {
                     render.hud.update(&render.ctx, lines);
                     render.hud.draw(&render.ctx, &view, render.config.width, render.config.height);
                 }
@@ -778,6 +820,7 @@ impl ApplicationHandler for App {
                     "a" => self.toggle_auto(),
                     "s" => self.toggle_shuffle(),
                     "c" => self.capture_screenshot(),
+                    "/" | "?" => self.toggle_help(),
                     "." => self.step_frame(),
                     "[" => self.adjust_auto_interval(-AUTO_STEP_SECS),
                     "]" => self.adjust_auto_interval(AUTO_STEP_SECS),
@@ -978,7 +1021,7 @@ fn main() {
     });
 
     println!(
-        "Keys: Right/Space/N next · Left/P prev · R random · F5/L reload · T transitions · F perf · H hud · Pause/K freeze (. step) · A auto ([ ] interval) · S shuffle · C screenshot · Esc/Q quit"
+        "Keys: Right/Space/N next · Left/P prev · R random · F5/L reload · T transitions · F perf · H hud · Pause/K freeze (. step) · A auto ([ ] interval) · S shuffle · C screenshot · / help · Esc/Q quit"
     );
     println!("Prefs: {}", prefs_path.display());
 

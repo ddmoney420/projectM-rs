@@ -197,7 +197,12 @@ preset format with a `.milk` importer/converter.
    corpus, and keyboard controls: →/Space/N next · ←/P prev · R random · **F5/L
    reload current** · T transitions · **F perf overlay** · **H in-window HUD** ·
    **Pause/K freeze** (**`.` steps one frame while paused**) ·
-   **A auto-advance (`[`/`]` interval)** · **C screenshot** · Esc/Q quit.
+   **A auto-advance (`[`/`]` interval)** · **C screenshot** · **`/` help** · Esc/Q
+   quit. **`/`** toggles an **on-screen help overlay** listing every key binding —
+   it reuses the HUD bitmap-font rasterizer/overlay pass (so it's drawn only to
+   the surface, never the engine textures) and takes over the overlay while open
+   (visible even when the HUD is off); it's transient (not persisted) and absent
+   from screenshots.
    **`C` saves a screenshot** of the current visualizer frame — a readback of the
    pre-HUD engine `output_texture` (so the HUD is excluded), encoded to PNG via
    the existing workspace `image` dep, written to `screenshots/<UTC-timestamp>_
