@@ -1121,3 +1121,113 @@ fn f_shader_without_runtime_globals_unaffected() {
     // The only assignments inside PS are the user's; nothing spurious injected.
     assert!(wgsl.contains("fn PS"));
 }
+
+// ----------------------------------------- return-expression target coercion --
+// A value `return` coerces to the function's declared return type, like a Decl
+// init / assignment / F-prologue: a wider vector truncates, int/bool convert to
+// float, and the existing numeric->bool behavior is preserved.
+
+#[test]
+fn return_vec4_into_f32_truncates() {
+    let src = r#"
+        uniform float4 _c3;
+        float lum(float2 uvi) { return _c3 + float4(uvi, 0.0, 1.0); }
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            float v = lum(_uv.xy);
+            _return_value = float4(v, v, v, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains(").x;"), "vec4 return truncated to scalar .x:\n{wgsl}");
+}
+
+#[test]
+fn return_vec4_into_vec3_truncates() {
+    let src = r#"
+        uniform float4 _c3;
+        float3 col(float2 uvi) { return _c3 + float4(uvi, 0.0, 1.0); }
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            _return_value = float4(col(_uv.xy), 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains(").xyz;"), "vec4 return truncated to .xyz:\n{wgsl}");
+}
+
+#[test]
+fn return_vec4_into_vec2_truncates() {
+    let src = r#"
+        uniform float4 _c3;
+        float2 pt(float2 uvi) { return _c3 + float4(uvi, 0.0, 1.0); }
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            _return_value = float4(pt(_uv.xy), 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains(").xy;"), "vec4 return truncated to .xy:\n{wgsl}");
+}
+
+#[test]
+fn return_matching_vec3_unchanged() {
+    let src = r#"
+        float3 scale(float3 a) { return a * 2.0; }
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            _return_value = float4(scale(float3(_uv.x, _uv.y, 0.5)), 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    // matching vec3 return: no truncation swizzle appended (scalar 2.0 may
+    // broadcast to vec3, which is fine — the point is it isn't `.xyz`-truncated).
+    assert!(wgsl.contains("return (a *"), "matching vec3 return not truncated:\n{wgsl}");
+    assert!(!wgsl.contains("a * 2.0)).xyz") && !wgsl.contains("2.0))).xyz"), "no spurious truncation on matching return");
+}
+
+#[test]
+fn return_numeric_mask_into_bool_still_coerces() {
+    // Existing bool-return coercion: a numeric mask -> `!= 0.0`.
+    let src = r#"
+        bool hit(float a, float b) { return (a > b) * (b > 0.0); }
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            float v = 0.0;
+            if (hit(_uv.x, _uv.y)) { v = 1.0; }
+            _return_value = float4(v, v, v, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("!= 0.0"), "numeric mask coerced to bool via != 0.0:\n{wgsl}");
+}
+
+#[test]
+fn return_int_into_float_casts() {
+    let src = r#"
+        float asf(int n) { return n; }
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            float v = asf(3);
+            _return_value = float4(v, 0.0, 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("return f32(n);"), "int return cast to f32:\n{wgsl}");
+}
+
+#[test]
+fn return_valueless_in_typed_function_not_synthesized() {
+    // Out of scope: a valueless `return;` in a typed function must NOT be given
+    // an invented value by this change — it stays `return;` (still invalid WGSL,
+    // so not naga-validated here, only string-checked).
+    let src = r#"
+        float maybe(float a) { if (a > 0.0) { return; } return a; }
+        void PS(float4 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            float v = maybe(_uv.x);
+            _return_value = float4(v, 0.0, 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    assert!(wgsl.contains("return;"), "valueless return left as-is, not synthesized:\n{wgsl}");
+}

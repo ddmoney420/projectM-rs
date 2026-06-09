@@ -329,22 +329,28 @@ impl Generator {
     }
 
     /// Emit a returned expression, coercing it to the function's declared return
-    /// type only where needed. The single coercion implemented is numeric ->
-    /// bool: HLSL lets a `bool`-returning function `return` a numeric mask (e.g.
-    /// `(a > b) * (c < d)`), which is true iff nonzero. A return already inferred
-    /// as bool, and every non-bool return, keep their existing emission.
+    /// type, mirroring HLSL's implicit conversion at the `return` (the same
+    /// target-type coercion used by declaration initializers, assignments and the
+    /// Bucket-F prologue). A `bool`-returning function accepts a numeric mask
+    /// (true iff nonzero); every other declared type routes through
+    /// `emit_broadcast`, which truncates a wider vector to the declared width
+    /// (`vec4 -> f32`/`.x`, `-> vec3`/`.xyz`, `-> vec2`/`.xy`) and converts
+    /// int/bool to float. A matching-type return is unchanged (it passes through
+    /// `emit_broadcast` as the same `expr(e, scalar)` it emitted before).
     fn emit_return_value(&self, e: &Expr) -> String {
-        if self.current_ret == Type::Bool {
-            match self.infer(e) {
-                Type::Bool => return self.expr(e, Type::Bool),
-                Type::Float => return format!("({}) != 0.0", self.expr(e, Type::Float)),
-                Type::Int => return format!("({}) != 0", self.expr(e, Type::Int)),
-                // Ambiguous (a vector or other type from a `bool` function): leave
-                // it as-is rather than guess a conversion.
-                _ => {}
-            }
+        match self.current_ret {
+            Type::Bool => match self.infer(e) {
+                Type::Bool => self.expr(e, Type::Bool),
+                Type::Float => format!("({}) != 0.0", self.expr(e, Type::Float)),
+                Type::Int => format!("({}) != 0", self.expr(e, Type::Int)),
+                // Ambiguous (a vector from a `bool` function): leave it as-is.
+                _ => self.expr(e, Type::Float),
+            },
+            // A value `return` in a `void` function shouldn't occur (PS returns via
+            // out-params); preserve the prior emission rather than guess.
+            Type::Void => self.expr(e, Type::Float),
+            target => self.emit_broadcast(e, target),
         }
-        self.expr(e, Type::Float)
     }
 
     /// Statement-position expression: handles increment/decrement and the

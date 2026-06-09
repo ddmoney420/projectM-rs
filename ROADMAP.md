@@ -50,7 +50,7 @@ preset format with a `.milk` importer/converter.
    with type inference + param-mutation shadowing; output validated by naga).
    The full preset-shader pipeline (wrap `shader_body` → uniform/intrinsic header
    → transpile → assemble bindings + entry) lives in `pm-preset::preset_shader`.
-   **Corpus shader compat: ~95.4% composite / ~96.1% warp produce valid WGSL** (up
+   **Corpus shader compat: ~95.4% composite / ~96.3% warp produce valid WGSL** (up
    from 37% / 18%), via corpus-driven hardening tracked by the `shader_report`
    example: built-in noise `texsize_*` constants, HLSL implicit vector
    truncation on store *and* in binary ops (`float4 * float2` -> first two
@@ -109,13 +109,21 @@ preset format with a `.milk` importer/converter.
    bucket 23 -> 4 for +84 valid shaders, zero regressions. (The 3 residual stores
    are `mat3x4 * vec3` body products mis-typed as vec3 by `infer` — a matrix-width
    typing issue, deferred; the body `Expr::Assign` path itself already coerced
-   correctly.)
+   correctly.) The coercion path was then completed at the **function return**:
+   `emit_return_value` routes a value `return <expr>` through the same
+   `emit_broadcast(expr, declared_return_type)` so a function declared narrower
+   than its body's expression truncates (vec4 -> `f32`/`.x`, `-> vec3`/`.xyz`,
+   `-> vec2`/`.xy`) and int/bool convert to float, alongside the pre-existing
+   numeric->bool mask coercion. This cleared `InvalidReturnType` 22 -> 2 (the 2
+   residual are *valueless*/fallthrough returns in a typed function — out of
+   scope, they'd need a synthesized value) for +20 valid shaders, zero
+   regressions; matching-type returns are byte-identical.
    The remaining naga rejections, by descending frequency (`parse_buckets` /
-   `validate_kinds` / `bucket_subgroups` examples): `InvalidReturnType` (~20, user
-   functions declared to return a vector but whose body returns a different type),
-   a `Cope - domains` expression family (~27), the `cannot cast` vec4->vec2
-   matrix-index E tail (9), the 3 `mat3x4 * vec3` mis-typed-store residual, and
-   small unary/binary tails. These are the next hardening work.
+   `validate_kinds` / `bucket_subgroups` examples): a `Cope - domains` /
+   `all(numericVec)` family (~27, HLSL `all`/`any` on a numeric vector needs a
+   `!= 0` bool-vector arg), the `cannot cast` vec4->vec2 matrix-index E tail (9),
+   the 3 `mat3x4 * vec3` mis-typed-store residual, 2 valueless returns, and small
+   unary/binary tails. These are the next hardening work.
    **Custom composite *and* warp shaders now render.** Composite
    (`pm-core::PresetComposite`): the translated WGSL is wired with a per-frame
    `MdUniforms` buffer (`_cN`/`q`/rot) and `sampler_main`, swapping in for the
