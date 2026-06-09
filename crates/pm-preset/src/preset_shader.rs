@@ -318,8 +318,19 @@ pub fn wrap(body: &str, kind: ShaderKind) -> Result<String, ShaderError> {
     let brace = after_entry.find('{').ok_or(ShaderError::MissingBrace)?;
     program.push_str(&after_entry[..brace]);
     program.push_str("{\nfloat3 ret = 0;\n");
-    if kind == ShaderKind::Warp {
-        program.push_str("_mv_tex_coords.xy = _uv.xy;\n");
+    // `uv` / `uv_orig` are mutable function-locals (not `#define` macros), so a
+    // preset can write `uv.x += d` without producing an invalid chained-swizzle
+    // lvalue like `_uv.xy.x`. They're seeded from the input coords, exactly the
+    // values the old macros expanded to; the body samples with the final `uv`,
+    // so the result still flows to the output through `ret`.
+    match kind {
+        ShaderKind::Warp => {
+            program.push_str("_mv_tex_coords.xy = _uv.xy;\n");
+            program.push_str("float2 uv = _uv.xy;\nfloat2 uv_orig = _uv.zw;\n");
+        }
+        ShaderKind::Composite => {
+            program.push_str("float2 uv = _uv.xy;\nfloat2 uv_orig = _uv.xy;\n");
+        }
     }
     let after_brace = &after_entry[brace + 1..];
 
@@ -332,11 +343,12 @@ pub fn wrap(body: &str, kind: ShaderKind) -> Result<String, ShaderError> {
     let mut full = String::new();
     full.push_str(HEADER);
     match kind {
+        // `uv` / `uv_orig` are declared as locals in the body (above), not macros.
         ShaderKind::Warp => full.push_str(
-            "#define rad _rad_ang.x\n#define ang _rad_ang.y\n#define uv _uv.xy\n#define uv_orig _uv.zw\n",
+            "#define rad _rad_ang.x\n#define ang _rad_ang.y\n",
         ),
         ShaderKind::Composite => full.push_str(
-            "#define rad _rad_ang.x\n#define ang _rad_ang.y\n#define uv _uv.xy\n#define uv_orig _uv.xy\n#define hue_shader _vDiffuse.xyz\n",
+            "#define rad _rad_ang.x\n#define ang _rad_ang.y\n#define hue_shader _vDiffuse.xyz\n",
         ),
     }
     full.push_str(&program);

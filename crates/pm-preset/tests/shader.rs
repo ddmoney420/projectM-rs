@@ -65,3 +65,71 @@ fn getblur_references_blur_samplers() {
 fn missing_shader_body_errors() {
     assert!(shader_to_wgsl("ret = uv.x;", ShaderKind::Composite).is_err());
 }
+
+#[test]
+fn warp_uv_lvalue_write_compiles() {
+    // The Bucket D pattern: `uv.x += d` (and `uv.y -= d`) must not produce an
+    // invalid chained-swizzle lvalue (`_uv.xy.x`). `uv` is now a mutable local.
+    let body = r#"shader_body
+{
+    float d = 0.01;
+    uv.x += d;
+    uv.y -= d;
+    ret = tex2D(sampler_main, uv).xyz;
+}"#;
+    let wgsl = shader_to_wgsl(body, ShaderKind::Warp).expect("translate").wgsl;
+    validate(&wgsl).unwrap();
+    assert!(wgsl.contains("var uv: vec2<f32> = _uv.xy"), "uv is a mutable local");
+    assert!(!wgsl.contains("_uv.xy.x +="), "no chained-swizzle lvalue");
+}
+
+#[test]
+fn warp_uv_full_swizzle_assignment_compiles() {
+    // `uv.xy = some_vec2` (whole-vector reassignment).
+    let body = r#"shader_body
+{
+    float2 off = float2(0.1, 0.2);
+    uv.xy = uv + off;
+    ret = tex2D(sampler_main, uv).xyz;
+}"#;
+    let wgsl = shader_to_wgsl(body, ShaderKind::Warp).expect("translate").wgsl;
+    validate(&wgsl).unwrap();
+}
+
+#[test]
+fn warp_uv_orig_read_path_compiles() {
+    // `uv_orig` (warp = `_uv.zw`) read path still works.
+    let body = r#"shader_body
+{
+    ret = tex2D(sampler_main, uv).xyz;
+    ret += tex2D(sampler_main, uv_orig).xyz * 0.2;
+}"#;
+    let wgsl = shader_to_wgsl(body, ShaderKind::Warp).expect("translate").wgsl;
+    validate(&wgsl).unwrap();
+    assert!(wgsl.contains("var uv_orig: vec2<f32> = _uv.zw"), "uv_orig seeded from _uv.zw");
+}
+
+#[test]
+fn read_only_uv_still_compiles_unchanged() {
+    // Shaders that only READ uv must still work (and now read the local).
+    let body = "shader_body\n{\nret = tex2D(sampler_main, uv).xyz * 0.98;\n}";
+    let warp = shader_to_wgsl(body, ShaderKind::Warp).expect("translate").wgsl;
+    let comp = shader_to_wgsl(body, ShaderKind::Composite).expect("translate").wgsl;
+    validate(&warp).unwrap();
+    validate(&comp).unwrap();
+    // The sample now goes through the `uv` local, not an inlined `_uv.xy`.
+    assert!(warp.contains("textureSample(sampler_main, sampler_main_sampler, uv)"));
+}
+
+#[test]
+fn non_uv_swizzle_assignment_unchanged() {
+    // A normal (non-uv) single-level swizzle lvalue still works as before.
+    let body = r#"shader_body
+{
+    ret = tex2D(sampler_main, uv).xyz;
+    ret.x = 0.5;
+    ret.yz = float2(0.2, 0.3);
+}"#;
+    let wgsl = shader_to_wgsl(body, ShaderKind::Composite).expect("translate").wgsl;
+    validate(&wgsl).unwrap();
+}
