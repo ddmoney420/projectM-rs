@@ -561,3 +561,41 @@ fn already_valid_numeric_unchanged_by_int_coercion() {
     validate_wgsl(&wgsl).unwrap();
     assert!(!wgsl.contains("f32(3"), "int literal stays a float literal, no f32() wrap");
 }
+
+#[test]
+fn tex2d_truncates_wide_coordinate_to_xy() {
+    // tex2D with a vec3 coord truncates to .xy (HLSL uses only the first two
+    // components). End-to-end naga validation is in pm-preset (with bindings);
+    // here we check the codegen emission, since raw translate doesn't bind
+    // textures.
+    let src = r#"
+        sampler2D sampler_main;
+        void PS(float2 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            float3 c3 = float3(_uv, 0.5);
+            float4 c4 = float4(_uv, 0.5, 1.0);
+            float3 a = tex2D(sampler_main, c3).xyz;
+            float3 b = tex2D(sampler_main, c4).xyz;
+            _return_value = float4(a + b, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    assert!(wgsl.contains("textureSample(sampler_main, sampler_main_sampler, (c3).xy)"), "vec3 coord -> .xy");
+    assert!(wgsl.contains("(c4).xy"), "vec4 coord -> .xy");
+    // A vec2 coord (the default) must not be rewritten.
+    assert!(!wgsl.contains("(_uv).xy"));
+}
+
+#[test]
+fn tex3d_keeps_vec3_coordinate() {
+    let src = r#"
+        sampler3D sampler_noisevol_hq;
+        void PS(float2 _uv : TEXCOORD0, out float4 _return_value : COLOR) {
+            float3 p = float3(_uv, 0.3);
+            float3 n = tex3D(sampler_noisevol_hq, p).xyz;
+            _return_value = float4(n, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    assert!(wgsl.contains("textureSample(sampler_noisevol_hq, sampler_noisevol_hq_sampler, p)"));
+    assert!(!wgsl.contains("(p).xy"), "tex3D coord not truncated");
+}

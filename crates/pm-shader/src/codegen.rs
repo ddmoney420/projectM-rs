@@ -462,7 +462,18 @@ impl Generator {
         let lower = name.to_ascii_lowercase();
         match lower.as_str() {
             // Texture sampling. Binding convention: `<s>` texture, `<s>_sampler`.
-            "tex2d" | "tex3d" | "tex2dlod" | "tex2dbias" => {
+            // 2D sampling: HLSL `tex2D` uses only the first two coordinate
+            // components, so truncate a wider coordinate (e.g. `GetBlur1(uv)`
+            // returns float3) to a `vec2` for WGSL. A vec2 is left unchanged.
+            "tex2d" | "tex2dlod" | "tex2dbias" => {
+                if args.len() >= 2 {
+                    let s = self.expr(&args[0], Type::Float);
+                    let uv = self.emit_broadcast(&args[1], Type::Float2);
+                    return format!("textureSample({s}, {s}_sampler, {uv})");
+                }
+            }
+            // 3D sampling keeps its vec3 coordinate unchanged.
+            "tex3d" => {
                 if args.len() >= 2 {
                     let s = self.expr(&args[0], Type::Float);
                     let uv = self.expr(&args[1], Type::Float);

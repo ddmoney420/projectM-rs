@@ -50,7 +50,7 @@ preset format with a `.milk` importer/converter.
    with type inference + param-mutation shadowing; output validated by naga).
    The full preset-shader pipeline (wrap `shader_body` → uniform/intrinsic header
    → transpile → assemble bindings + entry) lives in `pm-preset::preset_shader`.
-   **Corpus shader compat: ~92% composite / ~90% warp produce valid WGSL** (up
+   **Corpus shader compat: ~94% composite / ~91% warp produce valid WGSL** (up
    from 37% / 18%), via corpus-driven hardening tracked by the `shader_report`
    example: built-in noise `texsize_*` constants, HLSL implicit vector
    truncation on store *and* in binary ops (`float4 * float2` -> first two
@@ -62,14 +62,16 @@ preset format with a `.milk` importer/converter.
    reserved-word identifier escaping (a preset var named `mod`/`filter`/`move`
    -> `<name>_pm`), bool->numeric and int->float coercion (HLSL promotes
    comparison results and ints in float contexts: `f32(x > 0.5)`,
-   `vec3<f32>(v > 0.5)`, `floatVar <= intVar`), and `uv` / `uv_orig` as mutable
+   `vec3<f32>(v > 0.5)`, `floatVar <= intVar`), `uv` / `uv_orig` as mutable
    function-locals (not `#define` macros) so a preset can write `uv.x += d`
-   without an invalid chained-swizzle lvalue (`_uv.xy.x`). The remaining naga
-   rejections, by descending frequency (`parse_buckets` / `validate_kinds` /
-   `invalid_binary_kinds` examples): matrix-from-`float4` / `mul` (Bucket E),
-   global initializers referencing uniforms (Bucket F), `InvalidImageCoordinate`
-   (3D/odd texture coords), and `InvalidUnaryOperandType`. These are the next
-   hardening work.
+   without an invalid chained-swizzle lvalue (`_uv.xy.x`), and `tex2D`
+   coordinate truncation to `vec2` (HLSL uses only the first two components, so
+   `tex2D(s, GetBlur1(uv))` with a float3 coord becomes `(…).xy`). The remaining
+   naga rejections, by descending frequency (`parse_buckets` / `validate_kinds`
+   / `bucket_subgroups` examples): matrix-from-`float4` / `mul` (Bucket E, ~306),
+   global initializers referencing uniforms (Bucket F, ~210, ~48% blocked by E),
+   `InvalidUnaryOperandType` (~155, all `-(boolean)`), and a residual `bool*bool`
+   `InvalidBinary` tail (~28). These are the next hardening work.
    **Custom composite *and* warp shaders now render.** Composite
    (`pm-core::PresetComposite`): the translated WGSL is wired with a per-frame
    `MdUniforms` buffer (`_cN`/`q`/rot) and `sampler_main`, swapping in for the

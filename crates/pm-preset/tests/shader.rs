@@ -133,3 +133,31 @@ fn non_uv_swizzle_assignment_unchanged() {
     let wgsl = shader_to_wgsl(body, ShaderKind::Composite).expect("translate").wgsl;
     validate(&wgsl).unwrap();
 }
+
+#[test]
+fn tex2d_wide_coordinate_truncates_and_validates() {
+    // The corpus pattern: tex2D(sampler_main, GetBlur1(uv)) where GetBlur1 ->
+    // float3. The 2D coordinate must truncate to vec2, then naga-validate with
+    // real bindings.
+    let body = "shader_body\n{\nret = tex2D(sampler_main, GetBlur1(uv)).xyz;\n}";
+    let wgsl = shader_to_wgsl(body, ShaderKind::Composite).expect("translate").wgsl;
+    validate(&wgsl).unwrap();
+    assert!(wgsl.contains(").xy)"), "wide tex2D coord truncated to .xy");
+}
+
+#[test]
+fn tex2d_vec2_coordinate_unchanged_and_validates() {
+    let body = "shader_body\n{\nret = tex2D(sampler_main, uv).xyz;\n}";
+    let wgsl = shader_to_wgsl(body, ShaderKind::Composite).expect("translate").wgsl;
+    validate(&wgsl).unwrap();
+    assert!(wgsl.contains("textureSample(sampler_main, sampler_main_sampler, uv)"), "vec2 coord unchanged");
+}
+
+#[test]
+fn tex3d_noisevol_coordinate_unchanged_and_validates() {
+    let body = "shader_body\n{\nfloat3 p = float3(uv, 0.3);\nret = tex3D(sampler_noisevol_hq, p).xyz;\n}";
+    let wgsl = shader_to_wgsl(body, ShaderKind::Composite).expect("translate").wgsl;
+    validate(&wgsl).unwrap();
+    assert!(wgsl.contains("textureSample(sampler_noisevol_hq, sampler_noisevol_hq_sampler, p)"));
+    assert!(!wgsl.contains("(p).xy"), "tex3D/noise-volume coord not truncated");
+}
