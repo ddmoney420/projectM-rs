@@ -7,7 +7,7 @@
 //! Keys: →/Space/N next preset · ←/P previous · R random · F5/L reload current ·
 //! T toggle transitions · F toggle perf overlay · H toggle HUD · Pause/K
 //! freeze (`.` step one frame while paused) · A auto-advance ([ / ] adjust
-//! interval) · S shuffle · Esc/Q quit.
+//! interval) · S shuffle · C screenshot · Esc/Q quit.
 //!
 //! HUD/transitions/perf/auto-advance(+interval)/shuffle preferences persist
 //! across launches (see `prefs`). Env: `PM_PERF` forces the perf overlay on at
@@ -18,6 +18,7 @@ mod audio;
 mod blit;
 mod hud;
 mod prefs;
+mod screenshot;
 
 use audio::AudioInput;
 use blit::Blit;
@@ -30,7 +31,7 @@ use pm_render::{read_rgba8, GpuContext};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -457,6 +458,39 @@ impl App {
         }
     }
 
+    /// Save the current visualizer frame (the pre-HUD engine output) to a PNG in
+    /// `screenshots/`. Reads back the existing output texture — it never advances
+    /// time, feedback, transitions, or the auto-advance timer, and is HUD-free.
+    fn capture_screenshot(&self) {
+        let Some(render) = &self.render else { return };
+        let tex = render.player.output_texture();
+        let (w, h) = (tex.width, tex.height);
+        let pixels = read_rgba8(&render.ctx, tex);
+        let Some(img) = image::RgbaImage::from_raw(w, h, pixels) else {
+            eprintln!("screenshot: unexpected pixel buffer size");
+            return;
+        };
+
+        let dir = Path::new("screenshots");
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("screenshot: could not create {}: {e}", dir.display());
+            return;
+        }
+        let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let base = format!("{}_{}", screenshot::timestamp_utc(secs), screenshot::sanitize(&render.name));
+        // Avoid overwriting an existing file (e.g. multiple shots in one second).
+        let mut path = dir.join(format!("{base}.png"));
+        let mut n = 2;
+        while path.exists() {
+            path = dir.join(format!("{base}_{n}.png"));
+            n += 1;
+        }
+        match img.save(&path) {
+            Ok(()) => println!("Screenshot saved: {} ({w}x{h})", path.display()),
+            Err(e) => eprintln!("screenshot: save failed: {e}"),
+        }
+    }
+
     /// Toggle the per-second frame-timing overlay (also enabled at launch with
     /// the `PM_PERF` env var).
     fn toggle_perf(&mut self) {
@@ -688,6 +722,7 @@ impl ApplicationHandler for App {
                     "k" => self.toggle_pause(),
                     "a" => self.toggle_auto(),
                     "s" => self.toggle_shuffle(),
+                    "c" => self.capture_screenshot(),
                     "." => self.step_frame(),
                     "[" => self.adjust_auto_interval(-AUTO_STEP_SECS),
                     "]" => self.adjust_auto_interval(AUTO_STEP_SECS),
@@ -872,7 +907,7 @@ fn main() {
     let prefs_path = prefs::config_path();
     let prefs = Prefs::load(&prefs_path);
     println!(
-        "Keys: Right/Space/N next · Left/P prev · R random · F5/L reload · T transitions · F perf · H hud · Pause/K freeze (. step) · A auto ([ ] interval) · S shuffle · Esc/Q quit"
+        "Keys: Right/Space/N next · Left/P prev · R random · F5/L reload · T transitions · F perf · H hud · Pause/K freeze (. step) · A auto ([ ] interval) · S shuffle · C screenshot · Esc/Q quit"
     );
     println!("Prefs: {}", prefs_path.display());
 

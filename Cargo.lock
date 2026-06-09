@@ -1457,6 +1457,7 @@ name = "pm-app"
 version = "0.0.1"
 dependencies = [
  "cpal",
+ "image",
  "pm-audio",
  "pm-core",
  "pm-preset",

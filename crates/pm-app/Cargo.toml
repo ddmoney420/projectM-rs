@@ -18,3 +18,6 @@ pm-preset = { path = "../pm-preset" }
 winit = "0.30"
 cpal = "0.18"
 pollster = "0.4"
+# Reuse the workspace's existing PNG encoder (same version/features as
+# pm-core/pm-render) for the screenshot key.
+image = { version = "0.25", default-features = false, features = ["png"] }

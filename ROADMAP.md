@@ -197,7 +197,13 @@ preset format with a `.milk` importer/converter.
    corpus, and keyboard controls: →/Space/N next · ←/P prev · R random · **F5/L
    reload current** · T transitions · **F perf overlay** · **H in-window HUD** ·
    **Pause/K freeze** (**`.` steps one frame while paused**) ·
-   **A auto-advance (`[`/`]` interval)** · Esc/Q quit.
+   **A auto-advance (`[`/`]` interval)** · **C screenshot** · Esc/Q quit.
+   **`C` saves a screenshot** of the current visualizer frame — a readback of the
+   pre-HUD engine `output_texture` (so the HUD is excluded), encoded to PNG via
+   the existing workspace `image` dep, written to `screenshots/<UTC-timestamp>_
+   <preset>.png` (de-duplicated, never overwriting). It only reads the existing
+   texture, so it works while running, paused, or after a step, and never
+   advances time/feedback/transitions/the auto-advance timer.
    **Auto-advance** (off by default, default 30 s, adjustable in 5 s steps down to
    5 s) cycles to the next *renderable* preset on a wall-clock timer that pauses
    with freeze and resumes without losing remaining time; any manual nav/reload
