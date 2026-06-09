@@ -195,7 +195,14 @@ preset format with a `.milk` importer/converter.
    **pm-app** is a live winit window with a wgpu surface, cpal audio capture
    (graceful synthetic fallback), transition-blended preset cycling over the
    corpus, and keyboard controls: →/Space/N next · ←/P prev · R random · **F5/L
-   reload current** · T transitions · **F perf overlay** · Esc/Q quit. Navigation
+   reload current** · T transitions · **F perf overlay** · **H in-window HUD** ·
+   Esc/Q quit. The **HUD** (on by default) draws the current preset name,
+   `[idx/total]`, transition state (XFADE/CUT), session skip counts, and a perf
+   indicator in the top-left corner via a dependency-free embedded 5×7 bitmap
+   font — CPU-rasterized into a small texture only when the text changes, then
+   composited by an alpha-blended pass *after* the blit so the visualizer's
+   framebuffer/feedback are untouched (uppercase-only; unsupported glyphs blank).
+   Navigation
    probes candidates at low-res and **skips presets that fail to parse or render
    black, logging the reason and a per-jump skip tally** (and a session summary
    on exit) so a bad preset never black-screens or crashes the player. `PM_SCAN`

@@ -5,16 +5,18 @@
 //! ```
 //!
 //! Keys: →/Space/N next preset · ←/P previous · R random · F5/L reload current ·
-//! T toggle transitions · F toggle perf overlay · Esc/Q quit.
+//! T toggle transitions · F toggle perf overlay · H toggle HUD · Esc/Q quit.
 //!
 //! Env: `PM_PERF` starts with the perf overlay on; `PM_SCAN` prints a one-time
 //! corpus compatibility summary (parse + shader-translate rates) at startup.
 
 mod audio;
 mod blit;
+mod hud;
 
 use audio::AudioInput;
 use blit::Blit;
+use hud::Hud;
 use pm_core::{PresetPlayer, WarpEngine, DEFAULT_TRANSITION_SECS};
 use pm_preset::{shader_to_wgsl, Preset, ShaderKind};
 use pm_render::wgpu;
@@ -54,6 +56,9 @@ struct Render {
     config: wgpu::SurfaceConfiguration,
     player: PresetPlayer,
     blit: Blit,
+    hud: Hud,
+    /// Current preset's display name (for the HUD).
+    name: String,
 }
 
 /// Number of warm-up frames to build feedback content before probing.
@@ -80,6 +85,8 @@ struct App {
     skipped_black: usize,
     skipped_unparsed: usize,
     shown: usize,
+    /// In-window HUD overlay visibility (toggle with `H`). Default on.
+    hud_visible: bool,
 }
 
 /// Rolling per-second frame-timing accumulator (opt-in via `PM_PERF`).
@@ -148,7 +155,29 @@ impl App {
             skipped_black: 0,
             skipped_unparsed: 0,
             shown: 0,
+            hud_visible: true,
         }
+    }
+
+    /// Build the HUD text lines from current runtime state.
+    fn hud_lines(&self) -> Vec<String> {
+        let Some(render) = &self.render else { return Vec::new() };
+        let total = self.presets.len().max(1);
+        let mut lines = vec![render.name.clone()];
+        let mut status = format!("[{}/{}]", self.index + 1, total);
+        if render.player.is_transitioning() {
+            status.push_str(" XFADE");
+        } else if render.player.duration() <= 0.0 {
+            status.push_str(" CUT");
+        }
+        lines.push(status);
+        if self.skipped_black + self.skipped_unparsed > 0 {
+            lines.push(format!("SKIPPED {} / {} UNPARSED", self.skipped_black, self.skipped_unparsed));
+        }
+        if self.perf.is_some() {
+            lines.push("PERF ON (SEE CONSOLE)".to_string());
+        }
+        lines
     }
 
     /// The current preset: the built-in until the user navigates into the corpus.
@@ -192,6 +221,7 @@ impl App {
         let Found { engine, idx, name, black, unparsed, fell_back } = found;
         let cc = if engine.uses_custom_composite() { " ·custom-comp" } else { "" };
         render.player.switch_to(engine);
+        render.name = name.clone();
         render.window.set_title(&format!("pm-app — {name}{cc}  [{}/{}]", idx + 1, len));
 
         // Tally + log why candidates were skipped on the way here.
@@ -233,6 +263,7 @@ impl App {
             let cc = if engine.uses_custom_composite() { " ·custom-comp" } else { "" };
             let duration = render.player.duration();
             render.player = PresetPlayer::new(&render.ctx, engine, w, h, duration);
+            render.name = name.clone();
             render.window.set_title(&format!("pm-app — {name}{cc}  [{}/{}]", self.index + 1, self.presets.len().max(1)));
             println!("Reloaded: {name}");
         }
@@ -271,6 +302,7 @@ impl App {
             // Resize is a clean reset, not a transition.
             let duration = render.player.duration();
             render.player = PresetPlayer::new(&render.ctx, engine, w, h, duration);
+            render.name = name.clone();
             render.window.set_title(&format!(
                 "pm-app — {name}{cc}  [{}/{}]",
                 self.index + 1,
@@ -280,6 +312,8 @@ impl App {
     }
 
     fn render(&mut self) {
+        // Build HUD text before the mutable borrow of `self.render`.
+        let hud_lines = self.hud_visible.then(|| self.hud_lines());
         let Some(render) = &mut self.render else { return };
 
         let now = Instant::now();
@@ -300,6 +334,10 @@ impl App {
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
                 let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
                 render.blit.draw(&render.ctx, render.player.output_texture(), &view);
+                if let Some(lines) = &hud_lines {
+                    render.hud.update(&render.ctx, lines);
+                    render.hud.draw(&render.ctx, &view, render.config.width, render.config.height);
+                }
                 frame.present();
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
@@ -377,13 +415,14 @@ impl ApplicationHandler for App {
 
         let ctx = GpuContext { instance, adapter, device, queue };
         let blit = Blit::new(&ctx, format);
+        let hud = Hud::new(&ctx, format);
         let (preset, name) = self.current_preset();
         let engine = WarpEngine::new(&ctx, preset, w, h);
         let cc = if engine.uses_custom_composite() { " ·custom-comp" } else { "" };
         window.set_title(&format!("pm-app — {name}{cc}  [{}/{}]", self.index + 1, self.presets.len().max(1)));
         let player = PresetPlayer::new(&ctx, engine, w, h, DEFAULT_TRANSITION_SECS);
 
-        self.render = Some(Render { window, ctx, surface, config, player, blit });
+        self.render = Some(Render { window, ctx, surface, config, player, blit, hud, name });
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -411,6 +450,10 @@ impl ApplicationHandler for App {
                     "r" => self.change_preset(0, true),
                     "t" => self.toggle_transitions(),
                     "f" => self.toggle_perf(),
+                    "h" => {
+                        self.hud_visible = !self.hud_visible;
+                        println!("HUD: {}", if self.hud_visible { "on" } else { "off" });
+                    }
                     "l" => self.reload_current(),
                     "q" => {
                         self.log_session();
@@ -587,7 +630,7 @@ fn main() {
         scan_corpus(&presets);
     }
     println!(
-        "Keys: Right/Space/N next · Left/P prev · R random · F5/L reload · T transitions · F perf · Esc/Q quit"
+        "Keys: Right/Space/N next · Left/P prev · R random · F5/L reload · T transitions · F perf · H hud · Esc/Q quit"
     );
 
     let event_loop = EventLoop::new().expect("create event loop");
