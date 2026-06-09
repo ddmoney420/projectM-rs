@@ -194,7 +194,14 @@ preset format with a `.milk` importer/converter.
    outgoing one dropped when the fade completes (duration 0 = hard cut).
    **pm-app** is a live winit window with a wgpu surface, cpal audio capture
    (graceful synthetic fallback), transition-blended preset cycling over the
-   corpus, and keyboard controls (incl. `T` to toggle transitions). **pm-format** is the native `.pmp`
+   corpus, and keyboard controls: →/Space/N next · ←/P prev · R random · **F5/L
+   reload current** · T transitions · **F perf overlay** · Esc/Q quit. Navigation
+   probes candidates at low-res and **skips presets that fail to parse or render
+   black, logging the reason and a per-jump skip tally** (and a session summary
+   on exit) so a bad preset never black-screens or crashes the player. `PM_SCAN`
+   prints a one-time CPU-only corpus compatibility summary at startup (presets
+   found / loaded / skipped / custom-shader translate rate); on the 9,795-preset
+   cream-of-the-crop set: 99.6% load, 98.0% shader-translate. **pm-format** is the native `.pmp`
    preset format: a structured, lossless representation (scalar params + named
    code blocks) with a `.milk` importer/exporter and a readable text form.
    Validated over the 14k-preset corpus: `.milk → native → .pmp → native`

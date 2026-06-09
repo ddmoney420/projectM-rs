@@ -4,8 +4,11 @@
 //! cargo run -p pm-app --release -- [preset-dir]
 //! ```
 //!
-//! Keys: →/Space/N next preset · ←/P previous · R random · T toggle
-//! transitions · Esc/Q quit.
+//! Keys: →/Space/N next preset · ←/P previous · R random · F5/L reload current ·
+//! T toggle transitions · F toggle perf overlay · Esc/Q quit.
+//!
+//! Env: `PM_PERF` starts with the perf overlay on; `PM_SCAN` prints a one-time
+//! corpus compatibility summary (parse + shader-translate rates) at startup.
 
 mod audio;
 mod blit;
@@ -13,7 +16,7 @@ mod blit;
 use audio::AudioInput;
 use blit::Blit;
 use pm_core::{PresetPlayer, WarpEngine, DEFAULT_TRANSITION_SECS};
-use pm_preset::Preset;
+use pm_preset::{shader_to_wgsl, Preset, ShaderKind};
 use pm_render::wgpu;
 use pm_render::{read_rgba8, GpuContext};
 use std::path::{Path, PathBuf};
@@ -71,8 +74,12 @@ struct App {
     start: Instant,
     last: Instant,
     frame: i32,
-    /// Frame-time logging, enabled with the `PM_PERF` env var.
+    /// Frame-time logging, enabled with the `PM_PERF` env var (toggle with `F`).
     perf: Option<Perf>,
+    /// Cumulative navigation stats, reported on exit.
+    skipped_black: usize,
+    skipped_unparsed: usize,
+    shown: usize,
 }
 
 /// Rolling per-second frame-timing accumulator (opt-in via `PM_PERF`).
@@ -138,6 +145,9 @@ impl App {
             last: now,
             frame: 0,
             perf: std::env::var_os("PM_PERF").map(|_| Perf::new()),
+            skipped_black: 0,
+            skipped_unparsed: 0,
+            shown: 0,
         }
     }
 
@@ -177,12 +187,30 @@ impl App {
 
         let Some(render) = self.render.as_mut() else { return };
         let (w, h) = (render.config.width, render.config.height);
-        let (engine, idx, name) =
+        let found =
             find_renderable(&render.ctx, w, h, &self.presets, &mut self.audio, self.frame, start, dir);
+        let Found { engine, idx, name, black, unparsed, fell_back } = found;
         let cc = if engine.uses_custom_composite() { " ·custom-comp" } else { "" };
         render.player.switch_to(engine);
         render.window.set_title(&format!("pm-app — {name}{cc}  [{}/{}]", idx + 1, len));
-        println!("Showing [{}/{}]: {name}", idx + 1, len);
+
+        // Tally + log why candidates were skipped on the way here.
+        self.skipped_black += black;
+        self.skipped_unparsed += unparsed;
+        self.shown += 1;
+        let mut why = String::new();
+        if black + unparsed > 0 {
+            why = format!(" (skipped {}: {black} black", black + unparsed);
+            if unparsed > 0 {
+                why.push_str(&format!(", {unparsed} unparsed"));
+            }
+            why.push(')');
+        }
+        if fell_back {
+            println!("Showing [{}/{}]: built-in (no renderable preset found nearby){why}", idx + 1, len);
+        } else {
+            println!("Showing [{}/{}]: {name}{why}", idx + 1, len);
+        }
         self.index = idx;
     }
 
@@ -193,6 +221,44 @@ impl App {
             render.player.set_duration(if on { 0.0 } else { DEFAULT_TRANSITION_SECS });
             println!("Preset transitions: {}", if on { "off (hard cut)" } else { "on (2.7s)" });
         }
+    }
+
+    /// Reload the current preset from disk and restart it (a hard reset, not a
+    /// transition) — useful after editing a `.milk` file.
+    fn reload_current(&mut self) {
+        let (preset, name) = self.current_preset();
+        if let Some(render) = &mut self.render {
+            let (w, h) = (render.config.width, render.config.height);
+            let engine = WarpEngine::new(&render.ctx, preset, w, h);
+            let cc = if engine.uses_custom_composite() { " ·custom-comp" } else { "" };
+            let duration = render.player.duration();
+            render.player = PresetPlayer::new(&render.ctx, engine, w, h, duration);
+            render.window.set_title(&format!("pm-app — {name}{cc}  [{}/{}]", self.index + 1, self.presets.len().max(1)));
+            println!("Reloaded: {name}");
+        }
+    }
+
+    /// Toggle the per-second frame-timing overlay (also enabled at launch with
+    /// the `PM_PERF` env var).
+    fn toggle_perf(&mut self) {
+        self.perf = match self.perf {
+            Some(_) => {
+                println!("Perf overlay: off");
+                None
+            }
+            None => {
+                println!("Perf overlay: on (per-second frame timings)");
+                Some(Perf::new())
+            }
+        };
+    }
+
+    /// Print the cumulative session stats (called on exit).
+    fn log_session(&self) {
+        println!(
+            "── session ──  presets shown: {}  ·  skipped: {} black, {} unparsed",
+            self.shown, self.skipped_black, self.skipped_unparsed
+        );
     }
 
     /// Recreate the warp engine for the current preset at the current size.
@@ -322,22 +388,34 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.log_session();
+                event_loop.exit();
+            }
             WindowEvent::Resized(size) => self.resize(size.width, size.height),
             WindowEvent::RedrawRequested => self.render(),
             WindowEvent::KeyboardInput {
                 event: KeyEvent { logical_key, state: ElementState::Pressed, .. },
                 ..
             } => match logical_key {
-                Key::Named(NamedKey::Escape) => event_loop.exit(),
+                Key::Named(NamedKey::Escape) => {
+                    self.log_session();
+                    event_loop.exit();
+                }
                 Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::Space) => self.change_preset(1, false),
                 Key::Named(NamedKey::ArrowLeft) => self.change_preset(-1, false),
+                Key::Named(NamedKey::F5) => self.reload_current(),
                 Key::Character(c) => match c.as_str() {
                     "n" => self.change_preset(1, false),
                     "p" => self.change_preset(-1, false),
                     "r" => self.change_preset(0, true),
                     "t" => self.toggle_transitions(),
-                    "q" => event_loop.exit(),
+                    "f" => self.toggle_perf(),
+                    "l" => self.reload_current(),
+                    "q" => {
+                        self.log_session();
+                        event_loop.exit();
+                    }
                     _ => {}
                 },
                 _ => {}
@@ -385,6 +463,20 @@ const PROBE_SIZE: u32 = 160;
 /// Search from `start` in direction `dir` for a preset that renders visible
 /// content. Each candidate is probed at low resolution (fast); the winner is
 /// rebuilt at full resolution. Falls back to the built-in if none found.
+/// Outcome of a navigation probe: the chosen engine plus how many candidates
+/// were skipped and why, so the caller can log it.
+struct Found {
+    engine: WarpEngine,
+    idx: usize,
+    name: String,
+    /// Candidates that rendered black (need generators we don't support).
+    black: usize,
+    /// Candidates that couldn't be read or parsed.
+    unparsed: usize,
+    /// True when no candidate rendered and we fell back to the built-in.
+    fell_back: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn find_renderable(
     ctx: &GpuContext,
@@ -395,11 +487,20 @@ fn find_renderable(
     frame_base: i32,
     start: usize,
     dir: i64,
-) -> (WarpEngine, usize, String) {
+) -> Found {
     let len = presets.len();
+    let (mut black, mut unparsed) = (0usize, 0usize);
     for attempt in 0..MAX_PROBE.min(len) {
         let idx = ((start as i64 + dir * attempt as i64).rem_euclid(len as i64)) as usize;
-        let Some((preset, name)) = load_preset(&presets[idx]) else { continue };
+        let (preset, name) = match load_preset(&presets[idx]) {
+            Some(p) => p,
+            None => {
+                unparsed += 1;
+                let n = presets[idx].file_name().unwrap_or_default().to_string_lossy();
+                eprintln!("  skip (unparsed): {n}");
+                continue;
+            }
+        };
 
         let mut probe = WarpEngine::new(ctx, preset, PROBE_SIZE, PROBE_SIZE);
         warm_up(&mut probe, ctx, audio, frame_base);
@@ -408,13 +509,14 @@ fn find_renderable(
             let (preset, _) = load_preset(&presets[idx]).expect("reload");
             let mut engine = WarpEngine::new(ctx, preset, w, h);
             warm_up(&mut engine, ctx, audio, frame_base);
-            return (engine, idx, name);
+            return Found { engine, idx, name, black, unparsed, fell_back: false };
         }
+        black += 1;
     }
     // Nothing rendered in range — show the built-in instead.
     let mut engine = WarpEngine::new(ctx, Preset::load(BUILTIN).unwrap(), w, h);
     warm_up(&mut engine, ctx, audio, frame_base);
-    (engine, start.min(len.saturating_sub(1)), "built-in".into())
+    Found { engine, idx: start.min(len.saturating_sub(1)), name: "built-in".into(), black, unparsed, fell_back: true }
 }
 
 fn collect_presets(root: &Path, out: &mut Vec<PathBuf>) {
@@ -430,6 +532,48 @@ fn collect_presets(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// CPU-only compatibility scan (opt-in via `PM_SCAN`): parse every preset and
+/// translate its custom shaders, reporting load and shader-translation rates.
+/// No GPU/render pass — this is the parse+translate stage only.
+fn scan_corpus(presets: &[PathBuf]) {
+    let total = presets.len();
+    let (mut loaded, mut load_fail) = (0usize, 0usize);
+    let (mut shaders, mut shader_fail) = (0usize, 0usize);
+    for p in presets {
+        let Ok(bytes) = std::fs::read(p) else {
+            load_fail += 1;
+            continue;
+        };
+        let Ok(preset) = Preset::load(&String::from_utf8_lossy(&bytes)) else {
+            load_fail += 1;
+            continue;
+        };
+        loaded += 1;
+        for (src, kind) in [
+            (preset.warp_shader_source(), ShaderKind::Warp),
+            (preset.composite_shader_source(), ShaderKind::Composite),
+        ] {
+            if src.contains("shader_body") {
+                shaders += 1;
+                if shader_to_wgsl(src, kind).is_err() {
+                    shader_fail += 1;
+                }
+            }
+        }
+    }
+    let pct = |n: usize, d: usize| if d == 0 { 100.0 } else { 100.0 * n as f64 / d as f64 };
+    println!("── corpus compatibility scan ──");
+    println!("  presets found:           {total}");
+    println!("  loaded successfully:     {loaded}  ({:.1}%)", pct(loaded, total));
+    println!("  skipped (load/parse):    {load_fail}");
+    println!("  custom shaders:          {shaders}");
+    println!(
+        "  shader translate failed: {shader_fail}  ({:.1}% translate OK)",
+        pct(shaders - shader_fail, shaders)
+    );
+    println!("  (translate stage only; naga validation + render not included)");
+}
+
 fn main() {
     let dir = std::env::args().nth(1).unwrap_or_else(|| DEFAULT_DIR.to_string());
     let mut presets = Vec::new();
@@ -437,9 +581,14 @@ fn main() {
     if presets.is_empty() {
         eprintln!("No .milk presets found in {dir:?}; using the built-in preset.");
     } else {
-        println!("Loaded {} presets from {dir}", presets.len());
+        println!("Found {} presets in {dir}", presets.len());
     }
-    println!("Keys: Right/Space/N next · Left/P prev · R random · T transitions · Esc/Q quit");
+    if std::env::var_os("PM_SCAN").is_some() {
+        scan_corpus(&presets);
+    }
+    println!(
+        "Keys: Right/Space/N next · Left/P prev · R random · F5/L reload · T transitions · F perf · Esc/Q quit"
+    );
 
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
