@@ -988,11 +988,23 @@ fn scan_corpus(presets: &[PathBuf]) {
 }
 
 fn main() {
-    let dir = std::env::args().nth(1).unwrap_or_else(|| DEFAULT_DIR.to_string());
+    // Distinguish "user gave a directory" from "we fell back to the (developer-
+    // local) default" so the no-argument first-run message is actionable.
+    let arg_dir = std::env::args().nth(1);
+    let dir = arg_dir.clone().unwrap_or_else(|| DEFAULT_DIR.to_string());
     let mut presets = Vec::new();
     collect_presets(Path::new(&dir), &mut presets);
     if presets.is_empty() {
-        eprintln!("No .milk presets found in {dir:?}; using the built-in preset.");
+        if arg_dir.is_none() {
+            // No directory passed and the built-in default path yielded nothing
+            // (it's a developer-local path that won't exist on most machines).
+            eprintln!("No preset directory provided and the default preset path was not found.");
+            eprintln!("Run with: cargo run -p pm-app --release -- <path-to-preset-folder>");
+            eprintln!("Continuing with the built-in preset for now.");
+        } else {
+            // An explicit directory was given but held no `.milk` files.
+            eprintln!("No .milk presets found in {dir:?}; using the built-in preset.");
+        }
     } else {
         println!("Found {} presets in {dir}", presets.len());
     }
@@ -1010,15 +1022,21 @@ fn main() {
     // resolve and we start fresh.
     let root = PathBuf::from(&dir);
     let last_path = prefs::last_preset_path();
-    let restore_index = prefs::load_last_preset(&last_path).and_then(|rel| {
-        let target = Path::new(&rel);
-        let idx = presets.iter().position(|p| p.strip_prefix(&root).map(|r| r == target).unwrap_or(false));
-        match idx {
-            Some(_) => println!("Last preset on record: {rel}"),
-            None => println!("Saved last preset '{rel}' not in this corpus; starting fresh"),
-        }
-        idx
-    });
+    // Only attempt last-preset restore when there's actually a corpus, so we
+    // don't print a misleading "not in this corpus" message on an empty launch.
+    let restore_index = if presets.is_empty() {
+        None
+    } else {
+        prefs::load_last_preset(&last_path).and_then(|rel| {
+            let target = Path::new(&rel);
+            let idx = presets.iter().position(|p| p.strip_prefix(&root).map(|r| r == target).unwrap_or(false));
+            match idx {
+                Some(_) => println!("Last preset on record: {rel}"),
+                None => println!("Saved last preset '{rel}' not in this corpus; starting fresh"),
+            }
+            idx
+        })
+    };
 
     println!(
         "Keys: Right/Space/N next · Left/P prev · R random · F5/L reload · T transitions · F perf · H hud · Pause/K freeze (. step) · A auto ([ ] interval) · S shuffle · C screenshot · / help · Esc/Q quit"

@@ -57,9 +57,10 @@ Point `pm-app` at a folder of presets (it scans recursively for `.milk` files):
 cargo run -p pm-app --release -- <path-to-preset-folder>
 ```
 
-> **Always pass a preset folder.** If you omit the argument, the current build falls back to a
-> *developer-local default path* that will almost certainly not exist on your machine — in that case the app
-> just shows its tiny built-in fallback preset. Pass your corpus directory explicitly.
+> **Always pass a preset folder.** If you omit the argument, the build falls back to a *developer-local
+> default path* that almost certainly won't exist on your machine — in that case the app prints a short
+> message telling you how to pass a preset folder and continues with its tiny built-in fallback preset.
+> Pass your corpus directory explicitly.
 
 ## Controls
 
