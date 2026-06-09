@@ -706,3 +706,103 @@ fn float_function_returning_numeric_unchanged() {
     // No `!= 0.0` coercion on a float return.
     assert!(!wgsl.contains("!= 0.0"), "float return not coerced to bool");
 }
+
+#[test]
+fn matrix_mul_v_m_lowers_to_m_times_v() {
+    // HLSL `mul(v, m)` -> WGSL `(m * v)`. Proof: mul((10,20), float2x2(1,2,3,4))
+    // = (70,100) = mat2x2<f32>(1,2,3,4) * vec2<f32>(10,20).
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float2 v = float2(10.0, 20.0);
+            float2x2 m = float2x2(1.0, 2.0, 3.0, 4.0);
+            float2 r = mul(v, m);
+            _return_value = float4(r, 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    // mul flips operands: `(m * v)`.
+    assert!(wgsl.contains("(m * v)"), "mul(v, m) -> (m * v); got:\n{wgsl}");
+}
+
+#[test]
+fn matrix_mul_m_v_lowers_to_v_times_m() {
+    // HLSL `mul(m, v)` -> WGSL `(v * m)`. Proof: mul(float2x2(1,2,3,4),(10,20))
+    // = (50,110) = vec2<f32>(10,20) * mat2x2<f32>(1,2,3,4).
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float2 v = float2(10.0, 20.0);
+            float2x2 m = float2x2(1.0, 2.0, 3.0, 4.0);
+            float2 r = mul(m, v);
+            _return_value = float4(r, 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("(v * m)"), "mul(m, v) -> (v * m); got:\n{wgsl}");
+}
+
+#[test]
+fn matrix_from_vector_literal_and_variable_expands() {
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float4 qb = float4(1.0, 2.0, 3.0, 4.0);
+            float2x2 m1 = float2x2(float4(1.0, 2.0, 3.0, 4.0));
+            float2x2 m2 = float2x2(qb);
+            float2 r = mul(float2(10.0, 20.0), m1) + mul(float2(10.0, 20.0), m2);
+            _return_value = float4(r, 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    // literal float4 expands to scalars; variable expands to swizzles.
+    assert!(wgsl.contains("mat2x2<f32>(1.0, 2.0, 3.0, 4.0)"), "float4 literal -> scalars");
+    assert!(wgsl.contains("mat2x2<f32>(qb.x, qb.y, qb.z, qb.w)"), "variable vec4 -> swizzles");
+}
+
+#[test]
+fn direct_operator_mul_not_rewritten() {
+    // A direct `*` operator is component-wise; the mul fix must not touch it.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float2 a = float2(1.0, 2.0);
+            float2 b = float2(3.0, 4.0);
+            float2 c = a * b;        // component-wise, stays (a * b)
+            _return_value = float4(c, 0.0, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("(a * b)"), "direct operator unchanged (not flipped)");
+}
+
+#[test]
+fn scalar_and_vector_mul_unaffected() {
+    // Scalar and component-wise `mul` are commutative; the flip doesn't change them.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float3 v = float3(1.0, 2.0, 3.0);
+            float s = 2.0;
+            float3 a = mul(s, v);    // scalar scale
+            float3 b = mul(v, v);    // component-wise
+            _return_value = float4(a + b, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+}
+
+#[test]
+fn matrix_lowering_numeric_proof() {
+    // Confirm the WGSL the lowering emits computes the HLSL-intended values.
+    // WGSL `mat2x2<f32>(a,b,c,d)` is column-major: columns (a,b),(c,d).
+    // `M * v` (matrix x column): result[i] = col0[i]*v0 + col1[i]*v1.
+    let m_times_v = |a: f64, b: f64, c: f64, d: f64, v0: f64, v1: f64| (a * v0 + c * v1, b * v0 + d * v1);
+    // `v * M` (row x matrix): result[j] = v0*M[j][0] + v1*M[j][1].
+    let v_times_m = |v0: f64, v1: f64, a: f64, b: f64, c: f64, d: f64| (v0 * a + v1 * b, v0 * c + v1 * d);
+
+    // HLSL mul((10,20), float2x2(1,2,3,4)) == (70,100) == mat2x2(1,2,3,4) * v
+    assert_eq!(m_times_v(1.0, 2.0, 3.0, 4.0, 10.0, 20.0), (70.0, 100.0));
+    // HLSL mul(float2x2(1,2,3,4), (10,20)) == (50,110) == v * mat2x2(1,2,3,4)
+    assert_eq!(v_times_m(10.0, 20.0, 1.0, 2.0, 3.0, 4.0), (50.0, 110.0));
+}

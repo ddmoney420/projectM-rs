@@ -466,8 +466,27 @@ impl Generator {
                 format!("{}[{}]", self.expr(base, Type::Float), self.expr(idx, Type::Int))
             }
             Expr::Construct(ty, args) => {
-                // HLSL `float3(x > 0.5)` etc.: a bool argument becomes 1.0/0.0.
                 let scalar = scalar_of(*ty);
+                // HLSL `float2x2(v)` builds a matrix from a vector's components in
+                // source order; WGSL has no vector->matrix constructor, so expand
+                // a single vector argument to its scalars (only when the widths
+                // match, e.g. mat2x2 <- float4 — never guess for a short vector).
+                if let (Some(count), [arg]) = (matrix_scalar_count(*ty), args.as_slice()) {
+                    if count <= 4 && self.infer(arg).vector_len() == Some(count as u8) {
+                        let parts = if let Expr::Construct(_, inner) = arg {
+                            // float2x2(float4(a,b,c,d)) -> mat2x2(a,b,c,d)
+                            inner.iter().map(|a| self.emit_numeric(a, scalar)).collect::<Vec<_>>()
+                        } else {
+                            // float2x2(qb) -> mat2x2(qb.x, qb.y, qb.z, qb.w)
+                            let base = self.expr(arg, scalar);
+                            "xyzw"[..count].chars().map(|c| format!("{base}.{c}")).collect()
+                        };
+                        if parts.len() == count {
+                            return format!("{}({})", wgsl_type(*ty), parts.join(", "));
+                        }
+                    }
+                }
+                // HLSL `float3(x > 0.5)` etc.: a bool argument becomes 1.0/0.0.
                 let parts = args.iter().map(|a| self.emit_numeric(a, scalar)).collect::<Vec<_>>().join(", ");
                 format!("{}({})", wgsl_type(*ty), parts)
             }
@@ -557,10 +576,17 @@ impl Generator {
             }
             "mul" => {
                 if args.len() == 2 {
+                    // HLSL `mul(a, b)` -> WGSL `(b * a)`. The operand flip, paired
+                    // with the same-order matrix constructor, reproduces HLSL's
+                    // row-major `mul` under WGSL's column-major matrices (proven:
+                    // `mul((10,20), float2x2(1,2,3,4))` = (70,100) =
+                    // `mat2x2<f32>(1,2,3,4) * vec2<f32>(10,20)`). For scalar /
+                    // component-wise (vec*vec) operands the flip is commutative,
+                    // so non-matrix `mul` is unchanged.
                     return format!(
                         "({} * {})",
-                        self.expr(&args[0], Type::Float),
-                        self.expr(&args[1], Type::Float)
+                        self.expr(&args[1], Type::Float),
+                        self.expr(&args[0], Type::Float)
                     );
                 }
             }
@@ -899,6 +925,17 @@ fn arith_binary_type(op: BinOp, ta: Type, tb: Type) -> Type {
     } else {
         common
     }
+}
+
+/// Number of scalar components a matrix type holds (`mat2x2` -> 4), else `None`.
+fn matrix_scalar_count(ty: Type) -> Option<usize> {
+    Some(match ty {
+        Type::Mat2 => 4,
+        Type::Mat3 => 9,
+        Type::Mat4 => 16,
+        Type::Mat3x4 | Type::Mat4x3 => 12,
+        _ => return None,
+    })
 }
 
 fn member_type(base: Type, field: &str) -> Type {

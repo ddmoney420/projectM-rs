@@ -50,7 +50,7 @@ preset format with a `.milk` importer/converter.
    with type inference + param-mutation shadowing; output validated by naga).
    The full preset-shader pipeline (wrap `shader_body` → uniform/intrinsic header
    → transpile → assemble bindings + entry) lives in `pm-preset::preset_shader`.
-   **Corpus shader compat: ~94% composite / ~93% warp produce valid WGSL** (up
+   **Corpus shader compat: ~95% composite / ~94.5% warp produce valid WGSL** (up
    from 37% / 18%), via corpus-driven hardening tracked by the `shader_report`
    example: built-in noise `texsize_*` constants, HLSL implicit vector
    truncation on store *and* in binary ops (`float4 * float2` -> first two
@@ -68,13 +68,26 @@ preset format with a `.milk` importer/converter.
    mutable function-locals (not `#define` macros) so a preset can write
    `uv.x += d` without an invalid chained-swizzle lvalue (`_uv.xy.x`), and
    `tex2D` coordinate truncation to `vec2` (HLSL uses only the first two
-   components, so `tex2D(s, GetBlur1(uv))` with a float3 coord becomes `(…).xy`).
+   components, so `tex2D(s, GetBlur1(uv))` with a float3 coord becomes `(…).xy`),
+   and **matrix lowering (Bucket E)**: a `floatNxN(vec)` constructor is expanded
+   to component args in source order (`float2x2(_qb)` -> `mat2x2<f32>(qb.x, qb.y,
+   qb.z, qb.w)`, only when the vector width matches the matrix scalar count), and
+   HLSL `mul(a, b)` is lowered to WGSL `(b * a)` — the operand flip that, paired
+   with the same-order constructor, reproduces HLSL's row-major `mul` under WGSL's
+   column-major matrices (proven: `mul((10,20), float2x2(1,2,3,4))` = (70,100) =
+   `mat2x2<f32>(1,2,3,4) * vec2(10,20)`; scalar/component-wise `mul` is unchanged
+   since the flip is commutative there). This cleared the `cannot cast` parse
+   bucket (306 -> 9) for +255 valid shaders and zero valid-set regressions; it
+   also *corrects* ~half of the previously-valid matrix-`mul` shaders that were
+   silently transposed (verified by before/after render snapshots in
+   `bucket-e-visuals/`, since a valid-set diff cannot detect a corrected-but-
+   still-valid render — swirl/rotation direction flips, output stays coherent).
    The remaining naga rejections, by descending frequency (`parse_buckets` /
-   `validate_kinds` / `bucket_subgroups` examples): matrix-from-`float4` / `mul`
-   (Bucket E, ~306), global initializers referencing uniforms (Bucket F, ~210,
-   ~48% blocked by E), and small tails — `InvalidReturnType` (~11, user functions
-   declared to return a vector but whose body returns a different type) and
-   residual matrix `InvalidBinary` (~6). These are the next hardening work.
+   `validate_kinds` / `bucket_subgroups` examples): global initializers
+   referencing uniforms (Bucket F, ~210), and small tails — `InvalidReturnType`
+   (~11, user functions declared to return a vector but whose body returns a
+   different type) and residual matrix `InvalidBinary` (~6). These are the next
+   hardening work.
    **Custom composite *and* warp shaders now render.** Composite
    (`pm-core::PresetComposite`): the translated WGSL is wired with a per-frame
    `MdUniforms` buffer (`_cN`/`q`/rot) and `sampler_main`, swapping in for the
