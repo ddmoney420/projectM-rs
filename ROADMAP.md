@@ -50,7 +50,7 @@ preset format with a `.milk` importer/converter.
    with type inference + param-mutation shadowing; output validated by naga).
    The full preset-shader pipeline (wrap `shader_body` → uniform/intrinsic header
    → transpile → assemble bindings + entry) lives in `pm-preset::preset_shader`.
-   **Corpus shader compat: ~95.4% composite / ~96.3% warp produce valid WGSL** (up
+   **Corpus shader compat: ~95.4% composite / ~96.6% warp produce valid WGSL** (up
    from 37% / 18%), via corpus-driven hardening tracked by the `shader_report`
    example: built-in noise `texsize_*` constants, HLSL implicit vector
    truncation on store *and* in binary ops (`float4 * float2` -> first two
@@ -117,13 +117,20 @@ preset format with a `.milk` importer/converter.
    numeric->bool mask coercion. This cleared `InvalidReturnType` 22 -> 2 (the 2
    residual are *valueless*/fallthrough returns in a typed function — out of
    scope, they'd need a synthesized value) for +20 valid shaders, zero
-   regressions; matching-type returns are byte-identical.
+   regressions; matching-type returns are byte-identical. Finally, **`all`/`any`
+   numeric-vector coercion**: HLSL `all(x)`/`any(x)` treat a numeric vector as
+   true where nonzero, but WGSL requires a bool vector, so `all(modi)` (modi a
+   `float2`) now emits `all(modi != vec2<f32>(0.0))` (and `vecN<i32>(0)` for int
+   vectors); a bool-vector arg is passed through unchanged. This cleared the
+   `InvalidBooleanVector` bucket 27 -> 0 for +27 valid shaders, zero regressions.
    The remaining naga rejections, by descending frequency (`parse_buckets` /
-   `validate_kinds` / `bucket_subgroups` examples): a `Cope - domains` /
-   `all(numericVec)` family (~27, HLSL `all`/`any` on a numeric vector needs a
-   `!= 0` bool-vector arg), the `cannot cast` vec4->vec2 matrix-index E tail (9),
-   the 3 `mat3x4 * vec3` mis-typed-store residual, 2 valueless returns, and small
-   unary/binary tails. These are the next hardening work.
+   `validate_kinds` / `bucket_subgroups` examples): the `cannot cast` vec4->vec2
+   matrix-index E tail (9), the 3 `mat3x4 * vec3` mis-typed-store residual, 2
+   valueless returns, and small unary/binary tails (~15 validate-stage total).
+   The larger remaining work is the translate-stage *parser* long-tail
+   (unsupported HLSL syntax: stray commas, `sampler_state`/`blur` keywords,
+   bracket forms) and the composite `noise`/scope parse bucket — a separate
+   parser-coverage effort, not naga typing.
    **Custom composite *and* warp shaders now render.** Composite
    (`pm-core::PresetComposite`): the translated WGSL is wired with a per-frame
    `MdUniforms` buffer (`_cN`/`q`/rot) and `sampler_main`, swapping in for the

@@ -675,6 +675,24 @@ impl Generator {
             // need every argument coerced to a common vector width: scalars
             // broadcast up, and a wider operand truncates to match the narrower
             // (HLSL's rule, e.g. `dot(float4, float3)` operates on the first 3).
+            // HLSL `all(x)`/`any(x)` treat a numeric vector/scalar as true where
+            // nonzero, but WGSL `all`/`any` require a bool (vector). A bool arg is
+            // passed through unchanged; a numeric arg gets an explicit nonzero
+            // comparison (`all(v != vecN(0))`). Ambiguous types fall through.
+            "all" | "any" => {
+                if args.len() == 1 {
+                    let et = self.infer(&args[0]);
+                    let sc = scalar_of(et);
+                    if sc == Type::Bool {
+                        return format!("{lower}({})", self.expr(&args[0], Type::Bool));
+                    }
+                    if matches!(sc, Type::Float | Type::Int) {
+                        let x = self.expr(&args[0], sc);
+                        let zero = broadcast_scalar_literal(et, if sc == Type::Int { "0" } else { "0.0" });
+                        return format!("{lower}(({x}) != {zero})");
+                    }
+                }
+            }
             "pow" | "min" | "max" | "step" | "clamp" | "atan" | "dot" | "cross" | "distance" | "reflect"
             | "smoothstep" => {
                 let common = args.iter().map(|a| self.infer(a)).fold(Type::Float, arith_common);

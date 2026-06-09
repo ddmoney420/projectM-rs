@@ -1231,3 +1231,103 @@ fn return_valueless_in_typed_function_not_synthesized() {
     let wgsl = translate_ok(src);
     assert!(wgsl.contains("return;"), "valueless return left as-is, not synthesized:\n{wgsl}");
 }
+
+// ------------------------------------------- all/any numeric-vector coercion --
+// HLSL `all(x)`/`any(x)` treat a numeric vector/scalar as true where nonzero;
+// WGSL requires a bool (vector), so a numeric arg gets a `!= 0` comparison. A
+// bool arg is unchanged.
+
+#[test]
+fn all_float2_emits_nonzero_comparison() {
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float2 m = float2(0.5, 0.0);
+            float v = 0.0;
+            if (all(m)) { v = 1.0; }
+            _return_value = float4(v, v, v, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("all((m) != vec2<f32>(0.0))"), "all(float2) -> nonzero bool-vector:\n{wgsl}");
+}
+
+#[test]
+fn any_float3_emits_nonzero_comparison() {
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float3 m = float3(0.0, 0.2, 0.0);
+            float v = 0.0;
+            if (any(m)) { v = 1.0; }
+            _return_value = float4(v, v, v, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("any((m) != vec3<f32>(0.0))"), "any(float3) -> nonzero bool-vector:\n{wgsl}");
+}
+
+#[test]
+fn all_float4_emits_nonzero_comparison() {
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float4 m = float4(0.1, 0.2, 0.3, 0.4);
+            float v = 0.0;
+            if (all(m)) { v = 1.0; }
+            _return_value = float4(v, v, v, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("all((m) != vec4<f32>(0.0))"), "all(float4) -> nonzero bool-vector:\n{wgsl}");
+}
+
+#[test]
+fn all_int2_emits_integer_nonzero_comparison() {
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            int2 m = int2(1, 0);
+            float v = 0.0;
+            if (all(m)) { v = 1.0; }
+            _return_value = float4(v, v, v, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("all((m) != vec2<i32>(0))"), "all(int2) -> integer nonzero compare:\n{wgsl}");
+}
+
+#[test]
+fn all_bool_vector_unchanged() {
+    // A bool-vector argument (a comparison result) is passed through, not
+    // re-compared to zero.
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float2 m = float2(0.5, 0.2);
+            float v = 0.0;
+            if (all(m > float2(0.0, 0.0))) { v = 1.0; }
+            _return_value = float4(v, v, v, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    // bool-vector comparison stays the argument; no `!= vecN(0)` wrapper added.
+    assert!(wgsl.contains("all((m > vec2<f32>(0.0, 0.0)))"), "bool-vector all() unchanged:\n{wgsl}");
+    assert!(!wgsl.contains("!= vec2"), "no nonzero comparison added to a bool arg");
+}
+
+#[test]
+fn any_bool_vector_unchanged() {
+    let src = r#"
+        void PS(out float4 _return_value : COLOR) {
+            float3 m = float3(0.5, 0.2, 0.1);
+            float v = 0.0;
+            if (any(m < float3(1.0, 1.0, 1.0))) { v = 1.0; }
+            _return_value = float4(v, v, v, 1.0);
+        }
+    "#;
+    let wgsl = translate_ok(src);
+    validate_wgsl(&wgsl).unwrap();
+    assert!(wgsl.contains("any((m < vec3<f32>(1.0, 1.0, 1.0)))"), "bool-vector any() unchanged:\n{wgsl}");
+    assert!(!wgsl.contains("!= vec3"), "no nonzero comparison added to a bool arg");
+}
