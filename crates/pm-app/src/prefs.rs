@@ -41,6 +41,36 @@ pub fn config_path() -> PathBuf {
     }
 }
 
+/// Path of the "last shown preset" state file (sibling of the config). Kept
+/// separate so navigation state never touches the human-edited preferences.
+pub fn last_preset_path() -> PathBuf {
+    let mut p = config_path();
+    p.set_file_name("last_preset.txt");
+    p
+}
+
+/// Read the saved last-preset string (a corpus-root-relative path), if any.
+pub fn load_last_preset(path: &Path) -> Option<String> {
+    let s = std::fs::read_to_string(path).ok()?;
+    let line = s.lines().next()?.trim();
+    (!line.is_empty()).then(|| line.to_string())
+}
+
+/// Write the last-preset string. Errors are logged, never fatal.
+pub fn save_last_preset(path: &Path, rel: &str) {
+    if let Some(dir) = path.parent() {
+        if !dir.as_os_str().is_empty() {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                eprintln!("pm-app: could not create state dir {}: {e}", dir.display());
+                return;
+            }
+        }
+    }
+    if let Err(e) = std::fs::write(path, format!("{rel}\n")) {
+        eprintln!("pm-app: could not write {}: {e}", path.display());
+    }
+}
+
 fn parse_bool(v: &str) -> Option<bool> {
     match v.to_ascii_lowercase().as_str() {
         "true" | "1" | "on" | "yes" => Some(true),

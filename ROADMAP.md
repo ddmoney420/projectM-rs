@@ -221,7 +221,15 @@ preset format with a `.milk` importer/converter.
    malformed one warns per-key and falls back. `PM_PERF` still forces the perf
    overlay on at launch (overriding the saved pref without changing it); `PM_SCAN`
    stays a one-off and is never persisted; pause/freeze and session counters are
-   not persisted.
+   not persisted. The **last shown preset** is also remembered — written as a
+   corpus-root-relative path to a separate `last_preset.txt` (only when a real
+   renderable preset is shown, never a skipped/black/built-in one) so the next
+   launch resumes there; on startup it resolves against the current corpus and
+   probes from that index — restoring exactly if it renders, advancing to the
+   nearest renderable if it's black, and starting fresh (built-in) if it's
+   missing/renamed/outside the corpus. The restored preset enters the shuffle
+   no-repeat history. The prefs config format is unchanged (this is a sibling
+   file); pause/step/screenshot don't affect it.
    **Freeze** is an exact last-frame hold: while
    paused the app skips `player.render` entirely (so preset time, the frame
    counter, feedback iteration, and transitions all stop — no state mutation) and

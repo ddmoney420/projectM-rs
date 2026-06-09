@@ -10,7 +10,9 @@
 //! interval) · S shuffle · C screenshot · Esc/Q quit.
 //!
 //! HUD/transitions/perf/auto-advance(+interval)/shuffle preferences persist
-//! across launches (see `prefs`). Env: `PM_PERF` forces the perf overlay on at
+//! across launches (see `prefs`), and the last shown preset is remembered (in a
+//! `last_preset.txt` state file) so the next launch resumes there. Env: `PM_PERF`
+//! forces the perf overlay on at
 //! launch (overriding the saved pref, without changing it); `PM_SCAN` prints a
 //! one-time corpus compatibility summary at startup (never persisted).
 
@@ -134,6 +136,12 @@ struct App {
     perf_pref: bool,
     /// Where persisted preferences live.
     prefs_path: PathBuf,
+    /// Corpus root (the dir arg) — for relative last-preset paths.
+    root: PathBuf,
+    /// Where the last-shown-preset state file lives.
+    last_path: PathBuf,
+    /// Preset index to restore at startup (resolved from the saved last preset).
+    restore_index: Option<usize>,
 }
 
 /// Rolling per-second frame-timing accumulator (opt-in via `PM_PERF`).
@@ -186,7 +194,15 @@ impl Perf {
 }
 
 impl App {
-    fn new(presets: Vec<PathBuf>, prefs: Prefs, prefs_path: PathBuf) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        presets: Vec<PathBuf>,
+        prefs: Prefs,
+        prefs_path: PathBuf,
+        root: PathBuf,
+        last_path: PathBuf,
+        restore_index: Option<usize>,
+    ) -> Self {
         let now = Instant::now();
         // `PM_PERF` forces the overlay on at launch even when the saved pref is
         // off; it does not change the persisted preference.
@@ -219,6 +235,18 @@ impl App {
             transitions_on: prefs.transitions,
             perf_pref: prefs.perf,
             prefs_path,
+            root,
+            last_path,
+            restore_index,
+        }
+    }
+
+    /// Persist `presets[idx]` as the last shown preset, as a corpus-root-relative
+    /// path (falls back to the full path if it isn't under the root).
+    fn save_last(&self, idx: usize) {
+        if let Some(p) = self.presets.get(idx) {
+            let rel = p.strip_prefix(&self.root).unwrap_or(p);
+            prefs::save_last_preset(&self.last_path, &rel.to_string_lossy());
         }
     }
 
@@ -375,6 +403,9 @@ impl App {
         self.index = idx;
         self.remember(idx, len); // record only the shown preset (not skipped ones)
         self.auto_elapsed = 0.0; // newly shown preset gets a full interval
+        if !fell_back {
+            self.save_last(idx); // persist only a real, renderable preset
+        }
     }
 
     /// Toggle timed auto-advance; reset the timer so the change is predictable.
@@ -682,8 +713,32 @@ impl ApplicationHandler for App {
         let ctx = GpuContext { instance, adapter, device, queue };
         let blit = Blit::new(&ctx, format);
         let hud = Hud::new(&ctx, format);
-        let (preset, name) = self.current_preset();
-        let engine = WarpEngine::new(&ctx, preset, w, h);
+
+        // Restore the saved last preset if one resolved to a corpus index: probe
+        // from there for a renderable preset. If it renders we resume exactly
+        // there; if it's black/unparsed we advance to the nearest renderable
+        // (and re-save that); if nothing renders nearby, the built-in is shown.
+        // With no saved preset, start on the built-in (the prior default).
+        let (engine, name) = if let Some(start) = self.restore_index {
+            let found = find_renderable(&ctx, w, h, &self.presets, &mut self.audio, 0, start, 1);
+            self.on_corpus = true;
+            self.index = found.idx;
+            self.remember(found.idx, self.presets.len());
+            if found.fell_back {
+                println!("Could not restore last preset (none renderable nearby); built-in");
+            } else if found.idx == start {
+                println!("Restored last preset: {}", found.name);
+                self.save_last(found.idx);
+            } else {
+                println!("Last preset unrenderable; resumed at nearest renderable: {}", found.name);
+                self.save_last(found.idx);
+            }
+            (found.engine, found.name)
+        } else {
+            let (preset, name) = self.current_preset();
+            (WarpEngine::new(&ctx, preset, w, h), name)
+        };
+
         let cc = if engine.uses_custom_composite() { " ·custom-comp" } else { "" };
         window.set_title(&format!("pm-app — {name}{cc}  [{}/{}]", self.index + 1, self.presets.len().max(1)));
         let duration = if self.transitions_on { DEFAULT_TRANSITION_SECS } else { 0.0 };
@@ -906,6 +961,22 @@ fn main() {
     // persisted.
     let prefs_path = prefs::config_path();
     let prefs = Prefs::load(&prefs_path);
+
+    // Resolve the saved last preset (a corpus-root-relative path) to an index in
+    // the current corpus; missing/renamed/out-of-corpus entries simply don't
+    // resolve and we start fresh.
+    let root = PathBuf::from(&dir);
+    let last_path = prefs::last_preset_path();
+    let restore_index = prefs::load_last_preset(&last_path).and_then(|rel| {
+        let target = Path::new(&rel);
+        let idx = presets.iter().position(|p| p.strip_prefix(&root).map(|r| r == target).unwrap_or(false));
+        match idx {
+            Some(_) => println!("Last preset on record: {rel}"),
+            None => println!("Saved last preset '{rel}' not in this corpus; starting fresh"),
+        }
+        idx
+    });
+
     println!(
         "Keys: Right/Space/N next · Left/P prev · R random · F5/L reload · T transitions · F perf · H hud · Pause/K freeze (. step) · A auto ([ ] interval) · S shuffle · C screenshot · Esc/Q quit"
     );
@@ -913,6 +984,6 @@ fn main() {
 
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::new(presets, prefs, prefs_path);
+    let mut app = App::new(presets, prefs, prefs_path, root, last_path, restore_index);
     event_loop.run_app(&mut app).expect("run app");
 }
