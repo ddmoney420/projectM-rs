@@ -3,10 +3,12 @@
 A 5-minute guide to building and running the **`pm-app`** Milkdrop player on macOS
 (Apple Silicon or Intel). It renders via **Metal** through `wgpu`.
 
-> ⚠️ **Status:** macOS has not been smoke-tested yet. This is expected to work
-> (wgpu/winit/cpal all support macOS), but if the build or first launch errors,
-> capture the exact output — surface-format selection, audio-device enumeration,
-> and Metal init are the usual first-run suspects on a new platform.
+> ✅ **Status: verified on macOS** (2026-06-09, iMac · Apple M4 · arm64).
+> First-try clean build (29s release), Metal backend, window + presets rendered
+> correctly under human observation against the cream-of-the-crop corpus
+> (9,795 presets found; black-preset skip and help overlay confirmed working).
+> Audio captured the default input device (built-in mic); music *reactivity*
+> not yet exercised — see [Audio](#audio).
 
 ## Prerequisites
 
