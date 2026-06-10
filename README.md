@@ -151,9 +151,18 @@ engine + transitions + snapshot harness), `pm-format` (native `.pmp` preset form
 - **Verified runtime environment this session was Windows + NVIDIA.** macOS/Linux are expected to work through
   `wgpu`/`winit`/`cpal` but a smoke test on those platforms is still pending.
 
-## License / status
+## License and provenance
 
-Licensed under **LGPL-2.1** (see workspace `Cargo.toml`). Version `0.0.1` — an early, demo-ready port, not a
-packaged release.
+Licensed under **LGPL-2.1** — see [`COPYING`](COPYING) for the full license text and [`NOTICE`](NOTICE) for
+attribution. Version `0.0.1`: an early, demo-ready port, not a packaged release.
 
-Upstream projectM/Milkdrop is the reference for behavior; this is an independent Rust reimplementation.
+projectM-rs is a **Rust port and derivative work** of components of the LGPL-2.1
+[projectM / libprojectM](https://github.com/projectM-visualizer/projectm) visualizer and the
+[projectm-eval](https://github.com/projectM-visualizer/projectm-eval) expression library — **not** a clean-room
+reimplementation. Many source files retain a per-file `//! Port of …` header identifying the specific upstream
+subsystem they were ported from. The project is independent and not endorsed by the projectM maintainers.
+
+**No third-party / community `.milk` preset packs are bundled** — bring your own preset corpus.
+
+Third-party Rust dependencies (wgpu, naga, winit, cpal, pollster, glam, bytemuck, image) are distributed under
+their own permissive licenses (MIT and/or Apache-2.0).

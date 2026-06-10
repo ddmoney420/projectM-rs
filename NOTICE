@@ -1,0 +1,56 @@
+projectM-rs
+===========
+
+Copyright (C) the projectM-rs authors.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU Lesser General Public License, version 2.1, as published by
+the Free Software Foundation. See the COPYING file for the full license text.
+
+
+Provenance / upstream attribution
+---------------------------------
+
+projectM-rs is a Rust port and derivative work of components of the LGPL-2.1
+projectM / Milkdrop visualizer and its expression-language library. It is NOT a
+clean-room reimplementation: substantial portions were ported file-by-file from
+the upstream C++ sources listed below.
+
+Upstream projects (all LGPL-2.1):
+
+  * projectM / libprojectM
+    https://github.com/projectM-visualizer/projectm
+
+  * projectm-eval (the Milkdrop / ns-eel expression language)
+    https://github.com/projectM-visualizer/projectm-eval
+
+Many source files in this repository carry a per-file header (`//! Port of ...`
+or similar) that identifies the specific upstream subsystem or source file they
+were ported or adapted from — for example `Audio/PCM`, `Audio/MilkdropFFT`,
+`MilkdropPreset/PresetFileParser`, `MilkdropPreset/PerPixelMesh`,
+`Renderer/Framebuffer`, and others. Those headers are retained as provenance and
+should not be removed.
+
+As a derivative work, projectM-rs as a whole is licensed under the LGPL-2.1
+(see the `license` field in the workspace `Cargo.toml` and the COPYING file).
+
+This project is independent and is not endorsed by, affiliated with, or approved
+by the projectM maintainers.
+
+
+Preset content
+--------------
+
+No third-party / community Milkdrop `.milk` preset packs are bundled or
+distributed with this repository. Users supply their own preset corpus.
+The small built-in fallback preset and the snapshot test presets are original to
+this project.
+
+
+Third-party Rust dependencies
+-----------------------------
+
+Build-time and runtime dependencies (wgpu, naga, winit, cpal, pollster, glam,
+bytemuck, image, and their transitive dependencies) are distributed under their
+own permissive licenses (predominantly MIT and/or Apache-2.0); see each crate's
+own license for details.
