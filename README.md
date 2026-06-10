@@ -32,6 +32,14 @@ shader translate failed: 323  (98.0% translate OK)
 Some features remain **deferred** — most notably external sampler/image assets and a parser long-tail
 (see [Current limitations](#current-limitations)).
 
+### Verified platforms
+
+| Platform | Backend | Verified | Notes |
+|---|---|---|---|
+| Windows | — | primary dev platform | |
+| macOS (arm64, Apple M4) | Metal | 2026-06-09 | live window + audio reactivity, human-observed — see [macos-quickstart.md](macos-quickstart.md) |
+| Linux (aarch64, Debian container) | Vulkan (llvmpipe) | 2026-06-09 | headless Xvfb + software Vulkan; clean build, 30 s run, synthetic-audio fallback. Runtime deps beyond build tools: `libasound2-dev libxcursor1 libxi6 libxrandr2 libxkbcommon0 libxkbcommon-x11-0` (+ `libvulkan1 mesa-vulkan-drivers` for software rendering) |
+
 ## Quick start
 
 ### Prerequisites
