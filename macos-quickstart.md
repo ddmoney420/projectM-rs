@@ -7,8 +7,8 @@ A 5-minute guide to building and running the **`pm-app`** Milkdrop player on mac
 > First-try clean build (29s release), Metal backend, window + presets rendered
 > correctly under human observation against the cream-of-the-crop corpus
 > (9,795 presets found; black-preset skip and help overlay confirmed working).
-> Audio captured the default input device (built-in mic); music *reactivity*
-> not yet exercised — see [Audio](#audio).
+> Audio reactivity also verified, off the built-in mic. Full first-run
+> checklist passed; persistence (last-preset restore) confirmed too.
 
 ## Prerequisites
 
@@ -65,6 +65,13 @@ back to a tiny built-in preset.
 On first launch macOS may show a **microphone privacy prompt** attached to your
 terminal app (Terminal/iTerm). Allow it, or grant it later under
 **System Settings → Privacy & Security → Microphone**.
+
+**"It's not reacting to my music!"** — remember the mic listens to the *room*.
+The usual cause (seen on the first real test): system output was routed to
+**headphones**, so the room was silent. Make the music audible in the room
+(switch output to the built-in speakers, or play from a phone next to the Mac)
+and check the input level isn't near zero (System Settings → Sound → Input).
+A loud **clap test** is the quickest way to confirm the capture path works.
 
 ## Controls (in-window)
 
