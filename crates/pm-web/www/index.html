@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>pm-web smoke test</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+    #c { display: block; width: 100vw; height: 100vh; }
+    #log {
+      position: fixed; left: 8px; top: 8px; margin: 0; padding: 6px 8px;
+      font: 12px/1.4 ui-monospace, monospace; color: #0f0; background: rgba(0,0,0,.5);
+      white-space: pre; pointer-events: none; max-width: 90vw;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <pre id="log">booting…</pre>
+  <script type="module">
+    import init, { run, start } from "../pkg/pm_web.js";
+
+    const logEl = document.getElementById("log");
+    const log = (m) => { logEl.textContent = m; console.log(m); };
+
+    // Size the canvas backing store to the device (engine reads canvas.width/height).
+    const canvas = document.getElementById("c");
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width  = Math.floor(window.innerWidth  * dpr);
+    canvas.height = Math.floor(window.innerHeight * dpr);
+
+    try {
+      log("loading wasm…");
+      await init();            // fetch + instantiate pm_web_bg.wasm
+      start();                 // panic hook + console logging
+
+      log("fetching preset…");
+      const presetText = await (await fetch("./preset.milk")).text();
+
+      log(`starting engine (${canvas.width}×${canvas.height})…\nWebGPU: ${"gpu" in navigator ? "available" : "absent → WebGL2 fallback"}`);
+      await run(canvas, presetText);
+      log(`running ✓  ${canvas.width}×${canvas.height}\n(silent audio in this build — visuals should still move)`);
+    } catch (e) {
+      log("ERROR: " + (e?.message ?? e) + "\n(see devtools console for the full stack)");
+      throw e;
+    }
+  </script>
+</body>
+</html>
