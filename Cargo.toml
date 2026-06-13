@@ -9,6 +9,7 @@ members = [
     "crates/pm-core",
     "crates/pm-format",
     "crates/pm-app",
+    "crates/pm-web",
 ]
 
 # Crates added as each phase lands:

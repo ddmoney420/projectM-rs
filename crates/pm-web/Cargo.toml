@@ -1,0 +1,42 @@
+[package]
+name = "pm-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "WebAssembly entry point: runs the projectM-rs engine on an HTML canvas (WebGPU/WebGL2)"
+
+[lib]
+# cdylib → the .wasm artifact; rlib so it can still be unit-tested natively.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pm-core = { path = "../pm-core" }
+pm-render = { path = "../pm-render" }
+pm-preset = { path = "../pm-preset" }
+pm-audio = { path = "../pm-audio" }
+
+# Direct wgpu dep pinned to the same version pm-render uses, with the `webgl`
+# feature enabled so the engine also runs where WebGPU is absent (most mobile
+# browsers today). Cargo feature-unifies this with pm-render's wgpu, so the
+# types stay identical across the graph.
+wgpu = { version = "29", features = ["webgl"] }
+
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+log = "0.4"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+console_log = "1"
