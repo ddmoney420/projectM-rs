@@ -3,42 +3,44 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>pm-web smoke test</title>
+  <title>pm-web smoke test — PmEngine API</title>
   <style>
     html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
     #c { display: block; width: 100vw; height: 100vh; }
     #log {
       position: fixed; left: 8px; top: 8px; margin: 0; padding: 6px 8px;
       font: 12px/1.4 ui-monospace, monospace; color: #0f0; background: rgba(0,0,0,.6);
-      white-space: pre-wrap; pointer-events: none; max-width: 96vw;
-      max-height: 70vh; overflow: hidden;
+      white-space: pre-wrap; pointer-events: none; max-width: 70vw; max-height: 60vh; overflow: hidden;
+    }
+    #bar {
+      position: fixed; right: 8px; top: 8px; z-index: 10; display: flex; flex-direction: column; gap: 6px;
+    }
+    #bar button {
+      padding: 8px 12px; border: 1px solid #0f0; border-radius: 8px;
+      background: rgba(0,0,0,.8); color: #0f0; font: bold 13px ui-monospace, monospace;
+      -webkit-tap-highlight-color: transparent;
     }
     #meter {
       position: fixed; left: 8px; bottom: 8px; right: 8px; padding: 8px 10px;
-      font: bold 16px/1.3 ui-monospace, monospace; color: #0f0;
-      background: rgba(0,0,0,.6); pointer-events: none; white-space: pre;
-      overflow: hidden;
-    }
-    #micbtn {
-      display: none; position: fixed; left: 50%; top: 55%; transform: translate(-50%,-50%);
-      z-index: 10; padding: 18px 28px; border: 2px solid #0f0; border-radius: 12px;
-      background: rgba(0,0,0,.8); color: #0f0; font: bold 22px ui-monospace, monospace;
-      -webkit-tap-highlight-color: transparent;
+      font: bold 15px/1.3 ui-monospace, monospace; color: #0f0;
+      background: rgba(0,0,0,.6); pointer-events: none; white-space: pre; overflow: hidden;
     }
   </style>
 </head>
 <body>
   <canvas id="c"></canvas>
   <pre id="log">booting…</pre>
-  <button id="micbtn">🎤 Tap to enable mic</button>
+  <div id="bar">
+    <button id="next">Next preset (load_preset)</button>
+    <button id="resize">Toggle resize</button>
+    <button id="mic">🎤 Enable mic (push_audio)</button>
+    <button id="stop">Stop + free() (cleanup)</button>
+  </div>
   <div id="meter"></div>
   <script type="module">
-    import init, { run, start, push_audio } from "../pkg/pm_web.js";
+    import init, { PmEngine, start } from "../pkg/pm_web.js";
 
     const logEl = document.getElementById("log");
-
-    // Mirror ALL console output (incl. the Rust engine's log lines) onto the
-    // page, so the init trace is visible without opening devtools.
     const lines = [];
     const append = (tag, args) => {
       lines.push(tag + Array.from(args).map(String).join(" "));
@@ -51,88 +53,117 @@
     }
     window.addEventListener("error", (e) => append("[uncaught] ", [e.message]));
     window.addEventListener("unhandledrejection", (e) => append("[reject] ", [e.reason]));
-
     const log = (m) => console.log(m);
 
-    // Size the canvas backing store to the device (engine reads canvas.width/height).
     const canvas = document.getElementById("c");
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width  = Math.floor(window.innerWidth  * dpr);
-    canvas.height = Math.floor(window.innerHeight * dpr);
+    const sizeCanvas = (scale = 1) => {
+      canvas.width = Math.floor(window.innerWidth * dpr * scale);
+      canvas.height = Math.floor(window.innerHeight * dpr * scale);
+    };
+    sizeCanvas();
+
+    const PRESETS = ["./preset1.milk", "./preset2.milk", "./preset3.milk"];
+    let presetIdx = 0;
+
+    let engine = null;
+    let rafId = 0;
+    let running = false;
+    let t0 = 0;
+
+    const fetchPreset = (url) => fetch(url).then((r) => r.text());
 
     try {
       log("loading wasm…");
-      await init();            // fetch + instantiate pm_web_bg.wasm
-      start();                 // panic hook + console logging
+      await init();
+      start();
 
-      log("fetching preset…");
-      const presetText = await (await fetch("./preset.milk")).text();
+      log("PmEngine.create…");
+      engine = await PmEngine.create(canvas, canvas.width, canvas.height);
 
-      log(`starting engine (${canvas.width}×${canvas.height})…\nWebGPU: ${"gpu" in navigator ? "available" : "absent → WebGL2 fallback"}`);
-      await run(canvas, presetText);
-      log(`running ✓  ${canvas.width}×${canvas.height}`);
+      log("load_preset (initial)…");
+      const ok = engine.load_preset(await fetchPreset(PRESETS[0]));
+      log("load_preset returned " + ok);
 
-      // A real button is the most reliable user gesture for getUserMedia on
-      // iOS Safari (tap-anywhere via pointerdown is flaky for gesture-gated
-      // APIs). Show it; the click handler does the mic work.
-      const btn = document.getElementById("micbtn");
-      btn.style.display = "block";
-
-      const enableMic = async () => {
-        log("mic: button tapped — calling getUserMedia…");
-        btn.disabled = true;
-        try {
-          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            throw new Error("navigator.mediaDevices.getUserMedia unavailable (needs HTTPS)");
-          }
-          // Call getUserMedia FIRST, synchronously in the gesture — before any
-          // other await — so iOS doesn't treat the gesture as consumed.
-          const stream = await navigator.mediaDevices.getUserMedia({
-            audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-          });
-          log("mic: permission granted, wiring AnalyserNode…");
-          btn.style.display = "none";
-          const ac = new (window.AudioContext || window.webkitAudioContext)();
-          await ac.resume();
-          const srcNode = ac.createMediaStreamSource(stream);
-          // Boost the (usually quiet) ambient mic signal so the engine's
-          // bass/mid/treb bands swing hard enough to drive obvious reactions.
-          const gain = ac.createGain();
-          gain.gain.value = 4;
-          const analyser = ac.createAnalyser();
-          analyser.fftSize = 2048;
-          srcNode.connect(gain);
-          gain.connect(analyser);
-          const buf = new Float32Array(analyser.fftSize);
-          const meterEl = document.getElementById("meter");
-          let peak = 0.0001;
-          const pump = () => {
-            analyser.getFloatTimeDomainData(buf);
-            push_audio(buf);
-            // RMS level → a live bar so you can SEE the mic signal move.
-            let sum = 0;
-            for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
-            const rms = Math.sqrt(sum / buf.length);
-            peak = Math.max(peak * 0.995, rms);
-            const filled = Math.min(40, Math.round((rms / peak) * 40));
-            meterEl.textContent =
-              "🎤 audio " + "█".repeat(filled) + "·".repeat(40 - filled) +
-              "  rms=" + rms.toFixed(3);
-            requestAnimationFrame(pump);
-          };
-          pump();
-          log(`🎤 mic live ✓  ${canvas.width}×${canvas.height}\nwatch the bar below move with the music — if it jumps, audio reaches the engine`);
-        } catch (err) {
-          btn.disabled = false;
-          btn.textContent = "🎤 mic failed — tap to retry";
-          log(`mic error [${err?.name ?? "?"}]: ${err?.message ?? err}`);
-        }
+      // Host owns the requestAnimationFrame loop.
+      t0 = performance.now();
+      const loop = (tMs) => {
+        if (!running) return;            // cleanup stops the loop cleanly
+        engine.render((tMs - t0) / 1000);
+        rafId = requestAnimationFrame(loop);
       };
-      btn.addEventListener("click", enableMic);
+      running = true;
+      rafId = requestAnimationFrame(loop);
+      log(`running ✓ ${canvas.width}×${canvas.height} — JS owns the rAF loop`);
     } catch (e) {
-      log("ERROR: " + (e?.message ?? e) + "\n(see devtools console for the full stack)");
+      log("ERROR: " + (e?.message ?? e));
       throw e;
     }
+
+    // --- Verification controls ---
+
+    document.getElementById("next").addEventListener("click", async () => {
+      if (!engine || !running) return;
+      presetIdx = (presetIdx + 1) % PRESETS.length;
+      const ok = engine.load_preset(await fetchPreset(PRESETS[presetIdx]));
+      log(`load_preset(${PRESETS[presetIdx]}) → ${ok}`);
+    });
+
+    let big = false;
+    document.getElementById("resize").addEventListener("click", () => {
+      if (!engine || !running) return;
+      big = !big;
+      sizeCanvas(big ? 0.5 : 1);       // change backing-store size
+      engine.resize(canvas.width, canvas.height);
+      log(`resize(${canvas.width}, ${canvas.height})`);
+    });
+
+    document.getElementById("stop").addEventListener("click", () => {
+      if (!running) { log("already stopped"); return; }
+      running = false;
+      cancelAnimationFrame(rafId);
+      engine.free();                   // wasm-bindgen teardown
+      engine = null;
+      log("stopped: rAF cancelled + engine.free() — no loop left running");
+      document.getElementById("meter").textContent = "⏹ stopped (cleanup verified)";
+    });
+
+    // Mic → push_audio (proves live audio affects rendering)
+    document.getElementById("mic").addEventListener("click", async function micOn() {
+      const btn = this;
+      btn.disabled = true;
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        });
+        const ac = new (window.AudioContext || window.webkitAudioContext)();
+        await ac.resume();
+        const src = ac.createMediaStreamSource(stream);
+        const gain = ac.createGain(); gain.gain.value = 4;
+        const analyser = ac.createAnalyser(); analyser.fftSize = 2048;
+        src.connect(gain); gain.connect(analyser);
+        const buf = new Float32Array(analyser.fftSize);
+        const meterEl = document.getElementById("meter");
+        let peak = 0.0001;
+        const pump = () => {
+          if (!running || !engine) return;
+          analyser.getFloatTimeDomainData(buf);
+          engine.push_audio(buf);
+          let sum = 0; for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+          const rms = Math.sqrt(sum / buf.length);
+          peak = Math.max(peak * 0.995, rms);
+          const filled = Math.min(40, Math.round((rms / peak) * 40));
+          meterEl.textContent = "🎤 push_audio " + "█".repeat(filled) + "·".repeat(40 - filled) + "  rms=" + rms.toFixed(3);
+          requestAnimationFrame(pump);
+        };
+        pump();
+        btn.textContent = "🎤 mic live";
+        log("mic live → push_audio each frame");
+      } catch (err) {
+        btn.disabled = false;
+        log(`mic error [${err?.name ?? "?"}]: ${err?.message ?? err}`);
+      }
+    });
   </script>
 </body>
 </html>
