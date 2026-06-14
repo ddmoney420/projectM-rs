@@ -217,9 +217,16 @@ impl CustomWarp {
             multiview_mask: None,
             cache: None,
         });
+        // Native: block to check shader validation and fall back on failure.
+        // Single-threaded wasm can't block_on (panics "condvar wait not
+        // supported"), so pop the scope without awaiting; a validation failure
+        // surfaces as an uncaptured wgpu error rather than a clean fallback.
+        #[cfg(not(target_arch = "wasm32"))]
         if pollster::block_on(scope.pop()).is_some() {
             return None;
         }
+        #[cfg(target_arch = "wasm32")]
+        let _ = scope.pop();
 
         let md_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("custom warp md uniforms"),

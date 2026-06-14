@@ -9,8 +9,9 @@
     #c { display: block; width: 100vw; height: 100vh; }
     #log {
       position: fixed; left: 8px; top: 8px; margin: 0; padding: 6px 8px;
-      font: 12px/1.4 ui-monospace, monospace; color: #0f0; background: rgba(0,0,0,.5);
-      white-space: pre; pointer-events: none; max-width: 90vw;
+      font: 12px/1.4 ui-monospace, monospace; color: #0f0; background: rgba(0,0,0,.6);
+      white-space: pre-wrap; pointer-events: none; max-width: 96vw;
+      max-height: 96vh; overflow: hidden;
     }
   </style>
 </head>
@@ -21,7 +22,23 @@
     import init, { run, start } from "../pkg/pm_web.js";
 
     const logEl = document.getElementById("log");
-    const log = (m) => { logEl.textContent = m; console.log(m); };
+
+    // Mirror ALL console output (incl. the Rust engine's log lines) onto the
+    // page, so the init trace is visible without opening devtools.
+    const lines = [];
+    const append = (tag, args) => {
+      lines.push(tag + Array.from(args).map(String).join(" "));
+      if (lines.length > 40) lines.shift();
+      logEl.textContent = lines.join("\n");
+    };
+    for (const m of ["log", "info", "warn", "error"]) {
+      const orig = console[m].bind(console);
+      console[m] = (...a) => { append(m === "log" ? "" : `[${m}] `, a); orig(...a); };
+    }
+    window.addEventListener("error", (e) => append("[uncaught] ", [e.message]));
+    window.addEventListener("unhandledrejection", (e) => append("[reject] ", [e.reason]));
+
+    const log = (m) => console.log(m);
 
     // Size the canvas backing store to the device (engine reads canvas.width/height).
     const canvas = document.getElementById("c");
@@ -39,7 +56,7 @@
 
       log(`starting engine (${canvas.width}×${canvas.height})…\nWebGPU: ${"gpu" in navigator ? "available" : "absent → WebGL2 fallback"}`);
       await run(canvas, presetText);
-      log(`running ✓  ${canvas.width}×${canvas.height}\n(silent audio in this build — visuals should still move)`);
+      log(`running ✓  ${canvas.width}×${canvas.height}\n(synthetic audio — not yet reacting to the mic; that's the next step)`);
     } catch (e) {
       log("ERROR: " + (e?.message ?? e) + "\n(see devtools console for the full stack)");
       throw e;

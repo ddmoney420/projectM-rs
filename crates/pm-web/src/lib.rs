@@ -17,7 +17,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use pm_audio::FrameAudioData;
+use pm_audio::{WAVEFORM_SAMPLES, PCM};
 use pm_core::WarpEngine;
 use pm_preset::Preset;
 use pm_render::wgpu;
@@ -49,10 +49,12 @@ pub async fn run(canvas: web_sys::HtmlCanvasElement, preset_text: String) -> Res
 
     // --- wgpu init: the pm-app sequence, with create_surface from a canvas
     //     and `.await` instead of pollster::block_on. ---
+    log::info!("pm-web: init: instance…");
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let surface = instance
         .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
         .map_err(|e| JsValue::from_str(&format!("create_surface: {e}")))?;
+    log::info!("pm-web: init: surface ok, requesting adapter…");
 
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
@@ -62,6 +64,7 @@ pub async fn run(canvas: web_sys::HtmlCanvasElement, preset_text: String) -> Res
         })
         .await
         .map_err(|e| JsValue::from_str(&format!("request_adapter: {e}")))?;
+    log::info!("pm-web: init: adapter ok ({:?}), requesting device…", adapter.get_info().backend);
 
     // WebGL2 caps are lower than native; ask for limits the surface supports so
     // the device request doesn't over-reach on mobile browsers.
@@ -75,6 +78,7 @@ pub async fn run(canvas: web_sys::HtmlCanvasElement, preset_text: String) -> Res
         })
         .await
         .map_err(|e| JsValue::from_str(&format!("request_device: {e}")))?;
+    log::info!("pm-web: init: device ok, configuring surface…");
 
     let caps = surface.get_capabilities(&adapter);
     let surface_format = caps.formats[0];
@@ -93,12 +97,14 @@ pub async fn run(canvas: web_sys::HtmlCanvasElement, preset_text: String) -> Res
     let ctx = GpuContext { instance, adapter, device, queue };
 
     // --- engine init: identical to native ---
+    log::info!("pm-web: init: surface configured, parsing preset…");
     let preset =
         Preset::load(&preset_text).map_err(|e| JsValue::from_str(&format!("preset: {e:?}")))?;
+    log::info!("pm-web: init: preset parsed, building engine…");
     let engine = WarpEngine::new(&ctx, preset, width, height);
     let blit = Blit::new(&ctx, surface_format);
 
-    log::info!("pm-web: engine up ({width}x{height}) on {surface_format:?}");
+    log::info!("pm-web: engine up ({width}x{height}) on {surface_format:?} — installing render loop");
 
     // --- render loop via requestAnimationFrame ---
     // The classic Rc<RefCell<Closure>> self-rescheduling pattern: the closure
@@ -108,6 +114,7 @@ pub async fn run(canvas: web_sys::HtmlCanvasElement, preset_text: String) -> Res
         surface,
         engine,
         blit,
+        pcm: PCM::new(),
         frame: 0,
     }));
 
@@ -130,14 +137,35 @@ struct FrameState {
     surface: wgpu::Surface<'static>,
     engine: WarpEngine,
     blit: Blit,
+    pcm: PCM,
     frame: i32,
 }
 
 impl FrameState {
     fn render(&mut self) {
         let time = self.frame as f32 / 60.0;
-        // Increment 1: silent audio. Web Audio AnalyserNode feeds this next.
-        if let Err(e) = self.engine.render_frame(&self.ctx, time, self.frame, FrameAudioData::default()) {
+
+        // Feed a synthetic multi-tone waveform through PCM so audio-reactive
+        // presets actually develop — same signal pm-app's headless fallback
+        // uses. (Real Web Audio input replaces this next increment.)
+        let t = self.frame as f32 / 60.0;
+        let mut samples = vec![0.0f32; WAVEFORM_SAMPLES * 2];
+        for i in 0..WAVEFORM_SAMPLES {
+            let p = i as f32 / WAVEFORM_SAMPLES as f32;
+            let s = (p * 24.0 + t * 2.0).sin() * 0.4
+                + (p * 7.0 - t).sin() * 0.25
+                + (p * 53.0 + t * 0.5).sin() * 0.1;
+            samples[i * 2] = s;
+            samples[i * 2 + 1] = s * 0.8;
+        }
+        self.pcm.add_float(&samples, 2);
+        self.pcm.update_frame_audio_data(1.0 / 60.0, self.frame as u32);
+        let audio = self.pcm.frame_audio_data();
+
+        if self.frame == 0 {
+            log::info!("pm-web: first render_frame");
+        }
+        if let Err(e) = self.engine.render_frame(&self.ctx, time, self.frame, audio) {
             log::error!("render_frame: {e:?}");
             return;
         }
