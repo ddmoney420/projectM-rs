@@ -19,7 +19,7 @@
   <canvas id="c"></canvas>
   <pre id="log">booting…</pre>
   <script type="module">
-    import init, { run, start } from "../pkg/pm_web.js";
+    import init, { run, start, push_audio } from "../pkg/pm_web.js";
 
     const logEl = document.getElementById("log");
 
@@ -56,7 +56,35 @@
 
       log(`starting engine (${canvas.width}×${canvas.height})…\nWebGPU: ${"gpu" in navigator ? "available" : "absent → WebGL2 fallback"}`);
       await run(canvas, presetText);
-      log(`running ✓  ${canvas.width}×${canvas.height}\n(synthetic audio — not yet reacting to the mic; that's the next step)`);
+      log(`running ✓  ${canvas.width}×${canvas.height}\n👉 TAP / CLICK anywhere to react to your mic (music out loud)`);
+
+      // Enable the mic on first user gesture (required by iOS Safari + needed
+      // for the permission prompt). Until then, synthetic audio drives it.
+      const enableMic = async () => {
+        window.removeEventListener("pointerdown", enableMic);
+        try {
+          const ac = new (window.AudioContext || window.webkitAudioContext)();
+          await ac.resume();
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+          });
+          const srcNode = ac.createMediaStreamSource(stream);
+          const analyser = ac.createAnalyser();
+          analyser.fftSize = 2048;
+          srcNode.connect(analyser);
+          const buf = new Float32Array(analyser.fftSize);
+          const pump = () => {
+            analyser.getFloatTimeDomainData(buf);
+            push_audio(buf);
+            requestAnimationFrame(pump);
+          };
+          pump();
+          log(`🎤 mic live ✓  ${canvas.width}×${canvas.height}\nplay music out loud — visuals should pulse with it`);
+        } catch (err) {
+          log(`mic blocked: ${err?.message ?? err}\n(staying on synthetic audio — needs HTTPS + permission)`);
+        }
+      };
+      window.addEventListener("pointerdown", enableMic);
     } catch (e) {
       log("ERROR: " + (e?.message ?? e) + "\n(see devtools console for the full stack)");
       throw e;

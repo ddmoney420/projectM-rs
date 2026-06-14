@@ -37,6 +37,23 @@ pub fn start() {
     }
 }
 
+thread_local! {
+    // Latest mic samples (mono, time-domain) pushed from JS. Empty until the
+    // user enables the mic; the render loop falls back to synthetic until then.
+    static LIVE_AUDIO: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Hand the engine the latest mono time-domain audio samples (from a Web Audio
+/// `AnalyserNode`). Call once per frame from JS after `enable_mic` succeeds.
+#[wasm_bindgen]
+pub fn push_audio(samples: &[f32]) {
+    LIVE_AUDIO.with(|a| {
+        let mut buf = a.borrow_mut();
+        buf.clear();
+        buf.extend_from_slice(samples);
+    });
+}
+
 /// Boot the engine on `canvas`, rendering `preset_text` (a `.milk` preset).
 ///
 /// Returns once the render loop is installed; the loop then runs forever via
@@ -145,20 +162,31 @@ impl FrameState {
     fn render(&mut self) {
         let time = self.frame as f32 / 60.0;
 
-        // Feed a synthetic multi-tone waveform through PCM so audio-reactive
-        // presets actually develop — same signal pm-app's headless fallback
-        // uses. (Real Web Audio input replaces this next increment.)
-        let t = self.frame as f32 / 60.0;
-        let mut samples = vec![0.0f32; WAVEFORM_SAMPLES * 2];
-        for i in 0..WAVEFORM_SAMPLES {
-            let p = i as f32 / WAVEFORM_SAMPLES as f32;
-            let s = (p * 24.0 + t * 2.0).sin() * 0.4
-                + (p * 7.0 - t).sin() * 0.25
-                + (p * 53.0 + t * 0.5).sin() * 0.1;
-            samples[i * 2] = s;
-            samples[i * 2 + 1] = s * 0.8;
+        // Prefer live mic samples (pushed from a Web Audio AnalyserNode); fall
+        // back to a synthetic multi-tone waveform — the same signal pm-app's
+        // headless fallback uses — so presets still develop before the mic is on.
+        let live = LIVE_AUDIO.with(|a| {
+            let b = a.borrow();
+            if b.is_empty() { None } else { Some(b.clone()) }
+        });
+        match live {
+            Some(mono) => {
+                self.pcm.add_float(&mono, 1);
+            }
+            None => {
+                let t = self.frame as f32 / 60.0;
+                let mut samples = vec![0.0f32; WAVEFORM_SAMPLES * 2];
+                for i in 0..WAVEFORM_SAMPLES {
+                    let p = i as f32 / WAVEFORM_SAMPLES as f32;
+                    let s = (p * 24.0 + t * 2.0).sin() * 0.4
+                        + (p * 7.0 - t).sin() * 0.25
+                        + (p * 53.0 + t * 0.5).sin() * 0.1;
+                    samples[i * 2] = s;
+                    samples[i * 2 + 1] = s * 0.8;
+                }
+                self.pcm.add_float(&samples, 2);
+            }
         }
-        self.pcm.add_float(&samples, 2);
         self.pcm.update_frame_audio_data(1.0 / 60.0, self.frame as u32);
         let audio = self.pcm.frame_audio_data();
 
