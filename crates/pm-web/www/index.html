@@ -11,13 +11,27 @@
       position: fixed; left: 8px; top: 8px; margin: 0; padding: 6px 8px;
       font: 12px/1.4 ui-monospace, monospace; color: #0f0; background: rgba(0,0,0,.6);
       white-space: pre-wrap; pointer-events: none; max-width: 96vw;
-      max-height: 96vh; overflow: hidden;
+      max-height: 70vh; overflow: hidden;
+    }
+    #meter {
+      position: fixed; left: 8px; bottom: 8px; right: 8px; padding: 8px 10px;
+      font: bold 16px/1.3 ui-monospace, monospace; color: #0f0;
+      background: rgba(0,0,0,.6); pointer-events: none; white-space: pre;
+      overflow: hidden;
+    }
+    #micbtn {
+      display: none; position: fixed; left: 50%; top: 55%; transform: translate(-50%,-50%);
+      z-index: 10; padding: 18px 28px; border: 2px solid #0f0; border-radius: 12px;
+      background: rgba(0,0,0,.8); color: #0f0; font: bold 22px ui-monospace, monospace;
+      -webkit-tap-highlight-color: transparent;
     }
   </style>
 </head>
 <body>
   <canvas id="c"></canvas>
   <pre id="log">booting…</pre>
+  <button id="micbtn">🎤 Tap to enable mic</button>
+  <div id="meter"></div>
   <script type="module">
     import init, { run, start, push_audio } from "../pkg/pm_web.js";
 
@@ -56,35 +70,65 @@
 
       log(`starting engine (${canvas.width}×${canvas.height})…\nWebGPU: ${"gpu" in navigator ? "available" : "absent → WebGL2 fallback"}`);
       await run(canvas, presetText);
-      log(`running ✓  ${canvas.width}×${canvas.height}\n👉 TAP / CLICK anywhere to react to your mic (music out loud)`);
+      log(`running ✓  ${canvas.width}×${canvas.height}`);
 
-      // Enable the mic on first user gesture (required by iOS Safari + needed
-      // for the permission prompt). Until then, synthetic audio drives it.
+      // A real button is the most reliable user gesture for getUserMedia on
+      // iOS Safari (tap-anywhere via pointerdown is flaky for gesture-gated
+      // APIs). Show it; the click handler does the mic work.
+      const btn = document.getElementById("micbtn");
+      btn.style.display = "block";
+
       const enableMic = async () => {
-        window.removeEventListener("pointerdown", enableMic);
+        log("mic: button tapped — calling getUserMedia…");
+        btn.disabled = true;
         try {
-          const ac = new (window.AudioContext || window.webkitAudioContext)();
-          await ac.resume();
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            throw new Error("navigator.mediaDevices.getUserMedia unavailable (needs HTTPS)");
+          }
+          // Call getUserMedia FIRST, synchronously in the gesture — before any
+          // other await — so iOS doesn't treat the gesture as consumed.
           const stream = await navigator.mediaDevices.getUserMedia({
             audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
           });
+          log("mic: permission granted, wiring AnalyserNode…");
+          btn.style.display = "none";
+          const ac = new (window.AudioContext || window.webkitAudioContext)();
+          await ac.resume();
           const srcNode = ac.createMediaStreamSource(stream);
+          // Boost the (usually quiet) ambient mic signal so the engine's
+          // bass/mid/treb bands swing hard enough to drive obvious reactions.
+          const gain = ac.createGain();
+          gain.gain.value = 4;
           const analyser = ac.createAnalyser();
           analyser.fftSize = 2048;
-          srcNode.connect(analyser);
+          srcNode.connect(gain);
+          gain.connect(analyser);
           const buf = new Float32Array(analyser.fftSize);
+          const meterEl = document.getElementById("meter");
+          let peak = 0.0001;
           const pump = () => {
             analyser.getFloatTimeDomainData(buf);
             push_audio(buf);
+            // RMS level → a live bar so you can SEE the mic signal move.
+            let sum = 0;
+            for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+            const rms = Math.sqrt(sum / buf.length);
+            peak = Math.max(peak * 0.995, rms);
+            const filled = Math.min(40, Math.round((rms / peak) * 40));
+            meterEl.textContent =
+              "🎤 audio " + "█".repeat(filled) + "·".repeat(40 - filled) +
+              "  rms=" + rms.toFixed(3);
             requestAnimationFrame(pump);
           };
           pump();
-          log(`🎤 mic live ✓  ${canvas.width}×${canvas.height}\nplay music out loud — visuals should pulse with it`);
+          log(`🎤 mic live ✓  ${canvas.width}×${canvas.height}\nwatch the bar below move with the music — if it jumps, audio reaches the engine`);
         } catch (err) {
-          log(`mic blocked: ${err?.message ?? err}\n(staying on synthetic audio — needs HTTPS + permission)`);
+          btn.disabled = false;
+          btn.textContent = "🎤 mic failed — tap to retry";
+          log(`mic error [${err?.name ?? "?"}]: ${err?.message ?? err}`);
         }
       };
-      window.addEventListener("pointerdown", enableMic);
+      btn.addEventListener("click", enableMic);
     } catch (e) {
       log("ERROR: " + (e?.message ?? e) + "\n(see devtools console for the full stack)");
       throw e;
