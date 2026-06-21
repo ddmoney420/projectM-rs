@@ -210,6 +210,27 @@ impl WarpEngine {
         }
     }
 
+    /// Like [`WarpEngine::new`], but seeds the new engine's feedback buffer from
+    /// `previous`'s latest frame, so feedback/transition-style presets inherit the
+    /// prior frame instead of starting from black (matching Milkdrop's behaviour
+    /// of carrying the frame buffer across preset switches). Inheritance is a GPU
+    /// texture copy and is silently skipped when `previous` is `None` or a
+    /// different size/format — in which case this behaves exactly like
+    /// [`WarpEngine::new`].
+    pub fn new_inheriting(
+        ctx: &GpuContext,
+        preset: Preset,
+        width: u32,
+        height: u32,
+        previous: Option<&WarpEngine>,
+    ) -> Self {
+        let mut engine = Self::new(ctx, preset, width, height);
+        if let Some(prev) = previous {
+            engine.warp.inherit_feedback(ctx, &prev.warp);
+        }
+        engine
+    }
+
     /// Whether this preset is rendering its own (custom) composite shader.
     pub fn uses_custom_composite(&self) -> bool {
         self.preset_composite.is_some()

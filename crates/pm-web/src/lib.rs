@@ -148,7 +148,18 @@ impl PmEngine {
     pub fn load_preset(&mut self, text: String) -> bool {
         match Preset::load(&text) {
             Ok(preset) => {
-                self.engine = Some(WarpEngine::new(&self.ctx, preset, self.width, self.height));
+                // Keep the outgoing engine alive long enough to copy its last
+                // frame into the new engine's feedback buffer (feedback/transition
+                // presets then inherit it instead of starting black). `previous`
+                // drops after the build, by which point the GPU copy is submitted.
+                let previous = self.engine.take();
+                self.engine = Some(WarpEngine::new_inheriting(
+                    &self.ctx,
+                    preset,
+                    self.width,
+                    self.height,
+                    previous.as_ref(),
+                ));
                 self.preset_text = Some(text);
                 self.frame = 0;
                 true
