@@ -388,6 +388,50 @@ impl WarpRenderer {
         );
     }
 
+    /// Seed this renderer's feedback buffer from `old`'s latest rendered frame,
+    /// so a freshly-loaded preset inherits the previous frame instead of starting
+    /// black. Milkdrop carries the frame buffer across preset switches; pure
+    /// feedback/transition presets rely on it. GPU texture-to-texture copy (no
+    /// CPU readback). Silently no-ops if the resolutions or formats differ, in
+    /// which case the new preset starts black exactly as before.
+    ///
+    /// Source = `old.main[old.current]`: `warp_frame` renders into `dest` then
+    /// sets `current = dest`, so after a frame `main[current]` holds the latest
+    /// completed frame (see also [`Self::main_texture`]). Destination =
+    /// `self.main[self.current]` (`current == 0` on a fresh renderer), the
+    /// texture the first `warp_frame` reads as its feedback source.
+    pub fn inherit_feedback(&mut self, ctx: &GpuContext, old: &WarpRenderer) {
+        if self.width != old.width || self.height != old.height {
+            return;
+        }
+        let src = &old.main[old.current].texture;
+        let dst = &self.main[self.current].texture;
+        if src.format() != dst.format() {
+            return;
+        }
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("inherit_feedback"),
+            });
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: src,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: dst,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 },
+        );
+        ctx.queue.submit(Some(encoder.finish()));
+    }
+
     /// Render one warp pass: sample the current frame through the warped mesh
     /// into the other buffer, then make it current.
     pub fn warp_frame(
@@ -563,5 +607,74 @@ impl WarpRenderer {
     /// The motion-field texture (warped sampling UV per pixel) for motion vectors.
     pub fn motion_texture(&self) -> &Texture {
         &self.motion
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_render::read_rgba8;
+
+    // Count of pixels whose RGB is not (near-)black.
+    fn non_black(px: &[u8]) -> usize {
+        px.chunks_exact(4)
+            .filter(|p| p[0] > 8 || p[1] > 8 || p[2] > 8)
+            .count()
+    }
+
+    #[test]
+    fn inherit_feedback_carries_previous_frame() {
+        let Ok(ctx) = GpuContext::headless() else {
+            // No GPU available in this environment; skip rather than fail.
+            return;
+        };
+        let (w, h) = (64u32, 48u32);
+
+        // Old renderer seeded with a solid non-black frame.
+        let old = WarpRenderer::new(&ctx, w, h);
+        let fill: Vec<u8> = (0..(w * h))
+            .flat_map(|_| [40u8, 160u8, 220u8, 255u8])
+            .collect();
+        old.seed(&ctx, &fill);
+
+        // A fresh renderer starts black.
+        let mut new = WarpRenderer::new(&ctx, w, h);
+        let before = read_rgba8(&ctx, new.main_texture());
+        assert_eq!(non_black(&before), 0, "fresh renderer should start black");
+
+        // After inheritance the new buffer should match old's latest frame.
+        new.inherit_feedback(&ctx, &old);
+        let after = read_rgba8(&ctx, new.main_texture());
+        let total = (w * h) as usize;
+        assert!(
+            non_black(&after) >= total * 9 / 10,
+            "inherited buffer should be (near-)fully non-black, got {}/{}",
+            non_black(&after),
+            total
+        );
+        assert_eq!(
+            after, fill,
+            "inherited buffer should equal the source frame"
+        );
+    }
+
+    #[test]
+    fn inherit_feedback_skips_on_size_mismatch() {
+        let Ok(ctx) = GpuContext::headless() else {
+            return;
+        };
+        let old = WarpRenderer::new(&ctx, 64, 48);
+        let fill: Vec<u8> = (0..(64 * 48)).flat_map(|_| [255u8; 4]).collect();
+        old.seed(&ctx, &fill);
+
+        // Different size → must no-op (no panic) and stay black.
+        let mut new = WarpRenderer::new(&ctx, 32, 24);
+        new.inherit_feedback(&ctx, &old);
+        let after = read_rgba8(&ctx, new.main_texture());
+        assert_eq!(
+            non_black(&after),
+            0,
+            "size mismatch must leave new buffer black"
+        );
     }
 }
