@@ -19,7 +19,7 @@
 #![cfg(target_arch = "wasm32")]
 
 use pm_audio::{WAVEFORM_SAMPLES, PCM};
-use pm_core::WarpEngine;
+use pm_core::{PresetPlayer, WarpEngine};
 use pm_preset::Preset;
 use pm_render::wgpu;
 use pm_render::GpuContext;
@@ -56,8 +56,11 @@ pub struct PmEngine {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     blit: Blit,
-    engine: Option<WarpEngine>,
-    /// Kept so the engine can be rebuilt at a new resolution on `resize`.
+    /// Drives the current preset and (during a `transition_to_preset` crossfade)
+    /// the outgoing one, blending their outputs. `None` until the first preset
+    /// is loaded.
+    player: Option<PresetPlayer>,
+    /// Kept so the player/engine can be rebuilt at a new resolution on `resize`.
     preset_text: Option<String>,
     pcm: PCM,
     /// Latest mono time-domain samples pushed from JS; empty → synthetic signal.
@@ -132,7 +135,7 @@ impl PmEngine {
             surface,
             config,
             blit,
-            engine: None,
+            player: None,
             preset_text: None,
             pcm: PCM::new(),
             live_audio: Vec::new(),
@@ -142,33 +145,29 @@ impl PmEngine {
         })
     }
 
-    /// Parse and load a `.milk` preset, (re)building the engine at the current
-    /// resolution. Returns `false` (without disturbing the current preset) if
-    /// the text fails to parse, so the host can skip it and advance.
+    /// Parse and **hard-cut** to a `.milk` preset at the current resolution.
+    /// Returns `false` (without disturbing the current preset) if the text fails
+    /// to parse, so the host can skip it and advance. Behaviour is unchanged
+    /// from before engine-level transitions existed: this is always an instant
+    /// cut (with feedback inheritance, so feedback presets don't start black).
     pub fn load_preset(&mut self, text: String) -> bool {
-        match Preset::load(&text) {
-            Ok(preset) => {
-                // Keep the outgoing engine alive long enough to copy its last
-                // frame into the new engine's feedback buffer (feedback/transition
-                // presets then inherit it instead of starting black). `previous`
-                // drops after the build, by which point the GPU copy is submitted.
-                let previous = self.engine.take();
-                self.engine = Some(WarpEngine::new_inheriting(
-                    &self.ctx,
-                    preset,
-                    self.width,
-                    self.height,
-                    previous.as_ref(),
-                ));
-                self.preset_text = Some(text);
-                self.frame = 0;
-                true
-            }
-            Err(e) => {
-                log::warn!("pm-web: preset parse failed: {e:?}");
-                false
-            }
-        }
+        self.switch(text, 0.0)
+    }
+
+    /// Like [`PmEngine::load_preset`], but **crossfades** from the current preset
+    /// over `duration_ms` milliseconds: both presets keep rendering live and
+    /// their composited outputs are blended (an engine-level transition, not a
+    /// frozen still). `duration_ms <= 0`, NaN, or any non-finite value falls
+    /// back to a hard cut, so it never panics. The host chooses the duration —
+    /// pm-web invents no default. Returns `false` on parse failure, leaving the
+    /// current preset untouched.
+    pub fn transition_to_preset(&mut self, text: String, duration_ms: f32) -> bool {
+        let duration_secs = if duration_ms.is_finite() && duration_ms > 0.0 {
+            duration_ms / 1000.0
+        } else {
+            0.0
+        };
+        self.switch(text, duration_secs)
     }
 
     /// Feed the latest mono, time-domain audio samples (e.g. from a Web Audio
@@ -181,7 +180,7 @@ impl PmEngine {
     /// Render one frame at `time_seconds` and present it. No-op until a preset
     /// is loaded. The host calls this from its own `requestAnimationFrame`.
     pub fn render(&mut self, time_seconds: f32) {
-        if self.engine.is_none() {
+        if self.player.is_none() {
             return;
         }
 
@@ -206,12 +205,14 @@ impl PmEngine {
         self.pcm.update_frame_audio_data(1.0 / 60.0, self.frame as u32);
         let audio = self.pcm.frame_audio_data();
 
-        if let Err(e) =
-            self.engine.as_mut().unwrap().render_frame(&self.ctx, time_seconds, self.frame, audio)
-        {
-            log::error!("pm-web: render_frame: {e:?}");
-            return;
-        }
+        // Advance the preset(s) and, mid-transition, blend their outputs. The
+        // PresetPlayer feeds the same audio to both engines, tracks per-preset
+        // frame counters, and retires the outgoing engine when the crossfade
+        // completes. (It swallows per-frame render errors internally.)
+        self.player
+            .as_mut()
+            .unwrap()
+            .render(&self.ctx, time_seconds, audio);
 
         let surf = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
@@ -224,7 +225,13 @@ impl PmEngine {
             }
         };
         let view = surf.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.blit.draw(&self.ctx, self.engine.as_ref().unwrap().display_texture(), &view);
+        // `output_texture()` is the blended target mid-transition, else the
+        // current preset's display texture directly (no extra blend cost idle).
+        self.blit.draw(
+            &self.ctx,
+            self.player.as_ref().unwrap().output_texture(),
+            &view,
+        );
         surf.present();
         self.frame += 1;
     }
@@ -238,13 +245,68 @@ impl PmEngine {
         self.config.height = self.height;
         self.surface.configure(&self.ctx.device, &self.config);
 
-        // Rebuild the engine at the new size from the current preset, if any.
+        // Rebuild the player at the new size from the current preset, if any.
+        // Engines/output are sized at construction, so a resize mid-transition
+        // rebuilds the player and DROPS any in-flight crossfade (it snaps to the
+        // current preset at the new resolution) — an accepted simplification,
+        // since resize is rare and not worth preserving a fade across.
         if let Some(text) = self.preset_text.clone() {
             if let Ok(preset) = Preset::load(&text) {
-                self.engine =
-                    Some(WarpEngine::new(&self.ctx, preset, self.width, self.height));
+                let engine = WarpEngine::new(&self.ctx, preset, self.width, self.height);
+                self.player =
+                    Some(PresetPlayer::new(&self.ctx, engine, self.width, self.height, 0.0));
                 self.frame = 0;
             }
         }
+    }
+}
+
+impl PmEngine {
+    /// Shared body for [`PmEngine::load_preset`] (hard cut, `duration_secs == 0`)
+    /// and [`PmEngine::transition_to_preset`] (crossfade). Builds the incoming
+    /// engine — inheriting the previous preset's last completed frame so
+    /// feedback/transition presets don't start black (the beta.5 behaviour) —
+    /// then switches the [`PresetPlayer`] with the given duration. On the very
+    /// first preset there is nothing to inherit from or fade, so it just creates
+    /// the player. Leaves the current preset untouched and returns `false` if
+    /// the text fails to parse.
+    fn switch(&mut self, text: String, duration_secs: f32) -> bool {
+        let preset = match Preset::load(&text) {
+            Ok(preset) => preset,
+            Err(e) => {
+                log::warn!("pm-web: preset parse failed: {e:?}");
+                return false;
+            }
+        };
+        // Build the incoming engine, inheriting feedback from the current one
+        // (a GPU texture copy submitted before the borrow ends).
+        let engine = match self.player.as_ref() {
+            Some(player) => WarpEngine::new_inheriting(
+                &self.ctx,
+                preset,
+                self.width,
+                self.height,
+                Some(player.current_engine()),
+            ),
+            None => WarpEngine::new(&self.ctx, preset, self.width, self.height),
+        };
+        match self.player.as_mut() {
+            Some(player) => {
+                player.set_duration(duration_secs);
+                player.switch_to(engine);
+            }
+            None => {
+                self.player = Some(PresetPlayer::new(
+                    &self.ctx,
+                    engine,
+                    self.width,
+                    self.height,
+                    duration_secs,
+                ));
+            }
+        }
+        self.preset_text = Some(text);
+        self.frame = 0;
+        true
     }
 }
