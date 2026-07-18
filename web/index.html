@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>projectM-rs — web</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+      #viz { display: block; width: 100vw; height: 100vh; }
+      #fallback {
+        position: fixed; inset: 0; display: none; place-items: center;
+        color: #eee; font: 15px/1.55 system-ui, -apple-system, sans-serif;
+        padding: 2rem; text-align: center;
+      }
+      #fallback.show { display: grid; }
+      #fallback .card { max-width: 34rem; }
+      #fallback h1 { font-size: 1.4rem; margin: 0 0 .75rem; }
+      code { background: #222; padding: 0 .3em; border-radius: 3px; }
+    </style>
+  </head>
+  <body>
+    <canvas id="viz"></canvas>
+    <div id="fallback">
+      <div class="card">
+        <h1>WebGPU required</h1>
+        <p id="fallback-msg">
+          This visualizer needs WebGPU, which your browser doesn't expose.
+        </p>
+        <p>
+          Try an up-to-date Chrome, Edge, Firefox, or Safari, and make sure your
+          OS and GPU drivers are current. There is <strong>no WebGL fallback</strong>.
+        </p>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
