@@ -44,6 +44,33 @@
       #diag .bar { display: inline-block; width: 60px; height: 7px; border-radius: 4px;
         background: rgba(255,255,255,.12); vertical-align: middle; overflow: hidden; }
       #diag .bar > span { display: block; height: 100%; background: #35d0a5; }
+
+      /* Control-bar extras */
+      #ui .sep { width: 1px; height: 22px; background: rgba(255,255,255,.15); }
+      .src-toggle { display: inline-flex; border: 1px solid #39424f; border-radius: 6px; overflow: hidden; }
+      .src-toggle button { border: 0; border-radius: 0; padding: .35rem .7rem; }
+      .src-toggle button.on { background: #1f6feb; }
+
+      /* Shader console panel (left-docked, slides in) */
+      #console { position: fixed; top: 0; bottom: 44px; left: 0; width: min(520px, 92vw);
+        display: flex; flex-direction: column; background: rgba(16,18,23,.96);
+        border-right: 1px solid rgba(255,255,255,.12); transform: translateX(-101%);
+        transition: transform .18s ease; z-index: 5; }
+      #console.open { transform: none; }
+      #console-host { display: flex; flex-direction: column; height: 100%; }
+      .sc-bar { display: flex; gap: .4rem; align-items: center; padding: .45rem .55rem;
+        border-bottom: 1px solid rgba(255,255,255,.1); flex-wrap: wrap; }
+      .sc-bar select, .sc-bar button { background: #222833; color: #eee; border: 1px solid #39424f;
+        border-radius: 5px; padding: .3rem .55rem; cursor: pointer; }
+      .sc-bar #sc-compile { background: #1f6feb; border-color: #1f6feb; }
+      .sc-bar .sc-auto { opacity: .85; }
+      .sc-bar #sc-status { margin-left: auto; opacity: .85; font-variant-numeric: tabular-nums; }
+      #sc-editor { flex: 1; min-height: 0; overflow: hidden; }
+      #sc-editor .cm-editor { height: 100%; }
+      #sc-errors { margin: 0; max-height: 28%; overflow: auto; padding: .4rem .6rem;
+        color: #ff9a9a; background: rgba(60,20,20,.35); white-space: pre-wrap;
+        font: 12px/1.4 ui-monospace, monospace; }
+      #sc-errors:empty { display: none; }
     </style>
   </head>
   <body>
@@ -76,9 +103,17 @@
       </div>
       <button id="mic-btn">Mic</button>
       <button id="tab-btn">Tab audio</button>
+      <span class="sep"></span>
+      <span class="src-toggle">
+        <button id="src-preset" class="on">Milkdrop</button>
+        <button id="src-shader">Shader</button>
+      </span>
+      <button id="console-btn">Console</button>
       <label>master <input id="master-gain" type="range" min="0" max="2" step="0.01" value="1" /></label>
       <span id="audio-status">No audio source</span>
     </div>
+
+    <div id="console"><div id="console-host"></div></div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

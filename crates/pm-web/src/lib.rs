@@ -22,10 +22,22 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::HtmlCanvasElement;
 
+mod live_shader;
+
+use live_shader::LiveShader;
 use pm_audio::PCM;
 use pm_core::{PresetPlayer, WarpEngine, BUILTIN_PRESET, DEFAULT_TRANSITION_SECS};
+use pm_glsl::{ShaderMode, ShaderUniforms, AUDIO_TEX_HEIGHT, AUDIO_TEX_WIDTH};
 use pm_preset::Preset;
 use pm_render::{Blit, GpuContext};
+
+/// Which source fills the canvas. Both are candidates to become layer sources
+/// once the Phase 6 compositor lands.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RenderSource {
+    Preset,
+    Shader,
+}
 
 // ---------------------------------------------------------------------------
 // Audio bridge: lock-free SPSC ring drained from the render loop.
@@ -121,11 +133,19 @@ struct Diagnostics {
     mid: f32,
     treb: f32,
     vol: f32,
+    time: f32,
+    frame: u32,
+    width: u32,
+    height: u32,
+    shader_source: bool,
 }
 
 thread_local! {
     static AUDIO: RefCell<Option<AudioBridge>> = const { RefCell::new(None) };
     static DIAG: RefCell<Diagnostics> = RefCell::new(Diagnostics::default());
+    /// The running app, so `#[wasm_bindgen]` exports (shader console, render
+    /// source, mouse, time controls) can reach the render state.
+    static APP: RefCell<Option<Rc<RefCell<State>>>> = const { RefCell::new(None) };
 }
 
 /// Attach a ring buffer produced by the JS audio graph. `control` is the 6-slot
@@ -160,7 +180,8 @@ pub fn get_diagnostics() -> String {
         format!(
             "{{\"hasAudio\":{},\"channels\":{},\"sampleRate\":{},\"ringFill\":{:.3},\
              \"overruns\":{},\"underruns\":{},\"consumed\":{},\
-             \"bass\":{:.4},\"mid\":{:.4},\"treb\":{:.4},\"vol\":{:.4}}}",
+             \"bass\":{:.4},\"mid\":{:.4},\"treb\":{:.4},\"vol\":{:.4},\
+             \"time\":{:.2},\"frame\":{},\"width\":{},\"height\":{},\"shaderSource\":{}}}",
             d.has_audio,
             d.channels,
             d.sample_rate,
@@ -172,6 +193,11 @@ pub fn get_diagnostics() -> String {
             d.mid,
             d.treb,
             d.vol,
+            d.time,
+            d.frame,
+            d.width,
+            d.height,
+            d.shader_source,
         )
     })
 }
@@ -260,20 +286,26 @@ pub async fn run(canvas_id: String) -> Result<(), JsValue> {
 
     log::info!("pm-web: engine initialized ({width}x{height}); starting render loop");
 
-    // Field initializers run in order: `blit`/`player` borrow `&ctx` (released
-    // per-expression), then `ctx` is moved into the struct.
+    // Field initializers run in order: `blit`/`player`/`live_shader` borrow
+    // `&ctx` (released per-expression), then `ctx` is moved into the struct.
     let state = Rc::new(RefCell::new(State {
         blit: Blit::new(&ctx, format),
         player: build_player(&ctx, width, height),
+        live_shader: LiveShader::new(&ctx, format),
         ctx,
         surface,
         config,
         canvas,
         pcm: PCM::new(),
         audio_scratch: Vec::new(),
+        render_source: RenderSource::Preset,
+        mouse: [0.0; 4],
         time: 0.0,
+        time_scale: 1.0,
+        paused: false,
         frame: 0,
     }));
+    APP.with(|a| *a.borrow_mut() = Some(state.clone()));
 
     // Self-sustaining requestAnimationFrame loop.
     let f: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
@@ -301,11 +333,18 @@ struct State {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     player: PresetPlayer,
+    live_shader: LiveShader,
     blit: Blit,
     canvas: HtmlCanvasElement,
     pcm: PCM,
     audio_scratch: Vec<f32>,
+    render_source: RenderSource,
+    /// iMouse: (x, y, click_x, click_y) in canvas pixels, y bottom-left origin.
+    mouse: [f32; 4],
+    /// The controlled visual clock (seconds). Phase 5 scales/pauses this.
     time: f32,
+    time_scale: f32,
+    paused: bool,
     frame: u32,
 }
 
@@ -338,11 +377,14 @@ impl State {
             self.pcm.add_float(&self.audio_scratch[..count], channels);
         }
 
-        // Fixed-timestep engine clock + one analysis step per frame.
-        self.time += 1.0 / 60.0;
+        // Audio analysis advances at real time (fixed 1/60 step — immune to
+        // tab-suspension delta spikes). The *visual* clock can be scaled/paused
+        // (structured now so Phase 5 adds the UI without a rewrite).
+        let visual_dt = if self.paused { 0.0 } else { (1.0 / 60.0) * self.time_scale };
         self.pcm.update_frame_audio_data(1.0 / 60.0, self.frame);
-        self.frame = self.frame.wrapping_add(1);
         let audio = self.pcm.frame_audio_data();
+        self.time += visual_dt;
+        self.frame = self.frame.wrapping_add(1);
 
         // Publish diagnostics for the JS panel.
         let (fill, overruns, underruns, sample_rate, consumed) = AUDIO.with(|a| {
@@ -364,9 +406,41 @@ impl State {
             d.mid = audio.mid;
             d.treb = audio.treb;
             d.vol = audio.vol;
+            d.time = self.time;
+            d.frame = self.frame;
+            d.width = self.config.width;
+            d.height = self.config.height;
+            d.shader_source = self.render_source == RenderSource::Shader;
         });
 
-        self.player.render(&self.ctx, self.time, audio);
+        // Shadertoy uniform snapshot for this frame.
+        let uniforms = ShaderUniforms {
+            i_resolution: [self.config.width as f32, self.config.height as f32, 1.0],
+            i_time: self.time,
+            i_mouse: self.mouse,
+            i_date: date_vec4(),
+            i_time_delta: visual_dt,
+            i_frame: self.frame as f32,
+            i_sample_rate: sample_rate as f32,
+            pm_pad0: 0.0,
+            i_channel_resolution: [[AUDIO_TEX_WIDTH as f32, AUDIO_TEX_HEIGHT as f32, 1.0, 0.0]; 4],
+            i_bass: audio.bass,
+            i_mid: audio.mid,
+            i_treb: audio.treb,
+            i_vol: audio.vol,
+            i_bass_att: audio.bass_att,
+            i_mid_att: audio.mid_att,
+            i_treb_att: audio.treb_att,
+            i_vol_att: audio.vol_att,
+        };
+
+        match self.render_source {
+            RenderSource::Preset => self.player.render(&self.ctx, self.time, audio),
+            RenderSource::Shader => {
+                self.live_shader.update_audio(&self.ctx, &audio);
+                self.live_shader.update_uniforms(&self.ctx, &uniforms);
+            }
+        }
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -380,10 +454,125 @@ impl State {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        self.blit
-            .draw(&self.ctx, self.player.output_texture(), &view);
+        match self.render_source {
+            RenderSource::Shader if self.live_shader.has_pipeline() => {
+                self.live_shader.render(&self.ctx, &view);
+            }
+            // Preset, or Shader with no compiled pipeline yet → show the preset.
+            _ => self.blit.draw(&self.ctx, self.player.output_texture(), &view),
+        }
         frame.present();
     }
+}
+
+/// iDate as Shadertoy expects: (year, month0-11, day-of-month, seconds-since-midnight).
+fn date_vec4() -> [f32; 4] {
+    let d = js_sys::Date::new_0();
+    let secs = d.get_hours() as f64 * 3600.0
+        + d.get_minutes() as f64 * 60.0
+        + d.get_seconds() as f64
+        + d.get_milliseconds() as f64 / 1000.0;
+    [
+        d.get_full_year() as f32,
+        d.get_month() as f32,
+        d.get_date() as f32,
+        secs as f32,
+    ]
+}
+
+/// Run a closure with the live app state, if it's been initialized.
+fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
+    APP.with(|a| a.borrow().as_ref().map(|s| f(&mut s.borrow_mut())))
+}
+
+/// Select what fills the canvas: 0 = Milkdrop preset, 1 = live shader. Cheap;
+/// never reinitializes WebGPU or the engine.
+#[wasm_bindgen]
+pub fn set_render_source(kind: u8) {
+    with_state(|s| {
+        s.render_source = if kind == 1 { RenderSource::Shader } else { RenderSource::Preset };
+    });
+}
+
+/// Compile user GLSL (mode 0 = Shadertoy, 1 = raw) and, on success, swap in the
+/// new pipeline. Synchronous: a newer call always wins, and on failure the
+/// previous shader keeps rendering. Returns a JSON compile report.
+#[wasm_bindgen]
+pub fn set_shader_source(mode: u8, src: String) -> String {
+    let mode = if mode == 1 { ShaderMode::Raw } else { ShaderMode::Shadertoy };
+    let t0 = js_sys::Date::now();
+    let outcome = with_state(|s| {
+        let dev_result = s.live_shader.set_shader(&s.ctx, mode, &src);
+        dev_result
+    });
+    let ms = js_sys::Date::now() - t0;
+    match outcome {
+        Some(o) => {
+            let diags: Vec<String> = o
+                .diagnostics
+                .iter()
+                .map(|d| {
+                    format!(
+                        "{{\"line\":{},\"column\":{},\"message\":{}}}",
+                        d.line,
+                        d.column,
+                        json_string(&d.message)
+                    )
+                })
+                .collect();
+            format!(
+                "{{\"ok\":{},\"compileMs\":{:.1},\"diagnostics\":[{}]}}",
+                o.ok,
+                ms,
+                diags.join(",")
+            )
+        }
+        None => "{\"ok\":false,\"compileMs\":0,\"diagnostics\":[]}".to_string(),
+    }
+}
+
+/// Update `iMouse` = (x, y, z, w). JS computes Shadertoy semantics (xy = current
+/// position while pressed; z/w = click origin with sign) in canvas pixels,
+/// bottom-left origin, DPR-scaled.
+#[wasm_bindgen]
+pub fn set_mouse(x: f32, y: f32, z: f32, w: f32) {
+    with_state(|s| s.mouse = [x, y, z, w]);
+}
+
+/// Phase 5 hooks for the visual clock (structured now).
+#[wasm_bindgen]
+pub fn set_time_scale(scale: f32) {
+    with_state(|s| s.time_scale = scale.max(0.0));
+}
+#[wasm_bindgen]
+pub fn set_paused(paused: bool) {
+    with_state(|s| s.paused = paused);
+}
+#[wasm_bindgen]
+pub fn reset_time() {
+    with_state(|s| {
+        s.time = 0.0;
+        s.frame = 0;
+    });
+}
+
+/// Minimal JSON string escaper for diagnostic messages.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn request_animation_frame(f: &Closure<dyn FnMut()>) {

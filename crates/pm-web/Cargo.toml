@@ -20,6 +20,8 @@ pm-core = { path = "../pm-core" }
 pm-render = { path = "../pm-render" }
 pm-preset = { path = "../pm-preset" }
 pm-audio = { path = "../pm-audio" }
+pm-glsl = { path = "../pm-glsl" }
+bytemuck = { version = "1", features = ["derive"] }
 wgpu = "29"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

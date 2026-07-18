@@ -8,6 +8,7 @@ members = [
     "crates/pm-preset",
     "crates/pm-core",
     "crates/pm-format",
+    "crates/pm-glsl",
     "crates/pm-app",
     "crates/pm-web",
 ]
