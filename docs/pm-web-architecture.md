@@ -174,6 +174,27 @@ The application code uses the repo's own license; imported shader code and
 derivatives keep their own obligations. Attribution is never stripped on scene
 export or URL sharing; missing-license imports are flagged.
 
+## Known wasm runtime constraints (found in Phase 2)
+
+The engine cross-compiles unchanged, but two shared-crate paths block the wasm
+main thread and must be addressed before the features that use them:
+
+- **Custom-shader pipeline creation blocks.** `preset_warp.rs` and
+  `preset_composite.rs` call `pollster::block_on(error_scope.pop())` to validate
+  a preset's translated HLSL→WGSL shader during `WarpEngine::new`. On the wasm
+  main thread this would hang/panic. **The built-in preset has no custom warp or
+  composite shader, so it never reaches these paths** — Phase 2 renders fine.
+  But loading real corpus presets or the Phase 4 shader console *will* hit them.
+  Fix (Phase 4): make pipeline creation async, or `cfg(target_arch = "wasm32")`
+  skip the synchronous error-scope pop (rely on the async `uncapturederror`
+  event / device-lost handling instead).
+- **`read_rgba8` blocks** (`readback.rs`: `map_async` + `poll(Wait)`) — used for
+  screenshots/tests, not the render path. Browser screenshots (Phase 7+) need an
+  async readback variant.
+
+Otherwise the per-frame render path is wasm-safe: no `std::time::Instant`
+(panics on `wasm32-unknown-unknown`), no threads, no blocking.
+
 ## Phased plan (tracked as tasks)
 
 - **P0** audit + this note + wasm build proof — *done*.

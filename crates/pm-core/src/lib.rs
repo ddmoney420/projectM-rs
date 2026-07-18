@@ -65,6 +65,26 @@ pub use warp_render::{WarpParams, WarpRenderer};
 pub use waveform::{generate as generate_waveform, WaveformGeometry};
 pub use waveform_render::WaveformRenderer;
 
+/// A minimal built-in preset used as a fallback when no preset files are
+/// available — the native player's no-corpus default and the browser
+/// frontend's startup preset. It is driven entirely by `time`, so it animates
+/// without any audio input.
+pub const BUILTIN_PRESET: &str = "\
+fDecay=0.975
+zoom=1.012
+rot=0.006
+warp=0.9
+bTexWrap=1
+nWaveMode=0
+bAdditiveWaves=1
+fWaveAlpha=1.0
+fWaveScale=2.0
+per_frame_1=`wave_r = 0.5 + 0.5*sin(time*1.3);
+per_frame_2=`wave_g = 0.5 + 0.5*sin(time*1.7 + 2);
+per_frame_3=`wave_b = 0.5 + 0.5*sin(time*2.3 + 4);
+per_pixel_1=`rot = rot + 0.15*(rad - 0.5);
+";
+
 use pm_audio::FrameAudioData;
 use pm_preset::{shader_to_wgsl, FrameParams, Preset, PresetError, PresetState, ShaderKind};
 use pm_render::{GpuContext, Texture};

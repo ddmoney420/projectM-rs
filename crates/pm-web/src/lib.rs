@@ -1,17 +1,18 @@
 //! `pm-web` — the browser/WASM frontend adapter for projectM-rs.
 //!
 //! This crate owns only the browser-specific seams (canvas + async WebGPU init,
-//! render loop, Web Audio bridge, storage, URL import/export). The visualizer
-//! engine itself lives in the platform-neutral `pm-*` crates and is wired in
-//! from Phase 2 onward.
+//! render loop, and — from later phases — the Web Audio bridge, storage, and URL
+//! import/export). The visualizer engine itself lives in the platform-neutral
+//! `pm-*` crates and is reused here directly.
 //!
 //! The whole crate is `cfg`-gated to `wasm32`, so a native `cargo build
 //! --workspace` compiles it to an empty library and `pm-app` is unaffected.
 //!
-//! Phase 1 scope (this file): detect WebGPU, initialize a device/surface from a
-//! `<canvas>`, and drive a `requestAnimationFrame` loop that renders one known
-//! visual (an animated gradient) — proving the canvas → WebGPU → present path,
-//! resize handling, and surface-lost recovery.
+//! Phase 2 scope (this file): construct a [`GpuContext`] from a `<canvas>`
+//! surface (async, no `pollster`), build the engine's built-in preset, and drive
+//! [`PresetPlayer`] each frame — blitting its output to the canvas with the
+//! shared [`Blit`]. Audio is `FrameAudioData::default()` for now (silence); the
+//! Web Audio bridge lands in Phase 3.
 #![cfg(target_arch = "wasm32")]
 
 use std::cell::RefCell;
@@ -21,39 +22,10 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::HtmlCanvasElement;
 
-/// Fullscreen-triangle vertex + animated gradient fragment. `u.time` advances a
-/// fixed 1/60 s per frame so the motion is deterministic and independent of the
-/// browser clock (matching the engine's fixed-timestep philosophy).
-const GRADIENT_WGSL: &str = r#"
-struct Uniforms { time: f32, width: f32, height: f32, _pad: f32 };
-@group(0) @binding(0) var<uniform> u: Uniforms;
-
-@vertex
-fn vs_main(@builtin(vertex_index) idx: u32) -> @builtin(position) vec4<f32> {
-    var p = array<vec2<f32>, 3>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>( 3.0, -1.0),
-        vec2<f32>(-1.0,  3.0),
-    );
-    return vec4<f32>(p[idx], 0.0, 1.0);
-}
-
-@fragment
-fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
-    let uv = frag.xy / vec2<f32>(u.width, u.height);
-    let col = 0.5 + 0.5 * cos(u.time + vec3<f32>(uv.x, uv.y, uv.x) * 3.0 + vec3<f32>(0.0, 2.0, 4.0));
-    return vec4<f32>(col, 1.0);
-}
-"#;
-
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Uniforms {
-    time: f32,
-    width: f32,
-    height: f32,
-    _pad: f32,
-}
+use pm_audio::FrameAudioData;
+use pm_core::{PresetPlayer, WarpEngine, BUILTIN_PRESET, DEFAULT_TRANSITION_SECS};
+use pm_preset::Preset;
+use pm_render::{Blit, GpuContext};
 
 /// Module entry point: install panic hook + console logger. Runs once when the
 /// wasm module is instantiated.
@@ -131,91 +103,23 @@ pub async fn run(canvas_id: String) -> Result<(), JsValue> {
         alpha_mode: caps.alpha_modes[0],
         view_formats: vec![],
     };
-    surface.configure(&device, &config);
 
-    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("pm-web gradient"),
-        source: wgpu::ShaderSource::Wgsl(GRADIENT_WGSL.into()),
-    });
+    let ctx = GpuContext { instance, adapter, device, queue };
+    surface.configure(&ctx.device, &config);
 
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("pm-web bgl"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        }],
-    });
+    log::info!("pm-web: engine initialized ({width}x{height}); starting render loop");
 
-    let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("pm-web uniforms"),
-        size: std::mem::size_of::<Uniforms>() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("pm-web bind group"),
-        layout: &bind_group_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: uniform_buf.as_entire_binding(),
-        }],
-    });
-
-    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("pm-web layout"),
-        bind_group_layouts: &[Some(&bind_group_layout)],
-        immediate_size: 0,
-    });
-
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("pm-web pipeline"),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: &module,
-            entry_point: Some("vs_main"),
-            buffers: &[],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &module,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            ..Default::default()
-        },
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    });
-
+    // Field initializers run in order: `blit` and `player` borrow `&ctx`
+    // (borrows released per-expression), then `ctx` is moved into the struct.
     let state = Rc::new(RefCell::new(State {
+        blit: Blit::new(&ctx, format),
+        player: build_player(&ctx, width, height),
+        ctx,
         surface,
-        device,
-        queue,
         config,
-        pipeline,
-        uniform_buf,
-        bind_group,
         canvas,
         time: 0.0,
     }));
-
-    log::info!("pm-web: WebGPU initialized ({width}x{height}); starting render loop");
 
     // Self-sustaining requestAnimationFrame loop: the closure holds an `Rc` to
     // itself (via `f`), which intentionally keeps it alive after `run` returns.
@@ -231,15 +135,22 @@ pub async fn run(canvas_id: String) -> Result<(), JsValue> {
     Ok(())
 }
 
+/// Build a fresh player for the built-in preset at the given size. Called at
+/// startup and whenever the canvas resizes (the warp/feedback buffers are
+/// size-bound, so a resize rebuilds the engine).
+fn build_player(ctx: &GpuContext, width: u32, height: u32) -> PresetPlayer {
+    let preset = Preset::load(BUILTIN_PRESET).expect("built-in preset parses");
+    let engine = WarpEngine::new(ctx, preset, width, height);
+    PresetPlayer::new(ctx, engine, width, height, DEFAULT_TRANSITION_SECS)
+}
+
 /// Everything the render loop needs to draw and recover across frames.
 struct State {
+    ctx: GpuContext,
     surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    pipeline: wgpu::RenderPipeline,
-    uniform_buf: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
+    player: PresetPlayer,
+    blit: Blit,
     canvas: HtmlCanvasElement,
     time: f32,
 }
@@ -247,32 +158,27 @@ struct State {
 impl State {
     fn render(&mut self) {
         // Track the canvas backing-store size (the JS shell applies DPR), and
-        // reconfigure the surface on any change so resizes are handled here.
+        // reconfigure + rebuild on any change so resizes are handled here.
         let w = self.canvas.width().max(1);
         let h = self.canvas.height().max(1);
         if w != self.config.width || h != self.config.height {
             self.config.width = w;
             self.config.height = h;
-            self.surface.configure(&self.device, &self.config);
+            self.surface.configure(&self.ctx.device, &self.config);
+            self.player = build_player(&self.ctx, w, h);
+            self.time = 0.0;
         }
 
+        // Fixed-timestep engine clock (deterministic, browser-clock-independent).
         self.time += 1.0 / 60.0;
-        self.queue.write_buffer(
-            &self.uniform_buf,
-            0,
-            bytemuck::bytes_of(&Uniforms {
-                time: self.time,
-                width: self.config.width as f32,
-                height: self.config.height as f32,
-                _pad: 0.0,
-            }),
-        );
+        self.player
+            .render(&self.ctx, self.time, FrameAudioData::default());
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             // Lost/Outdated: reconfigure and skip this frame; the next tick draws.
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
+                self.surface.configure(&self.ctx.device, &self.config);
                 return;
             }
             // Timeout / Occluded / Validation: skip this frame.
@@ -282,33 +188,8 @@ impl State {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("pm-web frame"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("pm-web pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        self.queue.submit(Some(encoder.finish()));
+        self.blit
+            .draw(&self.ctx, self.player.output_texture(), &view);
         frame.present();
     }
 }

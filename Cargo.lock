@@ -1545,11 +1545,14 @@ dependencies = [
 name = "pm-web"
 version = "0.0.1"
 dependencies = [
- "bytemuck",
  "console_error_panic_hook",
  "console_log",
  "js-sys",
  "log",
+ "pm-audio",
+ "pm-core",
+ "pm-preset",
+ "pm-render",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
