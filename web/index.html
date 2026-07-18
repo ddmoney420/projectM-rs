@@ -7,21 +7,48 @@
     <!-- Inline empty favicon: avoids a 404 without shipping an asset. -->
     <link rel="icon" href="data:," />
     <style>
-      html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
-      #viz { display: block; width: 100vw; height: 100vh; }
-      #fallback {
-        position: fixed; inset: 0; display: none; place-items: center;
-        color: #eee; font: 15px/1.55 system-ui, -apple-system, sans-serif;
-        padding: 2rem; text-align: center;
-      }
+      html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+        font: 13px/1.5 system-ui, -apple-system, sans-serif; color: #eee; }
+      #viz { position: fixed; inset: 0; display: block; width: 100vw; height: 100vh; }
+
+      #fallback { position: fixed; inset: 0; display: none; place-items: center;
+        padding: 2rem; text-align: center; }
       #fallback.show { display: grid; }
       #fallback .card { max-width: 34rem; }
       #fallback h1 { font-size: 1.4rem; margin: 0 0 .75rem; }
-      code { background: #222; padding: 0 .3em; border-radius: 3px; }
+
+      /* Control bar */
+      #ui { position: fixed; left: 0; right: 0; bottom: 0; display: none;
+        gap: .6rem; align-items: center; flex-wrap: wrap;
+        padding: .5rem .7rem; background: rgba(12,14,18,.72);
+        backdrop-filter: blur(6px); border-top: 1px solid rgba(255,255,255,.08); }
+      #ui button, #ui label.btn { background: #222833; color: #eee; border: 1px solid #39424f;
+        border-radius: 6px; padding: .35rem .7rem; cursor: pointer; }
+      #ui button:hover, #ui label.btn:hover { background: #2b323d; }
+      #ui button.on { background: #1f6feb; border-color: #1f6feb; }
+      #file-transport { display: none; gap: .5rem; align-items: center; }
+      #audio-status { margin-left: auto; opacity: .8; }
+      #ui input[type="range"] { width: 110px; vertical-align: middle; }
+
+      /* Diagnostics panel */
+      #diag { position: fixed; top: .6rem; right: .6rem; width: 250px;
+        background: rgba(12,14,18,.78); border: 1px solid rgba(255,255,255,.1);
+        border-radius: 8px; overflow: hidden; }
+      #diag-toggle { padding: .4rem .6rem; cursor: pointer; user-select: none;
+        display: flex; justify-content: space-between; background: rgba(255,255,255,.05); }
+      #diag.collapsed #diag-body { display: none; }
+      #diag-body { padding: .4rem .6rem; font-variant-numeric: tabular-nums; }
+      #diag .row { display: flex; justify-content: space-between; gap: .5rem; padding: 1px 0; }
+      #diag .k { opacity: .7; }
+      #diag .v { text-align: right; }
+      #diag .bar { display: inline-block; width: 60px; height: 7px; border-radius: 4px;
+        background: rgba(255,255,255,.12); vertical-align: middle; overflow: hidden; }
+      #diag .bar > span { display: block; height: 100%; background: #35d0a5; }
     </style>
   </head>
   <body>
     <canvas id="viz"></canvas>
+
     <div id="fallback">
       <div class="card">
         <h1>WebGPU required</h1>
@@ -34,6 +61,25 @@
         </p>
       </div>
     </div>
+
+    <div id="diag">
+      <div id="diag-toggle"><span>audio diagnostics</span><span>▾</span></div>
+      <div id="diag-body"></div>
+    </div>
+
+    <div id="ui">
+      <label class="btn">Load file<input id="file-input" type="file" accept="audio/*" hidden /></label>
+      <div id="file-transport">
+        <button id="file-playpause">Play</button>
+        <input id="file-seek" type="range" min="0" max="1000" value="0" />
+        <label><input id="file-loop" type="checkbox" checked /> loop</label>
+      </div>
+      <button id="mic-btn">Mic</button>
+      <button id="tab-btn">Tab audio</button>
+      <label>master <input id="master-gain" type="range" min="0" max="2" step="0.01" value="1" /></label>
+      <span id="audio-status">No audio source</span>
+    </div>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
