@@ -758,6 +758,47 @@ const run = async () => {
   await sleep(200);
   results.p9OnboardingDismisses = (await page.evaluate(() => window.__pmHelp.overlayShown())) === false;
 
+  // --- Beta.3: capability-gated audio-source controls ---------------------
+  // Supported browser (this headed Chrome has getDisplayMedia): the Tab/system
+  // audio control stays visible and the capture flow is untouched.
+  results.betaTabVisibleWhenSupported = await page.locator('#tab-btn').isVisible();
+  results.betaMicVisibleWhenSupported = await page.locator('#mic-btn').isVisible();
+
+  // Unsupported browser (iOS-Safari-like): simulate getDisplayMedia === undefined
+  // in a fresh page BEFORE load. The Tab/system audio control must be hidden
+  // (not a dead visible button), nothing must throw, rendering must continue,
+  // File + Mic must remain, and About must report it unsupported.
+  const iosPage = await browser.newPage({ viewport: { width: 1000, height: 700 } });
+  const iosErrs = [];
+  iosPage.on('pageerror', (e) => iosErrs.push(e.message));
+  iosPage.on('console', (m) => { if (m.type() === 'error') iosErrs.push('[console] ' + m.text()); });
+  await iosPage.addInitScript(() => {
+    try {
+      Object.defineProperty(navigator.mediaDevices, 'getDisplayMedia', { value: undefined, configurable: true });
+    } catch { /* older engines: leave as-is */ }
+  });
+  await iosPage.goto(`${URL_BASE}?miditest=1`, { waitUntil: 'load' });
+  await sleep(3500);
+  results.betaSimGdmUndefined =
+    (await iosPage.evaluate(() => typeof navigator.mediaDevices.getDisplayMedia)) === 'undefined';
+  results.betaTabHiddenWhenUnsupported = !(await iosPage.locator('#tab-btn').isVisible());
+  results.betaMicVisibleWhenUnsupported = await iosPage.locator('#mic-btn').isVisible();
+  results.betaFileVisibleWhenUnsupported = await iosPage.locator('label.btn').first().isVisible();
+  results.betaRenderingContinuesUnsupported = (await iosPage.locator('#viz').count()) === 1;
+  results.betaNoGetDisplayMediaError =
+    iosErrs.filter((m) => /getDisplayMedia/.test(m)).length === 0;
+  results.betaNoRawExceptionUnsupported = iosErrs.length === 0;
+  // About still reports Tab/system audio as unsupported (✗ / .no).
+  await iosPage.evaluate(() => window.__pmHelp.about());
+  await sleep(300);
+  results.betaAboutReportsUnsupported = await iosPage.evaluate(() => {
+    const row = [...document.querySelectorAll('#pm-overlay .pm-cap')].find(
+      (c) => /Tab \/ system audio/.test(c.querySelector('b')?.textContent || ''),
+    );
+    return !!row && !!row.querySelector('.no');
+  });
+  await iosPage.close();
+
   results.consolePanics = logs.filter((l) => /panicked|RuntimeError|unreachable/.test(l)).length;
   results.consoleErrors = logs.filter((l) => l.startsWith('[error]') || l.startsWith('[pageerror]')).length;
 
