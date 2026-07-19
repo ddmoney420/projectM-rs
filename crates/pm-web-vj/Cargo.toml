@@ -1,0 +1,42 @@
+[package]
+name = "pm-web-vj"
+description = "projectM-rs browser/WASM frontend adapter: canvas + WebGPU + Web Audio bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "pm_web"
+# cdylib for the wasm-bindgen artifact; rlib so native `cargo build --workspace`
+# and tests can depend on the crate. The crate body is `cfg`-gated to wasm32, so
+# on native it compiles to an empty lib and does not affect `pm-app`.
+crate-type = ["cdylib", "rlib"]
+
+# Browser-only dependencies: pulled in only when targeting wasm32, so native
+# workspace builds never compile wasm-bindgen / web-sys / the wgpu web backend.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+pm-core = { path = "../pm-core" }
+pm-render = { path = "../pm-render" }
+pm-preset = { path = "../pm-preset" }
+pm-audio = { path = "../pm-audio" }
+pm-glsl = { path = "../pm-glsl" }
+pm-params = { path = "../pm-params" }
+pm-scene = { path = "../pm-scene" }
+pm-midi = { path = "../pm-midi" }
+bytemuck = { version = "1", features = ["derive"] }
+wgpu = "29"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+log = "0.4"
+console_log = "1"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "Navigator",
+    "Performance",
+] }

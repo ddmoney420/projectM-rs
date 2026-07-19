@@ -8,8 +8,13 @@ members = [
     "crates/pm-preset",
     "crates/pm-core",
     "crates/pm-format",
+    "crates/pm-glsl",
+    "crates/pm-params",
+    "crates/pm-scene",
+    "crates/pm-midi",
     "crates/pm-app",
-    "crates/pm-web",
+    "crates/pm-web-player",
+    "crates/pm-web-vj",
 ]
 
 # Crates added as each phase lands:

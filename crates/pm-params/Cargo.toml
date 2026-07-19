@@ -1,0 +1,12 @@
+[package]
+name = "pm-params"
+description = "Reusable visual-clock, tempo/beat, LFO, and parameter-modulation model for the pm-web visualizer (and the future layer/effect system)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "pm_params"
+
+[dependencies]
