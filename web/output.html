@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>projectM-rs — output</title>
+    <link rel="icon" href="data:," />
+    <style>
+      html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+        font: 14px/1.5 system-ui, -apple-system, sans-serif; color: #eee; cursor: default; }
+      body.hide-cursor { cursor: none; }
+      /* The mirrored control-window canvas. object-fit keeps aspect on any display. */
+      #out { position: fixed; inset: 0; width: 100vw; height: 100vh; object-fit: contain; background: #000; }
+
+      /* Center status card — only when NOT connected (waiting/disconnected). */
+      #ov { position: fixed; inset: 0; display: grid; place-items: center; text-align: center; }
+      #ov.hidden { display: none; }
+      #ov .card { background: rgba(12,14,18,.78); border: 1px solid rgba(255,255,255,.12);
+        border-radius: 10px; padding: 1.2rem 1.6rem; max-width: 32rem; }
+      #ov h1 { font-size: 1.2rem; margin: 0 0 .5rem; }
+      #ov p { margin: .3rem 0; opacity: .85; }
+
+      /* Unobtrusive corner fullscreen affordance (needs a user gesture). */
+      #fsbtn { position: fixed; right: .7rem; bottom: .7rem; background: rgba(31,111,235,.9);
+        color: #fff; border: 0; border-radius: 6px; padding: .45rem .8rem; cursor: pointer; font-size: 13px; }
+      #fsbtn.hidden { display: none; }
+
+      #diag { position: fixed; left: .5rem; bottom: .5rem; font: 11px/1.4 ui-monospace, monospace; opacity: .4; }
+      #diag.hidden { display: none; }
+    </style>
+  </head>
+  <body>
+    <video id="out" autoplay playsinline muted></video>
+
+    <div id="ov"><div class="card">
+      <h1 id="ov-title">Waiting for controller…</h1>
+      <p id="ov-msg">Open this window from the main projectM-rs window.</p>
+    </div></div>
+
+    <button id="fsbtn" class="hidden">⛶ Fullscreen</button>
+    <div id="diag" class="hidden"></div>
+
+    <script type="module" src="/src/output-window.ts"></script>
+  </body>
+</html>

@@ -40,6 +40,63 @@ Some features remain **deferred** — most notably external sampler/image assets
 | macOS (arm64, Apple M4) | Metal | 2026-06-09 | live window + audio reactivity, human-observed — see [macos-quickstart.md](macos-quickstart.md) |
 | Linux (aarch64, Debian container) | Vulkan (llvmpipe) | 2026-06-09 | headless Xvfb + software Vulkan; clean build, 30 s run, synthetic-audio fallback. Runtime deps beyond build tools: `libasound2-dev libxcursor1 libxi6 libxrandr2 libxkbcommon0 libxkbcommon-x11-0` (+ `libvulkan1 mesa-vulkan-drivers` for software rendering) |
 
+## Browser apps
+
+The engine also runs in the browser (WebAssembly). There are **two frontends**
+with distinct roles, sharing the `pm-*` engine crates (see
+[architecture](docs/pm-web-architecture.md)):
+
+### `crates/pm-web-player` — lean Milkdrop preset player
+
+A minimal, host-driven runtime (`PmEngine`, host owns the loop) that runs the
+real Milkdrop preset corpus on a canvas with **live preset crossfade** and
+microphone input. Built on `wgpu` with the WebGL2 feature, so it also runs where
+WebGPU is absent. Static page in `crates/pm-web-player/www`; build with
+`wasm-pack build crates/pm-web-player --target web`. Preset packaging lives in
+[`tools/preset-pack`](tools/preset-pack).
+
+### `crates/pm-web-vj` + `web/` — full VJ application
+
+The full Phase 0–9 VJ app: the same engine wrapped in a live VJ UI, rendered on
+**WebGPU** (no WebGL fallback).
+
+- **Sources** — audio file, microphone, or tab/system-audio capture, analyzed by
+  the real projectM FFT/beat pipeline (AudioWorklet + lock-free ring, not the
+  browser `AnalyserNode`).
+- **Visuals** — a shared Milkdrop engine, a live GLSL console (Shadertoy + raw),
+  waveform/spectrum overlays, in a **layer compositor** (7 blend modes, per-layer
+  2D transform, opacity/enable).
+- **Effects** — reorderable per-layer + global effect rack (22 effects incl.
+  bloom, feedback, kaleidoscope) via one übershader.
+- **Reactivity** — tempo/beat (auto + tap + manual), LFO bank, base + modulation
+  parameter model.
+- **Multipass shaders** — Shadertoy-style Buffer A–D + Image with previous-frame
+  feedback, cross-buffer channels, and the projectM audio texture.
+- **MIDI** — Web MIDI mapping with MIDI-Learn, soft-takeover, and
+  absolute/toggle/momentary/trigger modes.
+- **Scenes** — versioned JSON export/import, local persistence, shareable
+  URL-fragment scenes (nothing uploaded).
+- **Output** — WebM recording, fullscreen + wake lock, and a **second-screen
+  projection** window that mirrors the rendered canvas.
+
+```bash
+cd web
+npm install
+npm run dev      # builds the wasm module + starts Vite (http://localhost:5173)
+```
+
+Production build: `npm run build` → static `web/dist/`. WebGPU is the only hard
+requirement; other APIs are feature-detected (About → Browser capabilities). All
+audio/shader/MIDI/recording data stays local (no account, no telemetry).
+
+**More docs**: [architecture](docs/pm-web-architecture.md) ·
+[deployment/headers](docs/deployment.md) ·
+[security review](docs/security-review.md) ·
+[performance](docs/performance-baseline.md) ·
+[known limitations](docs/known-limitations.md) ·
+[release checklist](docs/release-checklist.md). Full VJ verification:
+`bash scripts/release-check.sh`.
+
 ## Quick start
 
 ### Prerequisites

@@ -1,7 +1,10 @@
-//! Blit an offscreen texture to the window surface (fullscreen sample).
+//! Blit an offscreen texture to a surface view (fullscreen sample).
+//!
+//! Browser-neutral: given a `GpuContext`, a source `Texture`, and a target
+//! surface `TextureView`, draw the source over the whole target. Used by the
+//! native player and the browser frontend to present the engine's output.
 
-use pm_render::wgpu;
-use pm_render::{GpuContext, Texture};
+use crate::{GpuContext, Texture};
 
 const BLIT_WGSL: &str = r#"
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
@@ -109,7 +112,7 @@ impl Blit {
         Blit { pipeline, bind_group_layout, sampler }
     }
 
-    /// Draw `src` to `target` (the surface view).
+    /// Draw `src` to `target` (a surface view).
     pub fn draw(&self, ctx: &GpuContext, src: &Texture, target: &wgpu::TextureView) {
         let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("blit bg"),

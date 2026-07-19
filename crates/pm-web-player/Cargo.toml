@@ -1,5 +1,5 @@
 [package]
-name = "pm-web"
+name = "pm-web-player"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

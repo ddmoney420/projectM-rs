@@ -32,6 +32,7 @@
 //! assert_eq!(&pixels[0..4], &[255, 0, 0, 255]);
 //! ```
 
+mod blit;
 mod context;
 mod framebuffer;
 mod mesh;
@@ -40,6 +41,7 @@ mod readback;
 mod render_context;
 mod texture;
 
+pub use blit::Blit;
 pub use context::{GpuContext, GpuError};
 pub use framebuffer::Framebuffer;
 pub use mesh::{Color, ColoredPoint, Point};
