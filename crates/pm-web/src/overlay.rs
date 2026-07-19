@@ -9,7 +9,7 @@
 //! row0 specL, row1 waveL, row2 specR, row3 waveR (centers 0.125/0.375/0.625/0.875).
 
 use pm_audio::FrameAudioData;
-use pm_render::GpuContext;
+use pm_render::{GpuContext, Texture, TARGET_FORMAT};
 
 const TEX_W: u32 = 512;
 const TEX_H: u32 = 4;
@@ -52,6 +52,37 @@ impl Default for OverlayUniform {
             smoothing: 0.0,
             pad0: 0.0,
             pad1: 0.0,
+        }
+    }
+}
+
+impl From<OverlayUniform> for pm_scene::OverlayConfig {
+    fn from(u: OverlayUniform) -> Self {
+        pm_scene::OverlayConfig {
+            mode: u.mode as u8,
+            channel: u.channel as u8,
+            color: u.color,
+            scale: u.scale,
+            thickness: u.thickness,
+            rotation: u.rotation,
+            points: u.points,
+            log_freq: u.log_freq > 0.5,
+        }
+    }
+}
+
+impl From<pm_scene::OverlayConfig> for OverlayUniform {
+    fn from(c: pm_scene::OverlayConfig) -> Self {
+        OverlayUniform {
+            mode: c.mode as f32,
+            channel: c.channel as f32,
+            color: c.color,
+            scale: c.scale,
+            thickness: c.thickness,
+            rotation: c.rotation,
+            points: c.points,
+            log_freq: if c.log_freq { 1.0 } else { 0.0 },
+            ..OverlayUniform::default()
         }
     }
 }
@@ -161,13 +192,14 @@ pub struct OverlayRenderer {
     uniform_buf: wgpu::Buffer,
     audio_tex: wgpu::Texture,
     upload: Vec<u8>,
+    output: Texture,
     pub cfg: OverlayUniform,
-    pub enabled: bool,
 }
 
 impl OverlayRenderer {
-    pub fn new(ctx: &GpuContext, format: wgpu::TextureFormat) -> Self {
+    pub fn new(ctx: &GpuContext, width: u32, height: u32) -> Self {
         let device = &ctx.device;
+        let format = TARGET_FORMAT;
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("overlay bgl"),
@@ -224,7 +256,9 @@ impl OverlayRenderer {
                 entry_point: Some("fs"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    // Straight-alpha output into the layer texture; the
+                    // compositor does the actual blending against the stack.
+                    blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
@@ -280,9 +314,17 @@ impl OverlayRenderer {
             uniform_buf,
             audio_tex,
             upload: vec![0u8; (TEX_W * TEX_H) as usize],
+            output: Texture::new_render_target(device, "overlay-layer", width, height, format),
             cfg: OverlayUniform::default(),
-            enabled: false,
         }
+    }
+
+    pub fn resize(&mut self, ctx: &GpuContext, width: u32, height: u32) {
+        self.output = Texture::new_render_target(&ctx.device, "overlay-layer", width, height, TARGET_FORMAT);
+    }
+
+    pub fn output(&self) -> &Texture {
+        &self.output
     }
 
     /// Fill the 512×4 stereo audio texture.
@@ -313,12 +355,9 @@ impl OverlayRenderer {
         );
     }
 
-    /// Draw the overlay over `target` (alpha-blended). No-op when disabled.
-    pub fn render(&mut self, ctx: &GpuContext, target: &wgpu::TextureView, width: u32, height: u32) {
-        if !self.enabled {
-            return;
-        }
-        self.cfg.resolution = [width as f32, height as f32];
+    /// Render the overlay into its own texture (straight alpha, cleared first).
+    pub fn render(&mut self, ctx: &GpuContext) {
+        self.cfg.resolution = [self.output.width as f32, self.output.height as f32];
         ctx.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&self.cfg));
         let mut encoder = ctx
             .device
@@ -327,10 +366,10 @@ impl OverlayRenderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("overlay pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
+                    view: &self.output.view,
                     depth_slice: None,
                     resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,

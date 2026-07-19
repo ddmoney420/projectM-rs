@@ -1,0 +1,425 @@
+//! Serializable layer/scene data model for the pm-web compositor, plus the
+//! blend math (mirrored in the compositor's WGSL) and scene validation. Pure
+//! logic, unit-tested on native — no GPU. The runtime compositor in pm-web maps
+//! its live layers to/from these types for persistence and scene import/export.
+//!
+//! Compositing model: the canvas is an **opaque** accumulator; each layer blends
+//! onto it by an effective alpha `a = src.alpha * opacity`. `Normal`/`Screen`/
+//! `Multiply`/`Difference`/`Lighten`/`Darken` compute a blended color then
+//! `mix(dst, blended, a)`; `Add` is `dst + src*a`. Straight (non-premultiplied)
+//! alpha, values clamped to `[0,1]`.
+
+use serde::{Deserialize, Serialize};
+
+/// Current scene schema version. Bump on incompatible changes.
+pub const SCHEMA_VERSION: u32 = 1;
+/// Safety limits (documented; enforced by [`SceneData::validate`]).
+pub const MAX_LAYERS: usize = 16;
+pub const MAX_SHADER_LAYERS: usize = 8;
+pub const MAX_SHADER_SOURCE: usize = 64 * 1024;
+pub const MAX_SCENE_BYTES: usize = 1_000_000;
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Add,
+    Screen,
+    Multiply,
+    Difference,
+    Lighten,
+    Darken,
+}
+
+impl BlendMode {
+    pub fn as_u32(self) -> u32 {
+        match self {
+            BlendMode::Normal => 0,
+            BlendMode::Add => 1,
+            BlendMode::Screen => 2,
+            BlendMode::Multiply => 3,
+            BlendMode::Difference => 4,
+            BlendMode::Lighten => 5,
+            BlendMode::Darken => 6,
+        }
+    }
+    pub fn from_u32(v: u32) -> BlendMode {
+        match v {
+            1 => BlendMode::Add,
+            2 => BlendMode::Screen,
+            3 => BlendMode::Multiply,
+            4 => BlendMode::Difference,
+            5 => BlendMode::Lighten,
+            6 => BlendMode::Darken,
+            _ => BlendMode::Normal,
+        }
+    }
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+/// Reference blend used for tests; the WGSL compositor mirrors this exactly.
+/// `dst` is the opaque accumulator RGB, `src` the layer RGBA, `opacity` 0..1.
+pub fn blend(mode: BlendMode, dst: [f32; 3], src: [f32; 4], opacity: f32) -> [f32; 3] {
+    let a = (src[3] * opacity).clamp(0.0, 1.0);
+    let s = [src[0], src[1], src[2]];
+    let b = match mode {
+        BlendMode::Normal => s,
+        BlendMode::Add => {
+            return [
+                (dst[0] + s[0] * a).clamp(0.0, 1.0),
+                (dst[1] + s[1] * a).clamp(0.0, 1.0),
+                (dst[2] + s[2] * a).clamp(0.0, 1.0),
+            ];
+        }
+        BlendMode::Screen => [
+            1.0 - (1.0 - dst[0]) * (1.0 - s[0]),
+            1.0 - (1.0 - dst[1]) * (1.0 - s[1]),
+            1.0 - (1.0 - dst[2]) * (1.0 - s[2]),
+        ],
+        BlendMode::Multiply => [dst[0] * s[0], dst[1] * s[1], dst[2] * s[2]],
+        BlendMode::Difference => [(dst[0] - s[0]).abs(), (dst[1] - s[1]).abs(), (dst[2] - s[2]).abs()],
+        BlendMode::Lighten => [dst[0].max(s[0]), dst[1].max(s[1]), dst[2].max(s[2])],
+        BlendMode::Darken => [dst[0].min(s[0]), dst[1].min(s[1]), dst[2].min(s[2])],
+    };
+    [lerp(dst[0], b[0], a), lerp(dst[1], b[1], a), lerp(dst[2], b[2], a)]
+}
+
+/// 2D layer transform in normalized canvas space (center origin, [-0.5,0.5]).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Transform {
+    pub pos: [f32; 2],
+    pub scale: [f32; 2],
+    pub rotation: f32,
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Transform { pos: [0.0, 0.0], scale: [1.0, 1.0], rotation: 0.0 }
+    }
+}
+
+impl Transform {
+    pub fn clamp(&mut self) {
+        for p in &mut self.pos {
+            *p = p.clamp(-4.0, 4.0);
+        }
+        for s in &mut self.scale {
+            *s = s.clamp(0.01, 16.0);
+        }
+        if !self.rotation.is_finite() {
+            self.rotation = 0.0;
+        }
+    }
+}
+
+/// Shader attribution/licensing metadata (preserved across duplicate/reorder/
+/// export). The app never auto-adds licensing claims to user shaders.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct Attribution {
+    pub title: String,
+    pub author: String,
+    pub source_url: String,
+    pub license: String,
+    pub license_url: String,
+    pub modified_from: String,
+    pub attribution_text: String,
+}
+
+/// A saved control-modulation mapping for a shader layer.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ModMapping {
+    pub slot: u32,
+    pub source: String,
+    pub amount: f32,
+    pub smoothing: f32,
+}
+
+/// Overlay (waveform/spectrum) layer configuration.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct OverlayConfig {
+    pub mode: u8,
+    pub channel: u8,
+    pub color: [f32; 4],
+    pub scale: f32,
+    pub thickness: f32,
+    pub rotation: f32,
+    pub points: f32,
+    pub log_freq: bool,
+}
+
+impl Default for OverlayConfig {
+    fn default() -> Self {
+        OverlayConfig {
+            mode: 0,
+            channel: 0,
+            color: [0.2, 0.95, 0.6, 0.9],
+            scale: 0.35,
+            thickness: 0.006,
+            rotation: 0.0,
+            points: 128.0,
+            log_freq: false,
+        }
+    }
+}
+
+/// Per-layer source and its serializable state.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum SourceState {
+    Milkdrop,
+    Shader {
+        source: String,
+        mode: u8,
+        controls: Vec<[f32; 4]>,
+        #[serde(default)]
+        mods: Vec<ModMapping>,
+        #[serde(default)]
+        attribution: Attribution,
+    },
+    Waveform(OverlayConfig),
+    Spectrum(OverlayConfig),
+}
+
+impl SourceState {
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            SourceState::Milkdrop => "milkdrop",
+            SourceState::Shader { .. } => "shader",
+            SourceState::Waveform(_) => "waveform",
+            SourceState::Spectrum(_) => "spectrum",
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// One layer's full serializable state.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct LayerData {
+    pub id: u64,
+    pub name: String,
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    pub opacity: f32,
+    pub blend: BlendMode,
+    #[serde(default)]
+    pub transform: Transform,
+    pub source: SourceState,
+}
+
+/// A complete scene: ordered layers + global time/tempo settings.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SceneData {
+    pub schema_version: u32,
+    pub scene_id: String,
+    pub name: String,
+    pub layers: Vec<LayerData>,
+    pub speed: f32,
+    pub paused: bool,
+    pub bpm: f32,
+    pub tempo_manual: bool,
+    pub subdivision: f32,
+}
+
+impl SceneData {
+    /// Validate + clamp in place. Errors on unknown schema or an oversize shader.
+    pub fn validate(&mut self) -> Result<(), String> {
+        if self.schema_version != SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported scene schema version {} (expected {SCHEMA_VERSION})",
+                self.schema_version
+            ));
+        }
+        if self.layers.len() > MAX_LAYERS {
+            self.layers.truncate(MAX_LAYERS);
+        }
+        let mut shader_count = 0;
+        for l in &mut self.layers {
+            l.opacity = l.opacity.clamp(0.0, 1.0);
+            l.transform.clamp();
+            if let SourceState::Shader { source, .. } = &l.source {
+                shader_count += 1;
+                if source.len() > MAX_SHADER_SOURCE {
+                    return Err(format!("shader source exceeds {MAX_SHADER_SOURCE} bytes"));
+                }
+            }
+        }
+        if shader_count > MAX_SHADER_LAYERS {
+            return Err(format!("too many shader layers ({shader_count} > {MAX_SHADER_LAYERS})"));
+        }
+        self.speed = self.speed.clamp(0.0, 8.0);
+        self.bpm = self.bpm.clamp(20.0, 400.0);
+        self.subdivision = self.subdivision.clamp(0.0625, 16.0);
+        Ok(())
+    }
+}
+
+/// Parse + validate a scene from JSON. Rejects oversize input up front, never
+/// executes anything, and returns a clamped/validated scene or an error string.
+pub fn parse_scene(json: &str) -> Result<SceneData, String> {
+    if json.len() > MAX_SCENE_BYTES {
+        return Err(format!("scene JSON exceeds {MAX_SCENE_BYTES} bytes"));
+    }
+    let mut scene: SceneData = serde_json::from_str(json).map_err(|e| format!("invalid scene JSON: {e}"))?;
+    scene.validate()?;
+    Ok(scene)
+}
+
+/// Serialize a scene to pretty JSON.
+pub fn to_json(scene: &SceneData) -> String {
+    serde_json::to_string_pretty(scene).unwrap_or_else(|_| "{}".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_scene() -> SceneData {
+        SceneData {
+            schema_version: SCHEMA_VERSION,
+            scene_id: "s1".into(),
+            name: "Test".into(),
+            layers: vec![
+                LayerData {
+                    id: 1,
+                    name: "Milkdrop".into(),
+                    enabled: true,
+                    visible: true,
+                    opacity: 1.0,
+                    blend: BlendMode::Normal,
+                    transform: Transform::default(),
+                    source: SourceState::Milkdrop,
+                },
+                LayerData {
+                    id: 2,
+                    name: "Shader".into(),
+                    enabled: true,
+                    visible: true,
+                    opacity: 0.5,
+                    blend: BlendMode::Add,
+                    transform: Transform { pos: [0.1, -0.2], scale: [1.5, 1.5], rotation: 0.3 },
+                    source: SourceState::Shader {
+                        source: "void mainImage(out vec4 c, in vec2 f){c=vec4(1.0);}".into(),
+                        mode: 0,
+                        controls: vec![[0.5, 0.0, 0.0, 0.0]],
+                        mods: vec![ModMapping { slot: 0, source: "bass".into(), amount: 0.5, smoothing: 0.2 }],
+                        attribution: Attribution { author: "me".into(), license: "LGPL-2.1".into(), ..Default::default() },
+                    },
+                },
+                LayerData {
+                    id: 3,
+                    name: "Waveform".into(),
+                    enabled: true,
+                    visible: true,
+                    opacity: 0.8,
+                    blend: BlendMode::Screen,
+                    transform: Transform::default(),
+                    source: SourceState::Waveform(OverlayConfig::default()),
+                },
+            ],
+            speed: 1.0,
+            paused: false,
+            bpm: 120.0,
+            tempo_manual: false,
+            subdivision: 1.0,
+        }
+    }
+
+    #[test]
+    fn scene_round_trips() {
+        let scene = sample_scene();
+        let json = to_json(&scene);
+        let back = parse_scene(&json).expect("round-trip");
+        assert_eq!(scene, back);
+    }
+
+    #[test]
+    fn attribution_survives_round_trip() {
+        let json = to_json(&sample_scene());
+        let back = parse_scene(&json).unwrap();
+        if let SourceState::Shader { attribution, mods, source, .. } = &back.layers[1].source {
+            assert_eq!(attribution.author, "me");
+            assert_eq!(attribution.license, "LGPL-2.1");
+            assert_eq!(mods[0].source, "bass");
+            assert!(source.contains("mainImage"));
+        } else {
+            panic!("layer 1 should be a shader");
+        }
+    }
+
+    #[test]
+    fn unknown_schema_rejected() {
+        let mut scene = sample_scene();
+        scene.schema_version = 999;
+        let json = serde_json::to_string(&scene).unwrap();
+        assert!(parse_scene(&json).is_err());
+    }
+
+    #[test]
+    fn opacity_and_transform_clamped() {
+        let mut scene = sample_scene();
+        scene.layers[0].opacity = 5.0;
+        scene.layers[1].transform.scale = [1000.0, -1.0];
+        scene.validate().unwrap();
+        assert_eq!(scene.layers[0].opacity, 1.0);
+        assert_eq!(scene.layers[1].transform.scale[0], 16.0);
+        assert_eq!(scene.layers[1].transform.scale[1], 0.01);
+    }
+
+    #[test]
+    fn layer_count_truncated() {
+        let mut scene = sample_scene();
+        let base = scene.layers[0].clone();
+        scene.layers = (0..40).map(|i| LayerData { id: i, ..base.clone() }).collect();
+        scene.validate().unwrap();
+        assert_eq!(scene.layers.len(), MAX_LAYERS);
+    }
+
+    #[test]
+    fn too_many_shaders_rejected() {
+        let mut scene = sample_scene();
+        let sh = scene.layers[1].clone();
+        scene.layers = (0..MAX_SHADER_LAYERS + 1).map(|i| LayerData { id: i as u64, ..sh.clone() }).collect();
+        assert!(scene.validate().is_err());
+    }
+
+    #[test]
+    fn oversize_json_rejected() {
+        let big = "x".repeat(MAX_SCENE_BYTES + 1);
+        assert!(parse_scene(&big).is_err());
+    }
+
+    #[test]
+    fn blend_modes_representative_values() {
+        let dst = [0.4, 0.4, 0.4];
+        let src = [0.6, 0.6, 0.6, 1.0];
+        // Full opacity → blended color fully applied.
+        assert_eq!(blend(BlendMode::Normal, dst, src, 1.0), [0.6, 0.6, 0.6]);
+        assert_eq!(blend(BlendMode::Multiply, dst, src, 1.0)[0], 0.4 * 0.6);
+        assert!((blend(BlendMode::Screen, dst, src, 1.0)[0] - (1.0 - 0.6 * 0.4)).abs() < 1e-6);
+        assert!((blend(BlendMode::Difference, dst, src, 1.0)[0] - 0.2).abs() < 1e-6);
+        assert_eq!(blend(BlendMode::Lighten, dst, src, 1.0)[0], 0.6);
+        assert_eq!(blend(BlendMode::Darken, dst, src, 1.0)[0], 0.4);
+        assert!((blend(BlendMode::Add, dst, src, 0.5)[0] - (0.4 + 0.6 * 0.5)).abs() < 1e-6);
+        // Zero opacity → dst unchanged for every mode.
+        for m in [BlendMode::Normal, BlendMode::Add, BlendMode::Screen, BlendMode::Multiply,
+                  BlendMode::Difference, BlendMode::Lighten, BlendMode::Darken] {
+            assert_eq!(blend(m, dst, src, 0.0), dst);
+        }
+    }
+
+    #[test]
+    fn blend_mode_u32_round_trips() {
+        for m in [BlendMode::Normal, BlendMode::Add, BlendMode::Screen, BlendMode::Multiply,
+                  BlendMode::Difference, BlendMode::Lighten, BlendMode::Darken] {
+            assert_eq!(BlendMode::from_u32(m.as_u32()), m);
+        }
+    }
+}

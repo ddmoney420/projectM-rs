@@ -9,7 +9,7 @@
 
 use pm_audio::FrameAudioData;
 use pm_glsl::{compile, Control, Diagnostic, ShaderMode, ShaderUniforms, AUDIO_TEX_HEIGHT, AUDIO_TEX_WIDTH};
-use pm_render::GpuContext;
+use pm_render::{GpuContext, Texture, TARGET_FORMAT};
 
 /// Number of `vec4` user-control slots (mirrors `pm_glsl::MAX_CONTROLS`).
 const USER_SLOTS: usize = 16;
@@ -42,11 +42,14 @@ pub struct LiveShader {
     bind_group: wgpu::BindGroup,
     pipeline: Option<wgpu::RenderPipeline>,
     audio_upload: Vec<u8>,
+    /// The texture this shader renders into, sampled by the compositor.
+    output: Texture,
 }
 
 impl LiveShader {
-    pub fn new(ctx: &GpuContext, format: wgpu::TextureFormat) -> Self {
+    pub fn new(ctx: &GpuContext, width: u32, height: u32) -> Self {
         let device = &ctx.device;
+        let format = TARGET_FORMAT;
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("live-shader bgl"),
@@ -169,16 +172,23 @@ impl LiveShader {
             bind_group,
             pipeline: None,
             audio_upload: vec![0u8; (AUDIO_TEX_WIDTH * AUDIO_TEX_HEIGHT) as usize],
+            output: Texture::new_render_target(device, "shader-layer", width, height, format),
         }
+    }
+
+    /// Recreate the output texture at a new size (pipelines are size-independent).
+    pub fn resize(&mut self, ctx: &GpuContext, width: u32, height: u32) {
+        self.output = Texture::new_render_target(&ctx.device, "shader-layer", width, height, self.format);
+    }
+
+    /// The texture this shader renders into.
+    pub fn output(&self) -> &Texture {
+        &self.output
     }
 
     /// Upload the 16 user-control `vec4` slots.
     pub fn update_user_controls(&self, ctx: &GpuContext, slots: &[[f32; 4]; USER_SLOTS]) {
         ctx.queue.write_buffer(&self.user_buf, 0, bytemuck::cast_slice(slots));
-    }
-
-    pub fn has_pipeline(&self) -> bool {
-        self.pipeline.is_some()
     }
 
     /// Compile user GLSL and, on success, atomically swap in the new pipeline.
@@ -264,8 +274,9 @@ impl LiveShader {
         );
     }
 
-    pub fn render(&self, ctx: &GpuContext, target: &wgpu::TextureView) {
-        let Some(pipeline) = &self.pipeline else { return };
+    /// Render into the owned output texture. If no shader has compiled yet, the
+    /// texture is cleared transparent (the compositor then contributes nothing).
+    pub fn render(&self, ctx: &GpuContext) {
         let mut encoder = ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("live-shader enc") });
@@ -273,11 +284,11 @@ impl LiveShader {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("live-shader pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
+                    view: &self.output.view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -286,9 +297,11 @@ impl LiveShader {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.draw(0..3, 0..1);
+            if let Some(pipeline) = &self.pipeline {
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
         }
         ctx.queue.submit(Some(encoder.finish()));
     }

@@ -22,6 +22,7 @@ pm-preset = { path = "../pm-preset" }
 pm-audio = { path = "../pm-audio" }
 pm-glsl = { path = "../pm-glsl" }
 pm-params = { path = "../pm-params" }
+pm-scene = { path = "../pm-scene" }
 bytemuck = { version = "1", features = ["derive"] }
 wgpu = "29"
 wasm-bindgen = "0.2"

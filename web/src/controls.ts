@@ -71,8 +71,8 @@ export class ControlsPanel {
         <div id="cp-lfos"></div>
       </details>
 
-      <details><summary>Overlay</summary>
-        <div class="cp-row"><label><input id="ov-en" type="checkbox"> enabled</label>
+      <details><summary>Overlay (selected layer)</summary>
+        <div class="cp-row">
           <select id="ov-mode">${OVERLAY_MODES.map((m, i) => `<option value="${i}">${m}</option>`).join('')}</select>
           <select id="ov-chan"><option value="0">L</option><option value="1">R</option><option value="2">mono</option></select></div>
         <div class="cp-row"><label>color <input id="ov-color" type="color" value="#33f0a0"></label><label>opacity <input id="ov-op" type="range" min="0" max="1" step="0.01" value="0.9"></label></div>
@@ -182,14 +182,13 @@ export class ControlsPanel {
 
   // --- Overlay ------------------------------------------------------------
   private wireOverlay(): void {
-    const ids = ['#ov-en', '#ov-mode', '#ov-chan', '#ov-color', '#ov-op', '#ov-scale', '#ov-thick', '#ov-rot', '#ov-points', '#ov-log'];
+    const ids = ['#ov-mode', '#ov-chan', '#ov-color', '#ov-op', '#ov-scale', '#ov-thick', '#ov-rot', '#ov-points', '#ov-log'];
     const apply = () => {
       const hex = this.q<HTMLInputElement>('#ov-color').value;
       const r = parseInt(hex.slice(1, 3), 16) / 255;
       const g = parseInt(hex.slice(3, 5), 16) / 255;
       const b = parseInt(hex.slice(5, 7), 16) / 255;
       set_overlay(
-        this.q<HTMLInputElement>('#ov-en').checked,
         Number(this.q<HTMLSelectElement>('#ov-mode').value),
         Number(this.q<HTMLSelectElement>('#ov-chan').value),
         r, g, b,
@@ -198,10 +197,7 @@ export class ControlsPanel {
         Number(this.q<HTMLInputElement>('#ov-thick').value),
         Number(this.q<HTMLInputElement>('#ov-rot').value),
         Number(this.q<HTMLInputElement>('#ov-points').value),
-        0, 0,
-        0, 1,
         this.q<HTMLInputElement>('#ov-log').checked,
-        0,
       );
       this.save();
     };
@@ -292,7 +288,6 @@ export class ControlsPanel {
         bpm: this.q<HTMLInputElement>('#cp-bpm').value,
         subdiv: this.q<HTMLSelectElement>('#cp-subdiv').value,
         overlay: {
-          en: this.q<HTMLInputElement>('#ov-en').checked,
           mode: this.q<HTMLSelectElement>('#ov-mode').value,
           chan: this.q<HTMLSelectElement>('#ov-chan').value,
           color: this.q<HTMLInputElement>('#ov-color').value,
@@ -329,7 +324,6 @@ export class ControlsPanel {
     set('#cp-subdiv', data.subdiv);
     const ov = data.overlay as Record<string, unknown> | undefined;
     if (ov) {
-      set('#ov-en', ov.en);
       set('#ov-mode', ov.mode);
       set('#ov-chan', ov.chan);
       set('#ov-color', ov.color);
@@ -339,6 +333,5 @@ export class ControlsPanel {
     }
     // Push restored values to the engine.
     this.q<HTMLInputElement>('#cp-speed').dispatchEvent(new Event('input'));
-    this.q<HTMLInputElement>('#ov-en').dispatchEvent(new Event('input'));
   }
 }

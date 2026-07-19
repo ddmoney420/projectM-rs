@@ -22,27 +22,18 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::HtmlCanvasElement;
 
+mod compositor;
 mod live_shader;
 mod overlay;
 
-use live_shader::LiveShader;
-use overlay::OverlayRenderer;
+use compositor::{Compositor, LayerKind};
 use pm_audio::PCM;
 use pm_core::{PresetPlayer, WarpEngine, BUILTIN_PRESET, DEFAULT_TRANSITION_SECS};
 use pm_glsl::{ShaderMode, ShaderUniforms, AUDIO_TEX_HEIGHT, AUDIO_TEX_WIDTH};
 use pm_params::{AudioFeatures, Curve, Lfo, LfoWave, ModContext, ModSource, Parameter, Tempo, VisualClock};
 use pm_preset::Preset;
-use pm_render::{Blit, GpuContext};
-
-const USER_SLOTS: usize = 16;
-
-/// Which source fills the canvas. Both are candidates to become layer sources
-/// once the Phase 6 compositor lands.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RenderSource {
-    Preset,
-    Shader,
-}
+use pm_render::GpuContext;
+use pm_scene::OverlayConfig;
 
 // ---------------------------------------------------------------------------
 // Audio bridge: lock-free SPSC ring drained from the render loop.
@@ -145,7 +136,9 @@ struct Diagnostics {
     frame: u32,
     width: u32,
     height: u32,
-    shader_source: bool,
+    layer_count: u32,
+    enabled_count: u32,
+    shader_count: u32,
     bpm: f32,
     beat_phase: f32,
     beat_pulse: f32,
@@ -195,7 +188,8 @@ pub fn get_diagnostics() -> String {
              \"overruns\":{},\"underruns\":{},\"consumed\":{},\
              \"bass\":{:.4},\"mid\":{:.4},\"treb\":{:.4},\"vol\":{:.4},\
              \"time\":{:.2},\"delta\":{:.4},\"scale\":{:.2},\"paused\":{},\
-             \"frame\":{},\"width\":{},\"height\":{},\"shaderSource\":{},\
+             \"frame\":{},\"width\":{},\"height\":{},\
+             \"layerCount\":{},\"enabledCount\":{},\"shaderCount\":{},\
              \"bpm\":{:.1},\"beatPhase\":{:.3},\"beatPulse\":{:.3},\
              \"tempoConfidence\":{:.2},\"tempoManual\":{}}}",
             d.has_audio,
@@ -216,7 +210,9 @@ pub fn get_diagnostics() -> String {
             d.frame,
             d.width,
             d.height,
-            d.shader_source,
+            d.layer_count,
+            d.enabled_count,
+            d.shader_count,
             d.bpm,
             d.beat_phase,
             d.beat_pulse,
@@ -310,27 +306,19 @@ pub async fn run(canvas_id: String) -> Result<(), JsValue> {
 
     log::info!("pm-web: engine initialized ({width}x{height}); starting render loop");
 
-    // Field initializers run in order: `blit`/`player`/`live_shader` borrow
-    // `&ctx` (released per-expression), then `ctx` is moved into the struct.
     let state = Rc::new(RefCell::new(State {
-        blit: Blit::new(&ctx, format),
         player: build_player(&ctx, width, height),
-        live_shader: LiveShader::new(&ctx, format),
-        overlay: OverlayRenderer::new(&ctx, format),
+        compositor: Compositor::new(&ctx, format, width, height),
         ctx,
         surface,
         config,
         canvas,
         pcm: PCM::new(),
         audio_scratch: Vec::new(),
-        render_source: RenderSource::Preset,
         mouse: [0.0; 4],
         clock: VisualClock::new(),
         tempo: Tempo::default(),
         lfos: [Lfo::default(), Lfo::default(), Lfo::default(), Lfo::default()],
-        user_slots: [[0.0; 4]; USER_SLOTS],
-        user_mods: std::array::from_fn(|_| None),
-        user_range: [[0.0, 1.0]; USER_SLOTS],
         frame: 0,
     }));
     APP.with(|a| *a.borrow_mut() = Some(state.clone()));
@@ -360,24 +348,17 @@ struct State {
     ctx: GpuContext,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
+    /// The single shared Milkdrop engine (one Milkdrop layer, by constraint).
     player: PresetPlayer,
-    live_shader: LiveShader,
-    overlay: OverlayRenderer,
-    blit: Blit,
+    compositor: Compositor,
     canvas: HtmlCanvasElement,
     pcm: PCM,
     audio_scratch: Vec<f32>,
-    render_source: RenderSource,
     /// iMouse: (x, y, click_x, click_y) in canvas pixels, y bottom-left origin.
     mouse: [f32; 4],
     clock: VisualClock,
     tempo: Tempo,
     lfos: [Lfo; 4],
-    /// Base values for the 16 user-control slots (set from the UI sliders).
-    user_slots: [[f32; 4]; USER_SLOTS],
-    /// Optional per-slot modulation (scalar lane x) and the slot's (min, max).
-    user_mods: [Option<Parameter>; USER_SLOTS],
-    user_range: [[f32; 2]; USER_SLOTS],
     frame: u32,
 }
 
@@ -391,7 +372,7 @@ impl State {
             self.config.height = h;
             self.surface.configure(&self.ctx.device, &self.config);
             self.player = build_player(&self.ctx, w, h);
-            self.clock.reset();
+            self.compositor.resize(&self.ctx, w, h);
         }
 
         // Drain the audio ring (if attached) into the projectM PCM analyzer.
@@ -441,15 +422,6 @@ impl State {
             lfo: lfo_vals,
         };
 
-        // Evaluate user-control modulation into the upload buffer (scalar lane x).
-        let mut user_slots = self.user_slots;
-        for i in 0..USER_SLOTS {
-            if let Some(p) = self.user_mods[i].as_mut() {
-                p.base = self.user_slots[i][0];
-                user_slots[i][0] = p.eval(&modctx);
-            }
-        }
-
         let time = self.clock.time();
 
         // Publish diagnostics for the JS panel.
@@ -479,7 +451,9 @@ impl State {
             d.frame = self.frame;
             d.width = self.config.width;
             d.height = self.config.height;
-            d.shader_source = self.render_source == RenderSource::Shader;
+            d.layer_count = self.compositor.layer_count() as u32;
+            d.enabled_count = self.compositor.enabled_count() as u32;
+            d.shader_count = self.compositor.shader_count() as u32;
             d.bpm = self.tempo.bpm();
             d.beat_phase = self.tempo.beat_phase();
             d.beat_pulse = self.tempo.beat_pulse();
@@ -516,17 +490,9 @@ impl State {
             pm_pad2: 0.0,
         };
 
-        if self.overlay.enabled {
-            self.overlay.update_audio(&self.ctx, &audio);
-        }
-
-        match self.render_source {
-            RenderSource::Preset => self.player.render(&self.ctx, time, audio),
-            RenderSource::Shader => {
-                self.live_shader.update_audio(&self.ctx, &audio);
-                self.live_shader.update_uniforms(&self.ctx, &uniforms);
-                self.live_shader.update_user_controls(&self.ctx, &user_slots);
-            }
+        // Render the shared Milkdrop engine once if a Milkdrop layer exists.
+        if self.compositor.has_milkdrop() {
+            self.player.render(&self.ctx, time, audio.clone());
         }
 
         let frame = match self.surface.get_current_texture() {
@@ -537,19 +503,10 @@ impl State {
             }
             _ => return,
         };
-
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        match self.render_source {
-            RenderSource::Shader if self.live_shader.has_pipeline() => {
-                self.live_shader.render(&self.ctx, &view);
-            }
-            // Preset, or Shader with no compiled pipeline yet → show the preset.
-            _ => self.blit.draw(&self.ctx, self.player.output_texture(), &view),
-        }
-        // Overlays composite over whatever base was drawn (no-op if disabled).
-        self.overlay.render(&self.ctx, &view, self.config.width, self.config.height);
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let player_out = self.player.output_texture();
+        self.compositor
+            .render(&self.ctx, &view, player_out, &audio, &uniforms, &modctx);
         frame.present();
     }
 }
@@ -574,51 +531,25 @@ fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
     APP.with(|a| a.borrow().as_ref().map(|s| f(&mut s.borrow_mut())))
 }
 
-/// Select what fills the canvas: 0 = Milkdrop preset, 1 = live shader. Cheap;
-/// never reinitializes WebGPU or the engine.
-#[wasm_bindgen]
-pub fn set_render_source(kind: u8) {
-    with_state(|s| {
-        s.render_source = if kind == 1 { RenderSource::Shader } else { RenderSource::Preset };
-    });
-}
-
-/// Compile user GLSL (mode 0 = Shadertoy, 1 = raw) and, on success, swap in the
-/// new pipeline. Synchronous: a newer call always wins, and on failure the
-/// previous shader keeps rendering. Returns a JSON compile report.
+/// Compile GLSL into the **selected** shader layer (mode 0 = Shadertoy, 1 = raw).
+/// Synchronous: a newer call wins; a failed compile keeps that layer's
+/// last-known-good and never affects other layers, audio, or the render loop.
 #[wasm_bindgen]
 pub fn set_shader_source(mode: u8, src: String) -> String {
-    let mode = if mode == 1 { ShaderMode::Raw } else { ShaderMode::Shadertoy };
+    let m = if mode == 1 { ShaderMode::Raw } else { ShaderMode::Shadertoy };
     let t0 = js_sys::Date::now();
     let outcome = with_state(|s| {
-        let o = s.live_shader.set_shader(&s.ctx, mode, &src);
-        if o.ok {
-            // New shader → reset user-control state to the parsed defaults.
-            s.user_slots = [[0.0; 4]; USER_SLOTS];
-            s.user_mods = std::array::from_fn(|_| None);
-            s.user_range = [[0.0, 1.0]; USER_SLOTS];
-            for c in &o.controls {
-                let slot = c.slot as usize;
-                if slot < USER_SLOTS {
-                    s.user_slots[slot] = c.default;
-                    s.user_range[slot] = [c.min, c.max];
-                }
-            }
-        }
-        o
-    });
+        let id = s.compositor.selected()?;
+        s.compositor.set_shader(&s.ctx, id, m, &src)
+    })
+    .flatten();
     let ms = js_sys::Date::now() - t0;
     match outcome {
         Some(o) => {
             let diags: Vec<String> = o
                 .diagnostics
                 .iter()
-                .map(|d| {
-                    format!(
-                        "{{\"line\":{},\"column\":{},\"message\":{}}}",
-                        d.line, d.column, json_string(&d.message)
-                    )
-                })
+                .map(|d| format!("{{\"line\":{},\"column\":{},\"message\":{}}}", d.line, d.column, json_string(&d.message)))
                 .collect();
             let controls: Vec<String> = o.controls.iter().map(control_json).collect();
             format!(
@@ -629,7 +560,7 @@ pub fn set_shader_source(mode: u8, src: String) -> String {
                 controls.join(",")
             )
         }
-        None => "{\"ok\":false,\"compileMs\":0,\"diagnostics\":[],\"controls\":[]}".to_string(),
+        None => "{\"ok\":false,\"compileMs\":0,\"diagnostics\":[{\"line\":0,\"column\":0,\"message\":\"select a shader layer first\"}],\"controls\":[]}".to_string(),
     }
 }
 
@@ -651,40 +582,36 @@ fn control_json(c: &pm_glsl::Control) -> String {
     )
 }
 
-/// Set a user control's base value (all four `vec4` lanes).
+/// Set a user control's base value (all four `vec4` lanes) on the selected layer.
 #[wasm_bindgen]
 pub fn set_control(index: u32, x: f32, y: f32, z: f32, w: f32) {
     with_state(|s| {
-        let i = index as usize;
-        if i < USER_SLOTS {
-            s.user_slots[i] = [x, y, z, w];
+        if let Some(id) = s.compositor.selected() {
+            s.compositor.set_control(id, index as usize, [x, y, z, w]);
         }
     });
 }
 
-/// Bind (or clear) modulation on a scalar user control. `source` is a
-/// [`ModSource`] name; `curve` one of linear/exp/log/scurve. Clears when source
-/// is "none" and amount is 0.
+/// Bind (or clear) modulation on a scalar user control of the selected layer.
+/// `source` is a [`ModSource`] name; `curve` one of linear/exp/log/scurve.
 #[wasm_bindgen]
 pub fn set_control_mod(index: u32, source: String, amount: f32, smoothing: f32, curve: String, invert: bool) {
     with_state(|s| {
+        let Some(id) = s.compositor.selected() else { return };
         let i = index as usize;
-        if i >= USER_SLOTS {
-            return;
-        }
         let src = ModSource::from_str(&source);
         if matches!(src, ModSource::None) && amount == 0.0 {
-            s.user_mods[i] = None;
+            s.compositor.set_control_mod(id, i, None);
             return;
         }
-        let [min, max] = s.user_range[i];
-        let mut p = Parameter::new(s.user_slots[i][0], min, max);
+        let [min, max] = s.compositor.user_range(id, i);
+        let mut p = Parameter::new(0.0, min, max); // base tracked from the slot each frame
         p.source = src;
         p.amount = amount;
         p.smoothing = smoothing.clamp(0.0, 0.999);
         p.invert = invert;
         p.curve = curve_from(&curve);
-        s.user_mods[i] = Some(p);
+        s.compositor.set_control_mod(id, i, Some(p));
     });
 }
 
@@ -796,48 +723,137 @@ fn json_string(s: &str) -> String {
     out
 }
 
-// --- Waveform / spectrum overlay ------------------------------------------
+// --- Overlay (selected waveform/spectrum layer) ---------------------------
 
-/// Configure the overlay. `mode`: 0 oscilloscope, 1 mirrored, 2 spectrum bars,
-/// 3 circular, 4 radial spectrum, 5 Lissajous. `channel`: 0 left, 1 right,
+/// Configure the selected overlay layer. `mode`: 0 oscilloscope, 1 mirrored,
+/// 2 spectrum bars, 3 circular, 4 radial, 5 Lissajous. `channel`: 0 L, 1 R,
 /// 2 mono (Lissajous always uses real L/R).
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
-pub fn set_overlay(
-    enabled: bool,
-    mode: u8,
-    channel: u8,
-    r: f32,
-    g: f32,
-    b: f32,
-    opacity: f32,
-    scale: f32,
-    thickness: f32,
-    rotation: f32,
-    points: f32,
-    pos_x: f32,
-    pos_y: f32,
-    freq_min: f32,
-    freq_max: f32,
-    log_freq: bool,
-    smoothing: f32,
-) {
+pub fn set_overlay(mode: u8, channel: u8, r: f32, g: f32, b: f32, opacity: f32, scale: f32, thickness: f32, rotation: f32, points: f32, log_freq: bool) {
     with_state(|s| {
-        s.overlay.enabled = enabled;
-        let c = &mut s.overlay.cfg;
-        c.mode = mode as f32;
-        c.channel = channel as f32;
-        c.color = [r, g, b, opacity];
-        c.scale = scale;
-        c.thickness = thickness;
-        c.rotation = rotation;
-        c.points = points;
-        c.position = [pos_x, pos_y];
-        c.freq_min = freq_min;
-        c.freq_max = freq_max;
-        c.log_freq = if log_freq { 1.0 } else { 0.0 };
-        c.smoothing = smoothing;
+        let Some(id) = s.compositor.selected() else { return };
+        s.compositor.set_overlay_cfg(
+            id,
+            OverlayConfig { mode, channel, color: [r, g, b, opacity], scale, thickness, rotation, points, log_freq },
+        );
     });
+}
+
+// --- Layer stack ----------------------------------------------------------
+
+/// Add a layer. `kind`: 0 Milkdrop, 1 Shader, 2 Waveform, 3 Spectrum. Returns the
+/// new layer id, or -1 if rejected (e.g. a second Milkdrop, or a limit hit).
+#[wasm_bindgen]
+pub fn add_layer(kind: u8) -> f64 {
+    with_state(|s| {
+        let k = match kind {
+            1 => LayerKind::Shader,
+            2 => LayerKind::Waveform,
+            3 => LayerKind::Spectrum,
+            _ => LayerKind::Milkdrop,
+        };
+        s.compositor.add_layer(&s.ctx, k).map(|id| id as f64).unwrap_or(-1.0)
+    })
+    .unwrap_or(-1.0)
+}
+
+#[wasm_bindgen]
+pub fn remove_layer(id: f64) {
+    with_state(|s| s.compositor.remove_layer(id as u64));
+}
+
+#[wasm_bindgen]
+pub fn duplicate_layer(id: f64) -> f64 {
+    with_state(|s| s.compositor.duplicate_layer(&s.ctx, id as u64).map(|i| i as f64).unwrap_or(-1.0)).unwrap_or(-1.0)
+}
+
+#[wasm_bindgen]
+pub fn move_layer(id: f64, up: bool) {
+    with_state(|s| s.compositor.move_layer(id as u64, up));
+}
+
+#[wasm_bindgen]
+pub fn select_layer(id: f64) {
+    with_state(|s| s.compositor.set_selected(id as u64));
+}
+
+#[wasm_bindgen]
+pub fn set_layer_enabled(id: f64, enabled: bool) {
+    with_state(|s| s.compositor.set_enabled(id as u64, enabled));
+}
+
+#[wasm_bindgen]
+pub fn set_layer_visible(id: f64, visible: bool) {
+    with_state(|s| s.compositor.set_visible(id as u64, visible));
+}
+
+#[wasm_bindgen]
+pub fn set_layer_opacity(id: f64, opacity: f32) {
+    with_state(|s| s.compositor.set_opacity(id as u64, opacity));
+}
+
+#[wasm_bindgen]
+pub fn set_layer_blend(id: f64, blend: u32) {
+    with_state(|s| s.compositor.set_blend(id as u64, blend));
+}
+
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn set_layer_transform(id: f64, px: f32, py: f32, sx: f32, sy: f32, rot: f32) {
+    with_state(|s| s.compositor.set_transform(id as u64, px, py, sx, sy, rot));
+}
+
+#[wasm_bindgen]
+pub fn rename_layer(id: f64, name: String) {
+    with_state(|s| s.compositor.rename_layer(id as u64, name));
+}
+
+#[wasm_bindgen]
+pub fn layers_json() -> String {
+    with_state(|s| s.compositor.layers_json()).unwrap_or_else(|| "[]".into())
+}
+
+#[wasm_bindgen]
+pub fn selected_controls_json() -> String {
+    with_state(|s| s.compositor.selected_controls_json()).unwrap_or_else(|| "{}".into())
+}
+
+// --- Scenes ---------------------------------------------------------------
+
+#[wasm_bindgen]
+pub fn export_scene() -> String {
+    with_state(|s| {
+        let scene = s.compositor.export_scene(s.clock.scale(), s.clock.paused(), s.tempo.bpm(), s.tempo.manual(), 1.0);
+        pm_scene::to_json(&scene)
+    })
+    .unwrap_or_else(|| "{}".into())
+}
+
+/// Import a scene transactionally: parse + validate first, and only swap the
+/// live stack in on success — a bad import preserves the current scene.
+#[wasm_bindgen]
+pub fn import_scene(json: String) -> String {
+    with_state(|s| match pm_scene::parse_scene(&json) {
+        Ok(scene) => {
+            s.compositor.import_scene(&s.ctx, &scene);
+            s.clock.set_scale(scene.speed);
+            s.clock.set_paused(scene.paused);
+            if scene.tempo_manual {
+                s.tempo.set_manual_bpm(scene.bpm);
+            } else {
+                s.tempo.set_manual(false);
+            }
+            "{\"ok\":true}".to_string()
+        }
+        Err(e) => format!("{{\"ok\":false,\"error\":{}}}", json_string(&e)),
+    })
+    .unwrap_or_else(|| "{\"ok\":false,\"error\":\"app not ready\"}".into())
+}
+
+#[wasm_bindgen]
+pub fn reset_scene() {
+    with_state(|s| s.compositor.load_default(&s.ctx));
 }
 
 fn request_animation_frame(f: &Closure<dyn FnMut()>) {

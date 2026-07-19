@@ -11,7 +11,7 @@ import { search, searchKeymap, highlightSelectionMatches } from '@codemirror/sea
 import { lintGutter, setDiagnostics, type Diagnostic as CmDiagnostic } from '@codemirror/lint';
 import { cpp } from '@codemirror/lang-cpp';
 import { oneDark } from '@codemirror/theme-one-dark';
-import { set_shader_source, set_render_source } from './pm_web/pm_web.js';
+import { set_shader_source } from './pm_web/pm_web.js';
 import { EXAMPLES } from './examples';
 
 interface RustDiagnostic {
@@ -42,17 +42,16 @@ export class ShaderConsole {
   private mode: Mode = 'shadertoy';
   private auto = false;
   private autoTimer: number | undefined;
-  private switchedOnce = false;
+  private hostEl: HTMLElement;
 
   private status: HTMLElement;
   private errorPanel: HTMLElement;
 
-  /** Called after a successful compile switches the render source to the shader. */
-  onRenderSource: ((s: 'preset' | 'shader') => void) | null = null;
   /** Called after a successful compile with the shader's declared controls. */
   onControls: ((controls: ShaderControl[]) => void) | null = null;
 
   constructor(host: HTMLElement) {
+    this.hostEl = host;
     host.innerHTML = `
       <div class="sc-bar">
         <select id="sc-example" title="Load an example"></select>
@@ -133,6 +132,14 @@ export class ShaderConsole {
     this.view.dispatch({ changes: { from: 0, to: this.view.state.doc.length, insert: src } });
   }
 
+  /** Load a selected shader layer's source + mode into the editor (no compile —
+   *  the layer's last-known-good shader is already rendering). */
+  loadLayer(source: string, mode: number): void {
+    this.mode = mode === 1 ? 'raw' : 'shadertoy';
+    (this.hostEl.querySelector('#sc-mode') as HTMLSelectElement).value = this.mode;
+    this.setSource(source);
+  }
+
   private onDocChanged(): void {
     if (!this.auto) return;
     // Debounce so we never compile mid-keystroke.
@@ -157,12 +164,6 @@ export class ShaderConsole {
       this.setStatus(`✓ compiled in ${report.compileMs.toFixed(1)} ms`);
       this.errorPanel.textContent = '';
       this.onControls?.(report.controls ?? []);
-      // First successful compile switches the canvas to the shader.
-      if (!this.switchedOnce) {
-        set_render_source(1);
-        this.switchedOnce = true;
-        this.onRenderSource?.('shader');
-      }
     } else {
       this.setStatus(`✗ ${report.diagnostics.length} error(s) — previous shader kept`);
       this.errorPanel.textContent = report.diagnostics
