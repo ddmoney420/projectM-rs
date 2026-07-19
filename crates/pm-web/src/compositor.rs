@@ -805,7 +805,8 @@ impl Compositor {
             .iter()
             .map(|l| {
                 format!(
-                    "{{\"id\":{},\"name\":{},\"kind\":\"{}\",\"enabled\":{},\"visible\":{},\"opacity\":{:.3},\"blend\":{},\"selected\":{}}}",
+                    "{{\"id\":{},\"name\":{},\"kind\":\"{}\",\"enabled\":{},\"visible\":{},\"opacity\":{:.3},\"blend\":{},\"selected\":{},\
+                     \"tx\":{:.4},\"ty\":{:.4},\"sx\":{:.4},\"sy\":{:.4},\"rot\":{:.4}}}",
                     l.id,
                     json_str(&l.name),
                     l.kind_str(),
@@ -814,6 +815,11 @@ impl Compositor {
                     l.opacity,
                     l.blend.as_u32(),
                     self.selected == Some(l.id),
+                    l.transform.pos[0],
+                    l.transform.pos[1],
+                    l.transform.scale[0],
+                    l.transform.scale[1],
+                    l.transform.rotation,
                 )
             })
             .collect();

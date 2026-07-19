@@ -112,6 +112,12 @@
       .lp-body { display: flex; gap: .4rem; align-items: center; margin-top: .3rem; }
       .lp-body input[type="range"] { width: 90px; }
       .lp-scene { margin-top: .3rem; border-top: 1px solid rgba(255,255,255,.08); padding-top: .4rem; }
+      #lp-transform:empty { display: none; }
+      .lp-xform { border-top: 1px solid rgba(255,255,255,.08); padding-top: .4rem; margin-top: .3rem; }
+      .lp-xform label { display: flex; align-items: center; gap: .4rem; margin: .12rem 0; font-size: 12px; }
+      .lp-xform input[type="range"] { flex: 1; }
+      .lp-xhead { display: flex; justify-content: space-between; opacity: .75; margin-bottom: .2rem; }
+      .lp-xform .reset { margin-top: .3rem; }
 
       /* Effects rack (right-docked) */
       #effects { position: fixed; top: 0; bottom: 44px; right: 0; width: min(320px, 92vw);

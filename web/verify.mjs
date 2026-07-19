@@ -46,6 +46,8 @@ const run = async () => {
   const openLayers = async () => { if (!(await page.locator('#layers.open').count())) await page.click('#layers-btn'); await sleep(250); };
   const openConsole = async () => { if (!(await page.locator('#console.open').count())) await page.click('#console-btn'); await sleep(250); };
   const rows = () => page.locator('#lp-list .lp-row').count();
+  // Range inputs need value + input event (Playwright fill() rejects type=range).
+  const setRange = (sel, val) => page.$eval(sel, (e, v) => { e.value = v; e.dispatchEvent(new Event('input', { bubbles: true })); }, String(val));
 
   await page.goto(URL_BASE, { waitUntil: 'load' });
   await sleep(3500);
@@ -164,6 +166,35 @@ const run = async () => {
   const se = sceneEff ? JSON.parse(sceneEff) : {};
   results.sceneGlobalEffects = (se.global_effects || []).length;
   results.sceneLayerHasEffects = (se.layers || []).some((l) => (l.effects || []).length > 0);
+
+  // --- Per-layer transform (Phase 6 follow-up) ----------------------------
+  await openLayers();
+  // Select the Waveform layer (duplicable, visible) and transform it.
+  await page.locator('#lp-list .lp-row').filter({ has: page.locator('.nm[title="waveform"]') }).first().locator('.nm').click();
+  await sleep(300);
+  await setRange('#lp-transform .tx', 0.3);
+  await setRange('#lp-transform .sx', 0.6);
+  await setRange('#lp-transform .sy', 0.6);
+  await setRange('#lp-transform .rot', 0.5);
+  await sleep(400);
+  await shot(page, 'p6-10-transformed');
+  {
+    const scn = JSON.parse((await page.evaluate(() => localStorage.getItem('pm-web-scene-v1'))) || '{}');
+    const wf = (scn.layers || []).find((l) => l.source.kind === 'waveform');
+    results.transformSaved = !!wf && Math.abs(wf.transform.pos[0] - 0.3) < 0.03 && Math.abs(wf.transform.scale[0] - 0.6) < 0.03;
+  }
+  // Duplicate the transformed layer → the copy inherits the transform.
+  await page.locator('#lp-list .lp-row.sel .dup').click();
+  await sleep(400);
+  {
+    const scn = JSON.parse((await page.evaluate(() => localStorage.getItem('pm-web-scene-v1'))) || '{}');
+    const transformedWf = (scn.layers || []).filter((l) => l.source.kind === 'waveform' && Math.abs(l.transform.pos[0] - 0.3) < 0.03);
+    results.dupInheritsTransform = transformedWf.length >= 2;
+  }
+  // Reset transform on the current (duplicate) selection → identity.
+  await page.locator('#lp-transform .reset').click();
+  await sleep(300);
+  results.resetTransform = (await page.locator('#lp-transform .tx').inputValue()) === '0';
 
   // Invalid scene import must be rejected (keep current).
   const badPath = p('bad-scene.json');

@@ -12,6 +12,7 @@ import {
   set_layer_visible,
   set_layer_opacity,
   set_layer_blend,
+  set_layer_transform,
   rename_layer,
   layers_json,
   selected_controls_json,
@@ -23,6 +24,12 @@ import {
 const SCENE_KEY = 'pm-web-scene-v1';
 const BLEND = ['normal', 'add', 'screen', 'multiply', 'difference', 'lighten', 'darken'];
 
+const el = (html: string): HTMLElement => {
+  const t = document.createElement('template');
+  t.innerHTML = html.trim();
+  return t.content.firstElementChild as HTMLElement;
+};
+
 interface LayerInfo {
   id: number;
   name: string;
@@ -32,6 +39,11 @@ interface LayerInfo {
   opacity: number;
   blend: number;
   selected: boolean;
+  tx: number;
+  ty: number;
+  sx: number;
+  sy: number;
+  rot: number;
 }
 export interface SelectedShader {
   source: string;
@@ -56,6 +68,7 @@ export class LayerPanel {
         <button data-k="3">+ Spectrum</button>
       </div>
       <div id="lp-list"></div>
+      <div id="lp-transform"></div>
       <div class="lp-scene">
         <button id="lp-export">Export</button>
         <button id="lp-import">Import</button>
@@ -99,6 +112,42 @@ export class LayerPanel {
     this.list.innerHTML = '';
     // Render top-of-stack first (last composited = visually on top).
     [...layers].reverse().forEach((l) => this.list.appendChild(this.row(l)));
+    this.renderTransform(layers.find((l) => l.selected));
+  }
+
+  /** Transform sub-panel for the selected layer (position/scale/rotation).
+   *  Applies live via set_layer_transform — never recompiles a pipeline. Works
+   *  the same for every layer type (Milkdrop included: the transform is applied
+   *  to the layer's texture at composite time). */
+  private renderTransform(l: LayerInfo | undefined): void {
+    const host = this.host.querySelector('#lp-transform')!;
+    host.innerHTML = '';
+    if (!l) return;
+    const box = el(`<div class="lp-xform">
+      <div class="lp-xhead"><b>Transform</b> <span>${escapeHtml(l.name)}</span></div>
+      <label>X <input class="tx" type="range" min="-1" max="1" step="0.005" value="${l.tx}"></label>
+      <label>Y <input class="ty" type="range" min="-1" max="1" step="0.005" value="${l.ty}"></label>
+      <label><input class="lock" type="checkbox"> uniform scale</label>
+      <label>scaleX <input class="sx" type="range" min="0.1" max="4" step="0.01" value="${l.sx}"></label>
+      <label>scaleY <input class="sy" type="range" min="0.1" max="4" step="0.01" value="${l.sy}"></label>
+      <label>rot <input class="rot" type="range" min="-3.1416" max="3.1416" step="0.01" value="${l.rot}"></label>
+      <button class="reset">Reset transform</button>
+    </div>`);
+    const inp = (c: string) => box.querySelector(`.${c}`) as HTMLInputElement;
+    const apply = () => {
+      const lock = inp('lock').checked;
+      if (lock) inp('sy').value = inp('sx').value;
+      set_layer_transform(l.id, Number(inp('tx').value), Number(inp('ty').value), Number(inp('sx').value), Number(inp('sy').value), Number(inp('rot').value));
+      this.save();
+    };
+    ['tx', 'ty', 'sx', 'sy', 'rot'].forEach((c) => inp(c).addEventListener('input', apply));
+    inp('lock').addEventListener('change', apply);
+    box.querySelector('.reset')!.addEventListener('click', () => {
+      set_layer_transform(l.id, 0, 0, 1, 1, 0);
+      this.refresh();
+      this.save();
+    });
+    host.appendChild(box);
   }
 
   private row(l: LayerInfo): HTMLElement {
