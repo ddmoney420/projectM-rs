@@ -139,6 +139,42 @@
       .fx-param input[type="range"] { width: 110px; }
       .fx-mod { display: flex; gap: .35rem; align-items: center; margin-top: .2rem; opacity: .9; }
       .fx-mod .src { font-size: 11px; }
+
+      /* MIDI panel (right-docked) */
+      #midi { position: fixed; top: 0; bottom: var(--bar-h, 44px); right: 0; width: min(340px, 94vw);
+        overflow-y: auto; background: rgba(16,18,23,.97);
+        border-left: 1px solid rgba(255,255,255,.12); transform: translateX(101%);
+        transition: transform .18s ease; z-index: 6; padding: .5rem .6rem; }
+      #midi.open { transform: none; }
+      #midi button, #midi select, #midi input[type="number"] { background: #222833; color: #eee;
+        border: 1px solid #39424f; border-radius: 5px; padding: .25rem .5rem; cursor: pointer; font-size: 12px; }
+      #midi button.on { background: #1f6feb; border-color: #1f6feb; }
+      .midi-head { border-bottom: 1px solid rgba(255,255,255,.08); padding-bottom: .4rem; margin-bottom: .4rem; }
+      .midi-devices { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; margin-top: .35rem; }
+      .midi-on { color: #35d0a5; }
+      .midi-warn { color: #ffb08a; font-size: 12px; margin-top: .3rem; }
+      .midi-hint { opacity: .6; font-size: 12px; margin: .3rem 0; }
+      .midi-learn { display: flex; gap: .3rem; align-items: center; flex-wrap: wrap; margin-bottom: .5rem; }
+      .midi-learn #midi-target { flex: 1; min-width: 8rem; }
+      #midi-learn-state { font-size: 11px; opacity: .8; }
+      .midi-maps-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: .3rem; }
+      .midi-map { border: 1px solid rgba(255,255,255,.1); border-radius: 6px; padding: .3rem .4rem; margin-bottom: .35rem; }
+      .midi-map.unresolved { border-color: #ffb08a; opacity: .8; }
+      .mm-top { display: flex; justify-content: space-between; gap: .4rem; align-items: center; }
+      .mm-target { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .mm-del { padding: .1rem .35rem; }
+      .mm-info { display: flex; gap: .35rem; align-items: center; font-size: 11px; opacity: .85; margin: .2rem 0; flex-wrap: wrap; }
+      .mm-range { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; font-size: 11px; }
+      .mm-range input[type="number"] { width: 4rem; }
+      .mm-val { display: flex; gap: .4rem; align-items: center; margin-top: .25rem; }
+      .mm-bar { display: inline-block; width: 120px; height: 7px; border-radius: 4px;
+        background: rgba(255,255,255,.12); overflow: hidden; }
+      .mm-bar > span { display: block; height: 100%; background: #1f6feb; width: 0; }
+      .mm-num { font-size: 11px; font-variant-numeric: tabular-nums; opacity: .85; }
+      .midi-diag { border-top: 1px solid rgba(255,255,255,.08); margin-top: .5rem; padding-top: .4rem;
+        font-variant-numeric: tabular-nums; }
+      .midi-diag .row { display: flex; justify-content: space-between; gap: .5rem; padding: 1px 0; font-size: 12px; }
+      .midi-diag .k { opacity: .65; }
     </style>
   </head>
   <body>
@@ -176,6 +212,7 @@
       <button id="console-btn">Console</button>
       <button id="controls-btn">Controls</button>
       <button id="effects-btn">Effects</button>
+      <button id="midi-btn">MIDI</button>
       <span class="sep"></span>
       <button id="share-btn" title="Copy a shareable URL of the current scene (nothing is uploaded)">Share</button>
       <button id="rec-btn" title="Record the canvas to a WebM file">Rec</button>
@@ -189,6 +226,7 @@
     <div id="controls"><div id="controls-host"></div></div>
     <div id="layers"><div id="layers-host"></div></div>
     <div id="effects"><div id="effects-host"></div></div>
+    <div id="midi"><div id="midi-host"></div></div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

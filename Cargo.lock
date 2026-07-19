@@ -1529,6 +1529,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-midi"
+version = "0.0.1"
+dependencies = [
+ "pm-params",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-params"
 version = "0.0.1"
 
@@ -1580,6 +1589,7 @@ dependencies = [
  "pm-audio",
  "pm-core",
  "pm-glsl",
+ "pm-midi",
  "pm-params",
  "pm-preset",
  "pm-render",

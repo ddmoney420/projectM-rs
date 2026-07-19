@@ -884,7 +884,14 @@ impl Compositor {
     /// only swaps this in after we return Ok, so a bad import keeps the old one).
     pub fn import_scene(&mut self, ctx: &GpuContext, scene: &SceneData) {
         self.layers.clear();
-        self.next_id = 1;
+        // Preserve each layer's and effect's stored id so it stays a stable
+        // address across a save/reload (MIDI mappings key on these ids). Ids
+        // that are 0 or collide get a fresh fallback; counters advance past the
+        // max so newly-added layers/effects never reuse a live id.
+        let mut used_layer: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut fallback_layer = 1u64;
+        let mut max_layer = 0u64;
+        let mut max_effect = 0u64;
         for ld in &scene.layers {
             let kind = match &ld.source {
                 SourceState::Milkdrop => LayerKind::Milkdrop,
@@ -924,17 +931,17 @@ impl Compositor {
                 | (SourceState::Spectrum(cfg), Runtime::Spectrum(o)) => o.cfg = cfg.clone().into(),
                 _ => {}
             }
-            let id = self.next_id;
-            self.next_id += 1;
-            let mut chain = EffectChain::default();
-            {
-                let next = &mut self.next_effect_id;
-                chain.from_data(&ld.effects, &mut || {
-                    let eid = *next;
-                    *next += 1;
-                    eid
-                });
+            let mut id = ld.id;
+            if id == 0 || used_layer.contains(&id) {
+                while used_layer.contains(&fallback_layer) {
+                    fallback_layer += 1;
+                }
+                id = fallback_layer;
             }
+            used_layer.insert(id);
+            max_layer = max_layer.max(id);
+            let mut chain = EffectChain::default();
+            max_effect = max_effect.max(chain.from_data(&ld.effects));
             self.layers.push(Layer {
                 id,
                 name: ld.name.clone(),
@@ -949,14 +956,9 @@ impl Compositor {
             });
         }
         // Rebuild global effects (feedback history starts clean).
-        {
-            let next = &mut self.next_effect_id;
-            self.global_chain.from_data(&scene.global_effects, &mut || {
-                let eid = *next;
-                *next += 1;
-                eid
-            });
-        }
+        max_effect = max_effect.max(self.global_chain.from_data(&scene.global_effects));
+        self.next_id = max_layer + 1;
+        self.next_effect_id = max_effect + 1;
         self.selected = self.layers.first().map(|l| l.id);
     }
 }
@@ -970,6 +972,153 @@ impl Layer {
             Runtime::Spectrum(_) => "spectrum",
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// MIDI target access: stable-id getters/setters and target enumeration. All
+// keyed by the persistent layer/effect ids (see `import_scene`), so a mapping
+// stays valid across reload and reorder. Setters reuse the same clamping paths
+// as the mouse UI, so MIDI never bypasses a safety limit.
+// ---------------------------------------------------------------------------
+impl Compositor {
+    pub fn has_layer(&self, id: u64) -> bool {
+        self.layers.iter().any(|l| l.id == id)
+    }
+    pub fn opacity(&self, id: u64) -> Option<f32> {
+        self.layers.iter().find(|l| l.id == id).map(|l| l.opacity)
+    }
+    pub fn layer_enabled(&self, id: u64) -> Option<bool> {
+        self.layers.iter().find(|l| l.id == id).map(|l| l.enabled)
+    }
+    pub fn layer_visible(&self, id: u64) -> Option<bool> {
+        self.layers.iter().find(|l| l.id == id).map(|l| l.visible)
+    }
+
+    pub fn transform_field(&self, id: u64, field: &str) -> Option<f32> {
+        let l = self.layers.iter().find(|l| l.id == id)?;
+        Some(match field {
+            "px" => l.transform.pos[0],
+            "py" => l.transform.pos[1],
+            "sx" => l.transform.scale[0],
+            "sy" => l.transform.scale[1],
+            "rot" => l.transform.rotation,
+            _ => return None,
+        })
+    }
+    pub fn set_transform_field(&mut self, id: u64, field: &str, v: f32) -> bool {
+        let Some(l) = self.layer_mut(id) else { return false };
+        match field {
+            "px" => l.transform.pos[0] = v,
+            "py" => l.transform.pos[1] = v,
+            "sx" => l.transform.scale[0] = v,
+            "sy" => l.transform.scale[1] = v,
+            "rot" => l.transform.rotation = v,
+            _ => return false,
+        }
+        l.transform.clamp();
+        true
+    }
+
+    fn shader_state(&self, id: u64) -> Option<&ShaderState> {
+        match &self.layers.iter().find(|l| l.id == id)?.runtime {
+            Runtime::Shader(s) => Some(s),
+            _ => None,
+        }
+    }
+    pub fn control_kind(&self, id: u64, slot: usize) -> Option<&'static str> {
+        let s = self.shader_state(id)?;
+        s.controls.iter().find(|c| c.slot as usize == slot).map(|c| c.kind.as_str())
+    }
+    pub fn control_scalar(&self, id: u64, slot: usize) -> Option<f32> {
+        let s = self.shader_state(id)?;
+        if slot < USER_SLOTS && s.controls.iter().any(|c| c.slot as usize == slot) {
+            Some(s.user_slots[slot][0])
+        } else {
+            None
+        }
+    }
+    pub fn set_control_scalar(&mut self, id: u64, slot: usize, v: f32) -> bool {
+        let Some(l) = self.layer_mut(id) else { return false };
+        let Runtime::Shader(s) = &mut l.runtime else { return false };
+        if slot < USER_SLOTS && s.controls.iter().any(|c| c.slot as usize == slot) {
+            let [mn, mx] = s.user_range[slot];
+            s.user_slots[slot][0] = v.clamp(mn.min(mx), mn.max(mx));
+            true
+        } else {
+            false
+        }
+    }
+    pub fn control_range(&self, id: u64, slot: usize) -> Option<[f32; 2]> {
+        let s = self.shader_state(id)?;
+        s.controls.iter().find(|c| c.slot as usize == slot).map(|c| [c.min, c.max])
+    }
+
+    pub fn has_effect(&self, target: u64, eid: u64) -> bool {
+        self.chain(target).map(|c| c.has(eid)).unwrap_or(false)
+    }
+    pub fn effect_param(&self, target: u64, eid: u64, idx: usize) -> Option<f32> {
+        self.chain(target).and_then(|c| c.param_base(eid, idx))
+    }
+    pub fn effect_param_range(&self, target: u64, eid: u64, idx: usize) -> Option<[f32; 2]> {
+        self.chain(target).and_then(|c| c.param_range(eid, idx))
+    }
+    pub fn effect_enabled(&self, target: u64, eid: u64) -> Option<bool> {
+        self.chain(target).and_then(|c| c.enabled(eid))
+    }
+
+    /// Append this compositor's MIDI-mappable targets (layers, their transforms,
+    /// shader controls, and per-layer + global effects) as JSON objects. Global
+    /// engine targets (speed/tempo/transport) are added by the caller.
+    pub fn append_midi_targets(&self, out: &mut Vec<String>) {
+        for l in &self.layers {
+            let group = format!("{} #{}", l.name, l.id);
+            let lp = format!("layer.{}", l.id);
+            out.push(target_json(&format!("{lp}.opacity"), "Opacity", &group, "continuous", 0.0, 1.0));
+            out.push(target_json(&format!("{lp}.enabled"), "Enabled", &group, "toggle", 0.0, 1.0));
+            out.push(target_json(&format!("{lp}.visible"), "Visible", &group, "toggle", 0.0, 1.0));
+            out.push(target_json(&format!("{lp}.transform.px"), "Position X", &group, "continuous", -1.0, 1.0));
+            out.push(target_json(&format!("{lp}.transform.py"), "Position Y", &group, "continuous", -1.0, 1.0));
+            out.push(target_json(&format!("{lp}.transform.sx"), "Scale X", &group, "continuous", 0.1, 4.0));
+            out.push(target_json(&format!("{lp}.transform.sy"), "Scale Y", &group, "continuous", 0.1, 4.0));
+            out.push(target_json(&format!("{lp}.transform.rot"), "Rotation", &group, "continuous", -3.1416, 3.1416));
+
+            if let Runtime::Shader(s) = &l.runtime {
+                for c in &s.controls {
+                    let path = format!("{lp}.control.{}", c.slot);
+                    let label = format!("control: {}", c.name);
+                    match c.kind.as_str() {
+                        "bool" => out.push(target_json(&path, &label, &group, "toggle", 0.0, 1.0)),
+                        "trigger" => out.push(target_json(&path, &label, &group, "trigger", 0.0, 1.0)),
+                        _ => out.push(target_json(&path, &label, &group, "continuous", c.min, c.max)),
+                    }
+                }
+            }
+            append_effect_targets(&l.effects, &format!("{lp}.effect"), &format!("{group} · effects"), out);
+        }
+        append_effect_targets(&self.global_chain, "global.effect", "Global effects", out);
+    }
+}
+
+fn append_effect_targets(chain: &EffectChain, prefix: &str, group: &str, out: &mut Vec<String>) {
+    for (eid, kind, _enabled) in chain.ids_kinds() {
+        let ep = format!("{prefix}.{eid}");
+        out.push(target_json(&format!("{ep}.enabled"), &format!("{} enabled", kind.name()), group, "toggle", 0.0, 1.0));
+        for (i, (pname, min, max, _def)) in kind.params().iter().enumerate() {
+            out.push(target_json(&format!("{ep}.param.{i}"), &format!("{} · {pname}", kind.name()), group, "continuous", *min, *max));
+        }
+    }
+}
+
+fn target_json(path: &str, label: &str, group: &str, kind: &str, min: f32, max: f32) -> String {
+    format!(
+        "{{\"path\":{},\"label\":{},\"group\":{},\"kind\":\"{}\",\"min\":{},\"max\":{}}}",
+        json_str(path),
+        json_str(label),
+        json_str(group),
+        kind,
+        min,
+        max
+    )
 }
 
 fn apply_controls(s: &mut ShaderState, controls: &[Control]) {

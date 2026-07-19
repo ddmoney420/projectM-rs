@@ -11,6 +11,7 @@ members = [
     "crates/pm-glsl",
     "crates/pm-params",
     "crates/pm-scene",
+    "crates/pm-midi",
     "crates/pm-app",
     "crates/pm-web",
 ]

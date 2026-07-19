@@ -102,6 +102,18 @@ export class EffectRack {
     this.onChanged?.();
   }
 
+  /** Reflect live param base values (e.g. MIDI-driven) into the selected
+   *  effect's sliders in place, skipping any the user is dragging. */
+  syncValues(): void {
+    const sel = this.list().find((e) => e.selected);
+    if (!sel) return;
+    const inputs = this.host.querySelectorAll('#fx-params .fx-param .v');
+    sel.params.forEach((p, i) => {
+      const inp = inputs[i] as HTMLInputElement | undefined;
+      if (inp && document.activeElement !== inp) inp.value = String(p.base);
+    });
+  }
+
   private row(e: EInfo): HTMLElement {
     const row = document.createElement('div');
     row.className = 'fx-row' + (e.selected ? ' sel' : '');

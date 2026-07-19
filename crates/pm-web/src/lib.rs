@@ -25,12 +25,15 @@ use web_sys::HtmlCanvasElement;
 mod compositor;
 mod effects;
 mod live_shader;
+mod midi;
 mod overlay;
 
 use compositor::{Compositor, LayerKind};
+use midi::MidiRouter;
 use pm_audio::PCM;
 use pm_core::{PresetPlayer, WarpEngine, BUILTIN_PRESET, DEFAULT_TRANSITION_SECS};
 use pm_glsl::{ShaderMode, ShaderUniforms, AUDIO_TEX_HEIGHT, AUDIO_TEX_WIDTH};
+use pm_midi::{pickup_engage, smooth_step, MappingMode, MidiEvent};
 use pm_params::{AudioFeatures, Curve, Lfo, LfoWave, ModContext, ModSource, Parameter, Tempo, VisualClock};
 use pm_preset::Preset;
 use pm_render::GpuContext;
@@ -321,6 +324,7 @@ pub async fn run(canvas_id: String) -> Result<(), JsValue> {
         tempo: Tempo::default(),
         lfos: [Lfo::default(), Lfo::default(), Lfo::default(), Lfo::default()],
         frame: 0,
+        midi: MidiRouter::new(),
     }));
     APP.with(|a| *a.borrow_mut() = Some(state.clone()));
 
@@ -361,6 +365,8 @@ struct State {
     tempo: Tempo,
     lfos: [Lfo; 4],
     frame: u32,
+    /// MIDI performance control: mappings, learn state, and runtime.
+    midi: MidiRouter,
 }
 
 impl State {
@@ -510,6 +516,367 @@ impl State {
             .render(&self.ctx, &view, player_out, &audio, &uniforms, &modctx, time);
         frame.present();
     }
+}
+
+// ---------------------------------------------------------------------------
+// MIDI routing on the live engine. `handle_midi` is the single entry point for
+// both real Web-MIDI messages and dev/test-injected ones. It parses the event,
+// feeds MIDI-Learn, or applies every matching mapping. MIDI writes a
+// parameter's *base* value (or toggles/triggers); audio/LFO/beat modulation is
+// still applied afterwards by the render loop, so a MIDI-mapped control behaves
+// exactly like the same control moved by mouse.
+// ---------------------------------------------------------------------------
+impl State {
+    fn handle_midi(&mut self, device: &str, status: u8, d1: u8, d2: u8) {
+        let Some(ev) = MidiEvent::from_raw(status, d1, d2) else {
+            self.midi.diag.ignored += 1;
+            return;
+        };
+        self.midi.record_event(device, &ev);
+
+        if let Some(path) = self.midi.learn.clone() {
+            if ev.is_learnable() {
+                if let Some((kind, min, max)) = self.midi_target_meta(&path) {
+                    self.midi.add_learned(path, device, &ev, kind, min, max);
+                } else {
+                    self.midi.learn_cancel(); // target vanished mid-learn
+                }
+            }
+            return;
+        }
+
+        self.midi.updates.clear();
+        self.midi.bool_updates.clear();
+        let ids: Vec<u32> = self.midi.set.mappings.iter().filter(|m| m.matches(&ev, device)).map(|m| m.id).collect();
+        let mut applied = 0u32;
+        for id in ids {
+            let Some(m) = self.midi.set.find(id).cloned() else { continue };
+            if self.apply_mapping(&m, &ev) {
+                applied += 1;
+            }
+        }
+        self.midi.diag.applied = applied;
+    }
+
+    fn apply_mapping(&mut self, m: &pm_midi::Mapping, ev: &MidiEvent) -> bool {
+        match m.mode {
+            MappingMode::Absolute => {
+                let target = m.output(ev);
+                let cur = self.midi_current(&m.target).unwrap_or(target);
+                let engaged = if m.pickup {
+                    let thr = m.pickup_threshold();
+                    let prev = self.midi.prev_incoming.get(&m.id).copied();
+                    let e = pickup_engage(self.midi.pickup_engaged.get(&m.id).copied().unwrap_or(false), prev, target, cur, thr);
+                    self.midi.prev_incoming.insert(m.id, target);
+                    self.midi.pickup_engaged.insert(m.id, e);
+                    e
+                } else {
+                    true
+                };
+                if !engaged {
+                    return false;
+                }
+                let out = if m.smoothing > 0.0 {
+                    let prev = self.midi.last_output.get(&m.id).copied().unwrap_or(cur);
+                    smooth_step(prev, target, m.smoothing)
+                } else {
+                    target
+                };
+                if self.midi_set_value(&m.target, out) {
+                    self.midi.last_output.insert(m.id, out);
+                    self.midi.updates.push((m.target.clone(), out));
+                    true
+                } else {
+                    false
+                }
+            }
+            MappingMode::Toggle => {
+                if self.midi_rising_edge(m.id, ev) {
+                    let cur = self.midi_get_bool(&m.target).unwrap_or(false);
+                    if self.midi_set_bool(&m.target, !cur) {
+                        self.midi.bool_updates.push((m.target.clone(), !cur));
+                        return true;
+                    }
+                }
+                false
+            }
+            MappingMode::Momentary => {
+                let on = match ev {
+                    MidiEvent::NoteOn { velocity, .. } => *velocity > 0,
+                    MidiEvent::NoteOff { .. } => false,
+                    MidiEvent::Cc { value, .. } => pm_midi::is_on(*value),
+                    MidiEvent::PitchBend { value, .. } => (*value >> 7) as u8 >= pm_midi::ON_THRESHOLD,
+                };
+                if self.midi_set_bool(&m.target, on) {
+                    self.midi.bool_updates.push((m.target.clone(), on));
+                    true
+                } else {
+                    false
+                }
+            }
+            MappingMode::Trigger => {
+                if self.midi_rising_edge(m.id, ev) {
+                    self.midi_fire(&m.target)
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Rising-edge detector for toggle/trigger: a Note-On (vel>0), or a CC/bend
+    /// crossing the on-threshold from below. Edge state is tracked per mapping.
+    fn midi_rising_edge(&mut self, id: u32, ev: &MidiEvent) -> bool {
+        match ev {
+            MidiEvent::NoteOn { velocity, .. } => *velocity > 0,
+            MidiEvent::NoteOff { .. } => false,
+            MidiEvent::Cc { value, .. } => {
+                let on = pm_midi::is_on(*value);
+                let prev = self.midi.cc_on.insert(id, on).unwrap_or(false);
+                on && !prev
+            }
+            MidiEvent::PitchBend { value, .. } => {
+                let on = (*value >> 7) as u8 >= pm_midi::ON_THRESHOLD;
+                let prev = self.midi.cc_on.insert(id, on).unwrap_or(false);
+                on && !prev
+            }
+        }
+    }
+
+    // --- Target path dispatch (stable ids) ---------------------------------
+
+    fn midi_set_value(&mut self, path: &str, v: f32) -> bool {
+        let p: Vec<&str> = path.split('.').collect();
+        match p.as_slice() {
+            ["global", "speed"] => {
+                self.clock.set_scale(v.max(0.0));
+                true
+            }
+            ["global", "tempo", "bpm"] => {
+                self.tempo.set_manual(true);
+                self.tempo.set_manual_bpm(v);
+                true
+            }
+            ["layer", id, "opacity"] => match pid(id) {
+                Some(id) if self.compositor.has_layer(id) => {
+                    self.compositor.set_opacity(id, v);
+                    true
+                }
+                _ => false,
+            },
+            ["layer", id, "transform", f] => pid(id).map(|id| self.compositor.set_transform_field(id, f, v)).unwrap_or(false),
+            ["layer", id, "control", slot] => match (pid(id), slot.parse::<usize>()) {
+                (Some(id), Ok(slot)) => self.compositor.set_control_scalar(id, slot, v),
+                _ => false,
+            },
+            ["layer", id, "effect", eid, "param", idx] => self.set_effect_param_path(pid(id), eid, idx, v),
+            ["global", "effect", eid, "param", idx] => self.set_effect_param_path(Some(0), eid, idx, v),
+            _ => false,
+        }
+    }
+
+    fn set_effect_param_path(&mut self, target: Option<u64>, eid: &str, idx: &str, v: f32) -> bool {
+        match (target, pid(eid), idx.parse::<usize>()) {
+            (Some(t), Some(eid), Ok(idx)) if self.compositor.has_effect(t, eid) => {
+                self.compositor.set_effect_param(t, eid, idx, v);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn midi_current(&self, path: &str) -> Option<f32> {
+        let p: Vec<&str> = path.split('.').collect();
+        match p.as_slice() {
+            ["global", "speed"] => Some(self.clock.scale()),
+            ["global", "tempo", "bpm"] => Some(self.tempo.bpm()),
+            ["layer", id, "opacity"] => self.compositor.opacity(pid(id)?),
+            ["layer", id, "transform", f] => self.compositor.transform_field(pid(id)?, f),
+            ["layer", id, "control", slot] => self.compositor.control_scalar(pid(id)?, slot.parse().ok()?),
+            ["layer", id, "effect", eid, "param", idx] => self.compositor.effect_param(pid(id)?, pid(eid)?, idx.parse().ok()?),
+            ["global", "effect", eid, "param", idx] => self.compositor.effect_param(0, pid(eid)?, idx.parse().ok()?),
+            _ => None,
+        }
+    }
+
+    fn midi_get_bool(&self, path: &str) -> Option<bool> {
+        let p: Vec<&str> = path.split('.').collect();
+        match p.as_slice() {
+            ["global", "pause"] => Some(self.clock.paused()),
+            ["layer", id, "enabled"] => self.compositor.layer_enabled(pid(id)?),
+            ["layer", id, "visible"] => self.compositor.layer_visible(pid(id)?),
+            ["layer", id, "control", slot] => self.compositor.control_scalar(pid(id)?, slot.parse().ok()?).map(|v| v > 0.5),
+            ["layer", id, "effect", eid, "enabled"] => self.compositor.effect_enabled(pid(id)?, pid(eid)?),
+            ["global", "effect", eid, "enabled"] => self.compositor.effect_enabled(0, pid(eid)?),
+            _ => None,
+        }
+    }
+
+    fn midi_set_bool(&mut self, path: &str, on: bool) -> bool {
+        let p: Vec<&str> = path.split('.').collect();
+        match p.as_slice() {
+            ["global", "pause"] => {
+                self.clock.set_paused(on);
+                true
+            }
+            ["layer", id, "enabled"] => match pid(id) {
+                Some(id) if self.compositor.has_layer(id) => {
+                    self.compositor.set_enabled(id, on);
+                    true
+                }
+                _ => false,
+            },
+            ["layer", id, "visible"] => match pid(id) {
+                Some(id) if self.compositor.has_layer(id) => {
+                    self.compositor.set_visible(id, on);
+                    true
+                }
+                _ => false,
+            },
+            ["layer", id, "control", slot] => match (pid(id), slot.parse::<usize>()) {
+                (Some(id), Ok(slot)) => self.compositor.set_control_scalar(id, slot, if on { 1.0 } else { 0.0 }),
+                _ => false,
+            },
+            ["layer", id, "effect", eid, "enabled"] => self.set_effect_enabled_path(pid(id), eid, on),
+            ["global", "effect", eid, "enabled"] => self.set_effect_enabled_path(Some(0), eid, on),
+            _ => false,
+        }
+    }
+
+    fn set_effect_enabled_path(&mut self, target: Option<u64>, eid: &str, on: bool) -> bool {
+        match (target, pid(eid)) {
+            (Some(t), Some(eid)) if self.compositor.has_effect(t, eid) => {
+                self.compositor.set_effect_enabled(t, eid, on);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Fire a one-shot action. `app.*` paths are queued for JS to dispatch
+    /// (keeping MIDI decoupled from UI button handlers); everything else is an
+    /// engine action applied here.
+    fn midi_fire(&mut self, path: &str) -> bool {
+        if let Some(action) = path.strip_prefix("app.") {
+            self.midi.actions.push(action.to_string());
+            return true;
+        }
+        let p: Vec<&str> = path.split('.').collect();
+        match p.as_slice() {
+            ["global", "tempo", "tap"] => {
+                self.tempo.tap(js_sys::Date::now() / 1000.0);
+                true
+            }
+            ["global", "tempo", "beatPhaseReset"] => {
+                self.tempo.reset_phase();
+                true
+            }
+            ["global", "time", "reset"] => {
+                self.clock.reset();
+                self.frame = 0;
+                true
+            }
+            ["global", "feedback", "reset"] => {
+                self.compositor.reset_feedback(0);
+                true
+            }
+            ["layer", id, "feedback", "reset"] => match pid(id) {
+                Some(id) => {
+                    self.compositor.reset_feedback(id);
+                    true
+                }
+                None => false,
+            },
+            // A shader trigger control: pulse its slot to max.
+            ["layer", id, "control", slot] => match (pid(id), slot.parse::<usize>()) {
+                (Some(id), Ok(slot)) => self.compositor.set_control_scalar(id, slot, 1.0),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// `(kind, min, max)` for a target — kind is "continuous"/"toggle"/"trigger".
+    /// Used to pick the learn mode/range and to validate a mapping's target.
+    fn midi_target_meta(&self, path: &str) -> Option<(&'static str, f32, f32)> {
+        let p: Vec<&str> = path.split('.').collect();
+        Some(match p.as_slice() {
+            ["global", "speed"] => ("continuous", 0.0, 4.0),
+            ["global", "tempo", "bpm"] => ("continuous", 40.0, 240.0),
+            ["global", "pause"] => ("toggle", 0.0, 1.0),
+            ["global", "tempo", "tap"] => ("trigger", 0.0, 1.0),
+            ["global", "tempo", "beatPhaseReset"] => ("trigger", 0.0, 1.0),
+            ["global", "time", "reset"] => ("trigger", 0.0, 1.0),
+            ["global", "feedback", "reset"] => ("trigger", 0.0, 1.0),
+            ["app", ..] => ("trigger", 0.0, 1.0),
+            ["layer", id, "opacity"] if self.compositor.has_layer(pid(id)?) => ("continuous", 0.0, 1.0),
+            ["layer", id, "enabled"] | ["layer", id, "visible"] if self.compositor.has_layer(pid(id)?) => ("toggle", 0.0, 1.0),
+            ["layer", id, "transform", f] if self.compositor.has_layer(pid(id)?) => {
+                let (min, max) = match *f {
+                    "px" | "py" => (-1.0, 1.0),
+                    "sx" | "sy" => (0.1, 4.0),
+                    "rot" => (-3.1416, 3.1416),
+                    _ => return None,
+                };
+                ("continuous", min, max)
+            }
+            ["layer", id, "control", slot] => {
+                let (id, slot) = (pid(id)?, slot.parse::<usize>().ok()?);
+                let kind = match self.compositor.control_kind(id, slot)? {
+                    "bool" => "toggle",
+                    "trigger" => "trigger",
+                    _ => "continuous",
+                };
+                let [min, max] = self.compositor.control_range(id, slot).unwrap_or([0.0, 1.0]);
+                (kind, min, max)
+            }
+            ["layer", id, "effect", eid, "enabled"] if self.compositor.has_effect(pid(id)?, pid(eid)?) => ("toggle", 0.0, 1.0),
+            ["global", "effect", eid, "enabled"] if self.compositor.has_effect(0, pid(eid)?) => ("toggle", 0.0, 1.0),
+            ["layer", id, "effect", eid, "param", idx] => {
+                let [min, max] = self.compositor.effect_param_range(pid(id)?, pid(eid)?, idx.parse().ok()?)?;
+                ("continuous", min, max)
+            }
+            ["global", "effect", eid, "param", idx] => {
+                let [min, max] = self.compositor.effect_param_range(0, pid(eid)?, idx.parse().ok()?)?;
+                ("continuous", min, max)
+            }
+            _ => return None,
+        })
+    }
+
+    /// The full MIDI target registry as a JSON array (globals + engine targets).
+    fn midi_registry_json(&self) -> String {
+        let mut out: Vec<String> = Vec::new();
+        // Global engine + transport targets.
+        out.push(mk_target("global.speed", "Visual speed", "Global", "continuous", 0.0, 4.0));
+        out.push(mk_target("global.pause", "Pause / resume", "Global", "toggle", 0.0, 1.0));
+        out.push(mk_target("global.time.reset", "Reset visual time", "Global", "trigger", 0.0, 1.0));
+        out.push(mk_target("global.feedback.reset", "Reset feedback", "Global", "trigger", 0.0, 1.0));
+        out.push(mk_target("global.tempo.bpm", "Tempo BPM", "Tempo", "continuous", 40.0, 240.0));
+        out.push(mk_target("global.tempo.tap", "Tap tempo", "Tempo", "trigger", 0.0, 1.0));
+        out.push(mk_target("global.tempo.beatPhaseReset", "Beat phase reset", "Tempo", "trigger", 0.0, 1.0));
+        out.push(mk_target("app.record.toggle", "Recording start/stop", "Transport", "trigger", 0.0, 1.0));
+        self.compositor.append_midi_targets(&mut out);
+        format!("[{}]", out.join(","))
+    }
+}
+
+/// Build one registry target JSON object (mirror of `compositor::target_json`).
+fn mk_target(path: &str, label: &str, group: &str, kind: &str, min: f32, max: f32) -> String {
+    format!(
+        "{{\"path\":{},\"label\":{},\"group\":{},\"kind\":\"{}\",\"min\":{},\"max\":{}}}",
+        json_string(path),
+        json_string(label),
+        json_string(group),
+        kind,
+        min,
+        max
+    )
+}
+
+/// Parse a stable id from a path segment.
+fn pid(s: &str) -> Option<u64> {
+    s.parse().ok()
 }
 
 /// iDate as Shadertoy expects: (year, month0-11, day-of-month, seconds-since-midnight).
@@ -903,6 +1270,103 @@ pub fn effects_json(target: f64) -> String {
 #[wasm_bindgen]
 pub fn add_effect_preset(target: f64, preset: String) {
     with_state(|s| s.compositor.add_effect_preset(target as u64, &preset));
+}
+
+// --- MIDI (Phase 8b) ------------------------------------------------------
+
+/// The single entry point for a MIDI message. Real Web-MIDI messages and
+/// dev/test-injected ones both call this; there is no separate code path. A
+/// message that doesn't parse (system real-time, SysEx, program-change) is
+/// counted as ignored and has no effect on rendering/audio.
+#[wasm_bindgen]
+pub fn midi_handle(device: String, status: u8, d1: u8, d2: u8) {
+    with_state(|s| s.handle_midi(&device, status, d1, d2));
+}
+
+#[wasm_bindgen]
+pub fn midi_learn_start(target: String) {
+    with_state(|s| s.midi.learn_start(target));
+}
+#[wasm_bindgen]
+pub fn midi_learn_cancel() {
+    with_state(|s| s.midi.learn_cancel());
+}
+#[wasm_bindgen]
+pub fn midi_is_learning() -> bool {
+    with_state(|s| s.midi.is_learning()).unwrap_or(false)
+}
+#[wasm_bindgen]
+pub fn midi_clear_mapping(id: u32) {
+    with_state(|s| s.midi.clear(id));
+}
+#[wasm_bindgen]
+pub fn midi_clear_all() {
+    with_state(|s| s.midi.clear_all());
+}
+/// Edit one field of a mapping (range/invert/pickup/mode/channel/curve/…).
+#[wasm_bindgen]
+pub fn midi_set_mapping_field(id: u32, field: String, value: String) -> bool {
+    with_state(|s| s.midi.set_field(id, &field, &value)).unwrap_or(false)
+}
+#[wasm_bindgen]
+pub fn midi_mappings_json() -> String {
+    with_state(|s| {
+        // Precompute which targets still resolve so a deleted layer/effect shows
+        // as unresolved rather than crashing (avoids a self/self.midi borrow clash).
+        let valid: std::collections::HashSet<String> = s
+            .midi
+            .set
+            .mappings
+            .iter()
+            .map(|m| m.target.clone())
+            .filter(|t| s.midi_target_meta(t).is_some())
+            .collect();
+        s.midi.mappings_json(|p| valid.contains(p))
+    })
+    .unwrap_or_else(|| "[]".into())
+}
+#[wasm_bindgen]
+pub fn midi_registry_json() -> String {
+    with_state(|s| s.midi_registry_json()).unwrap_or_else(|| "[]".into())
+}
+/// Diagnostics; `enabled` and `device_count` are supplied by JS (which owns the
+/// Web-MIDI access + device list).
+#[wasm_bindgen]
+pub fn midi_diag_json(enabled: bool, device_count: u32) -> String {
+    with_state(|s| s.midi.diag_json(enabled, device_count)).unwrap_or_else(|| "{}".into())
+}
+#[wasm_bindgen]
+pub fn midi_export() -> String {
+    with_state(|s| s.midi.export()).unwrap_or_else(|| "{\"version\":1,\"mappings\":[]}".into())
+}
+#[wasm_bindgen]
+pub fn midi_import(json: String) {
+    with_state(|s| s.midi.import(&json));
+}
+/// Drain queued app-side actions (e.g. `record.toggle`) for JS to dispatch.
+#[wasm_bindgen]
+pub fn midi_take_actions() -> String {
+    with_state(|s| s.midi.take_actions()).unwrap_or_else(|| "[]".into())
+}
+/// Drain the value-change feed so the UI can reflect MIDI-driven values.
+#[wasm_bindgen]
+pub fn midi_take_updates() -> String {
+    with_state(|s| s.midi.take_updates()).unwrap_or_else(|| "{\"values\":[],\"bools\":[]}".into())
+}
+/// The live value of a target (continuous `value` and/or boolean `bool`), for
+/// diagnostics and testing. Either field is null when not applicable.
+#[wasm_bindgen]
+pub fn midi_target_value(path: String) -> String {
+    with_state(|s| {
+        let v = s.midi_current(&path);
+        let b = s.midi_get_bool(&path);
+        format!(
+            "{{\"value\":{},\"bool\":{}}}",
+            v.map(|x| x.to_string()).unwrap_or_else(|| "null".into()),
+            b.map(|x| x.to_string()).unwrap_or_else(|| "null".into())
+        )
+    })
+    .unwrap_or_else(|| "{\"value\":null,\"bool\":null}".into())
 }
 
 fn request_animation_frame(f: &Closure<dyn FnMut()>) {

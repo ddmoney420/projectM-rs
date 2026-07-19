@@ -322,18 +322,56 @@ impl EffectChain {
         self.effects.iter().map(Effect::to_data).collect()
     }
 
-    /// Rebuild the chain from serialized data; unknown effect types are skipped.
-    pub fn from_data(&mut self, data: &[EffectData], id_alloc: &mut dyn FnMut() -> u64) {
+    // --- MIDI target introspection (stable ids) ----------------------------
+
+    /// `(id, kind, enabled)` for each effect, in order — used to enumerate
+    /// MIDI-mappable effect targets.
+    pub fn ids_kinds(&self) -> Vec<(u64, EffectKind, bool)> {
+        self.effects.iter().map(|e| (e.id, e.kind, e.enabled)).collect()
+    }
+    /// Live base value of an effect parameter (the MIDI-controlled value).
+    pub fn param_base(&self, id: u64, idx: usize) -> Option<f32> {
+        self.effects.iter().find(|e| e.id == id).and_then(|e| e.params.get(idx)).map(|p| p.base)
+    }
+    /// `[min, max]` for an effect parameter (from the effect type definition).
+    pub fn param_range(&self, id: u64, idx: usize) -> Option<[f32; 2]> {
+        self.effects.iter().find(|e| e.id == id).and_then(|e| e.params.get(idx)).map(|p| [p.min, p.max])
+    }
+    pub fn enabled(&self, id: u64) -> Option<bool> {
+        self.effects.iter().find(|e| e.id == id).map(|e| e.enabled)
+    }
+    pub fn has(&self, id: u64) -> bool {
+        self.effects.iter().any(|e| e.id == id)
+    }
+
+    /// Rebuild the chain from serialized data, **preserving** each effect's
+    /// stored id so it is a stable address (e.g. for MIDI mappings) across a
+    /// save/reload. Ids that are 0 or collide within the chain get a fresh
+    /// fallback id. Unknown effect types are skipped. Returns the highest id
+    /// used, so the caller can advance its global id counter past it.
+    pub fn from_data(&mut self, data: &[EffectData]) -> u64 {
         self.effects.clear();
+        let mut used: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut fallback = 1u64;
+        let mut max_id = 0u64;
         for d in data {
             if let Some(kind) = EffectKind::from_str(&d.effect_type) {
-                let id = id_alloc();
+                let mut id = d.id;
+                if id == 0 || used.contains(&id) {
+                    while used.contains(&fallback) {
+                        fallback += 1;
+                    }
+                    id = fallback;
+                }
+                used.insert(id);
+                max_id = max_id.max(id);
                 let mut e = Effect::new(id, kind);
                 e.apply_data(d);
                 self.effects.push(e);
             }
         }
         self.selected = self.effects.first().map(|e| e.id);
+        max_id
     }
 
     pub fn to_json(&self, chain_target: &str) -> String {

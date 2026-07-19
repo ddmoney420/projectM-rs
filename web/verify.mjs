@@ -51,7 +51,8 @@ const run = async () => {
   // Range inputs need value + input event (Playwright fill() rejects type=range).
   const setRange = (sel, val) => page.$eval(sel, (e, v) => { e.value = v; e.dispatchEvent(new Event('input', { bubbles: true })); }, String(val));
 
-  await page.goto(URL_BASE, { waitUntil: 'load' });
+  // ?miditest exposes window.__pmMidi (synthetic MIDI injection) in the prod build.
+  await page.goto(`${URL_BASE}?miditest=1`, { waitUntil: 'load' });
   await sleep(3500);
   await shot(page, 'p6-01-default'); // default scene: Milkdrop + Waveform
 
@@ -264,6 +265,226 @@ const run = async () => {
   results.fullscreenEntered = await page.evaluate(() => document.fullscreenElement != null);
   await page.evaluate(() => document.exitFullscreen?.());
   await sleep(300);
+
+  // --- Phase 8b: Web MIDI control (synthetic injection) -------------------
+  // Real hardware is unavailable to Playwright, so we drive the SAME handler
+  // real Web-MIDI uses via the ?miditest hook (window.__pmMidi).
+  const CH0 = 0xb0, CH3 = 0xb3, NOTE_ON = 0x90, NOTE_OFF = 0x80;
+  const inject = (dev, s, d1, d2) => page.evaluate(([a, b, c, e]) => window.__pmMidi.inject(a, b, c, e), [dev, s, d1, d2]);
+  const registry = async () => JSON.parse(await page.evaluate(() => window.__pmMidi.registry()));
+  const mappings = async () => JSON.parse(await page.evaluate(() => window.__pmMidi.mappings()));
+  const value = async (p) => page.evaluate((pp) => window.__pmMidi.value(pp), p); // hook returns an object
+  const setField = (id, f, v) => page.evaluate(([i, ff, vv]) => window.__pmMidi.setField(i, ff, vv), [id, f, String(v)]);
+  const mapById = async (id) => (await mappings()).find((m) => m.id === id);
+  const openMidi = async () => { if (!(await page.locator('#midi.open').count())) await page.click('#midi-btn'); await sleep(150); };
+  const openEffects = async () => { if (!(await page.locator('#effects.open').count())) await page.click('#effects-btn'); await sleep(150); };
+  // Learn a mapping via the panel workflow; returns the new mapping id.
+  const learn = async (target, s, d1, d2, dev = 'testdev') => {
+    await openMidi();
+    await page.waitForFunction((p) => { const el = document.getElementById('midi-target'); return !!el && Array.from(el.options).some((o) => o.value === p); }, target, { timeout: 3000 });
+    const before = (await mappings()).map((m) => m.id);
+    await page.selectOption('#midi-target', target);
+    await page.click('#midi-learn-btn');
+    await sleep(120);
+    await inject(dev, s, d1, d2);
+    await sleep(200);
+    const fresh = (await mappings()).find((m) => !before.includes(m.id));
+    return fresh ? fresh.id : null;
+  };
+
+  results.midiSupported = await page.evaluate(() => 'requestMIDIAccess' in navigator);
+  results.midiHookPresent = await page.evaluate(() => typeof window.__pmMidi?.inject === 'function');
+
+  // Give the shader layer a known continuous control (deterministic target).
+  await openLayers();
+  await page.locator('#lp-list .lp-row').filter({ has: page.locator('.nm[title="shader"]') }).first().locator('.nm').click();
+  await sleep(200);
+  await page.evaluate(() =>
+    window.__pmMidi.compileSelected(0, '// @control gain float 0.0 2.0 1.0\nvoid mainImage(out vec4 o, in vec2 f){ o = vec4(gain*0.5, 0.2, 0.5, 1.0); }'),
+  );
+  await sleep(400);
+
+  const reg = await registry();
+  const pick = (re, kind) => reg.find((t) => re.test(t.path) && (!kind || t.kind === kind));
+  const opacityT = pick(/^layer\.\d+\.opacity$/);
+  const controlT = pick(/^layer\.\d+\.control\.\d+$/, 'continuous');
+  const effectT = pick(/effect\.\d+\.param\.0$/, 'continuous');
+  const enabledT = pick(/^layer\.\d+\.enabled$/);
+  const visibleT = pick(/^layer\.\d+\.visible$/);
+  results.midiRegistry = { opacity: !!opacityT, control: !!controlT, effect: !!effectT, enabled: !!enabledT, count: reg.length };
+  const opLayerId = Number(opacityT.path.split('.')[1]);
+
+  // (1) MIDI Learn creates a mapping.
+  const opId = await learn(opacityT.path, CH0, 20, 100);
+  results.midiLearn = opId != null && (await mapById(opId)).target === opacityT.path;
+  await setField(opId, 'pickup', 'false');
+  await sleep(50);
+
+  // (2) CC → opacity, and the UI reflects it. Open the layers panel first so
+  //     the value-reflection tick (midiTick → syncValues) sees the update.
+  await openLayers();
+  await sleep(100);
+  await inject('testdev', CH0, 20, 127);
+  await sleep(300); // ≥2 midiTicks: drain update feed → syncValues
+  results.midiCcOpacity = Math.abs((await value(opacityT.path)).value - 1.0) < 0.02;
+  results.midiUiReflects = Math.abs(Number(await page.locator(`#lp-list .lp-row[data-id="${opLayerId}"] .op`).inputValue()) - 1.0) < 0.03;
+  await inject('testdev', CH0, 20, 0);
+  await sleep(120);
+  results.midiCcOpacityZero = (await value(opacityT.path)).value < 0.02;
+
+  // (3) Shader control + invert + range mapping.
+  const ctlId = await learn(controlT.path, CH0, 21, 64);
+  await setField(ctlId, 'pickup', 'false');
+  await sleep(40);
+  await inject('testdev', CH0, 21, 127);
+  await sleep(120);
+  results.midiShaderControl = Math.abs((await value(controlT.path)).value - controlT.max) < 0.05;
+  await setField(ctlId, 'invert', 'true');
+  await sleep(40);
+  await inject('testdev', CH0, 21, 0);
+  await sleep(120);
+  results.midiInvert = Math.abs((await value(controlT.path)).value - controlT.max) < 0.05;
+  await setField(ctlId, 'invert', 'false');
+  await setField(ctlId, 'out_min', '0');
+  await setField(ctlId, 'out_max', '0.5');
+  await sleep(40);
+  await inject('testdev', CH0, 21, 127);
+  await sleep(120);
+  results.midiRange = Math.abs((await value(controlT.path)).value - 0.5) < 0.03;
+
+  // (4) Effect parameter via MIDI.
+  const effId = await learn(effectT.path, CH0, 22, 100);
+  await setField(effId, 'pickup', 'false');
+  await sleep(40);
+  await inject('testdev', CH0, 22, 127);
+  await sleep(120);
+  results.midiEffectParam = Math.abs((await value(effectT.path)).value - effectT.max) < (effectT.max - effectT.min) * 0.05 + 0.01;
+
+  // (5) Toggle: Note-On flips layer.enabled each press.
+  const tglId = await learn(enabledT.path, NOTE_ON, 48, 100);
+  const enBefore = (await value(enabledT.path)).bool;
+  await inject('testdev', NOTE_ON, 48, 100);
+  await sleep(100);
+  const enAfter1 = (await value(enabledT.path)).bool;
+  await inject('testdev', NOTE_ON, 48, 100);
+  await sleep(100);
+  const enAfter2 = (await value(enabledT.path)).bool;
+  results.midiToggle = enAfter1 === !enBefore && enAfter2 === enBefore;
+  void tglId;
+
+  // (6) Momentary: Note-On = on, Note-Off = off (on layer.visible).
+  const momId = await learn(visibleT.path, NOTE_ON, 49, 100);
+  await setField(momId, 'mode', 'momentary');
+  await sleep(40);
+  await inject('testdev', NOTE_OFF, 49, 0);
+  await sleep(100);
+  const momOff = (await value(visibleT.path)).bool;
+  await inject('testdev', NOTE_ON, 49, 100);
+  await sleep(100);
+  const momOn = (await value(visibleT.path)).bool;
+  results.midiMomentary = momOff === false && momOn === true;
+
+  // (7) Trigger → app action (record start), via the decoupled action queue.
+  await learn('app.record.toggle', NOTE_ON, 50, 100);
+  await inject('testdev', NOTE_ON, 50, 100);
+  await sleep(300); // action queue drained by midiTick (~100ms) → recorder starts
+  results.midiTriggerAction = await page.locator('#rec-btn.on').count() > 0;
+  if (results.midiTriggerAction) {
+    await page.click('#rec-btn'); // stop the recording we just started
+    await sleep(300);
+  }
+
+  // (8) Channel filter: a ch3 mapping ignores the same CC on ch0.
+  const chId = await learn(opacityT.path, CH3, 26, 100);
+  await setField(chId, 'pickup', 'false');
+  await sleep(40);
+  await inject('testdev', CH0, 20, 64); // opId sets opacity ≈0.5
+  await sleep(80);
+  await inject('testdev', CH0, 26, 127); // wrong channel for chId → ignored
+  await sleep(100);
+  const wrongChan = (await value(opacityT.path)).value;
+  await inject('testdev', CH3, 26, 127); // right channel → applies
+  await sleep(100);
+  const rightChan = (await value(opacityT.path)).value;
+  results.midiChannelFilter = Math.abs(wrongChan - 0.5) < 0.03 && Math.abs(rightChan - 1.0) < 0.02;
+
+  // (9) An unmapped CC is ignored.
+  await inject('testdev', CH0, 20, 38); // opacity ≈0.3
+  await sleep(80);
+  await inject('testdev', CH0, 77, 127); // CC77 unmapped
+  await sleep(100);
+  results.midiWrongCcIgnored = Math.abs((await value(opacityT.path)).value - 0.3) < 0.03;
+
+  // (10) Soft takeover (pickup): a far value waits, a near value engages.
+  await inject('testdev', CH0, 20, 102); // opacity ≈0.8 via opId
+  await sleep(80);
+  const puId = await learn(opacityT.path, CH0, 27, 100); // pickup on by default
+  await inject('testdev', CH0, 27, 10); // ≈0.08 — far from 0.8 → wait
+  await sleep(100);
+  const puWait = (await value(opacityT.path)).value;
+  const puEngagedBefore = (await mapById(puId)).engaged;
+  await inject('testdev', CH0, 27, 100); // ≈0.79 — within threshold of 0.8 → engage
+  await sleep(120);
+  const puEngagedAfter = (await mapById(puId)).engaged;
+  results.midiPickup = Math.abs(puWait - 0.8) < 0.03 && puEngagedBefore === false && puEngagedAfter === true;
+
+  // (11) MIDI base composes with an audio modulation on the same param.
+  await openEffects();
+  await page.click('#fx-global'); // ensure global chain (Phase 7 left it on Layer)
+  await sleep(150);
+  await page.selectOption('#fx-type', 'brightness');
+  await page.click('#fx-add');
+  await sleep(300);
+  await page.locator('#fx-params .fx-param').first().locator('.src').selectOption('bass');
+  await sleep(250); // effects onChanged → scene saved (mod persisted)
+  const reg2 = await registry();
+  const brightT = reg2.filter((t) => t.path.startsWith('global.effect') && /Brightness/.test(t.label) && /param\.0$/.test(t.path)).pop();
+  const brId = await learn(brightT.path, CH0, 28, 100);
+  await setField(brId, 'pickup', 'false');
+  await sleep(40);
+  await inject('testdev', CH0, 28, 127);
+  await sleep(120);
+  const brBase = (await value(brightT.path)).value;
+  const scnCompose = JSON.parse((await page.evaluate(() => localStorage.getItem('pm-web-scene-v1'))) || '{}');
+  const brEff = (scnCompose.global_effects || []).find((e) => e.effect_type === 'brightness');
+  results.midiComposeBase = brBase;
+  results.midiComposeSource = brEff?.params?.[0]?.source ?? null;
+  results.midiComposeWithMod = Math.abs(brBase - 1.0) < 0.05 && brEff?.params?.[0]?.source === 'bass';
+
+  // (12) Mapping survives a layer reorder (stable id).
+  await openLayers();
+  await page.locator(`#lp-list .lp-row[data-id="${opLayerId}"] .up`).click();
+  await sleep(200);
+  await inject('testdev', CH0, 20, 127);
+  await sleep(120);
+  results.midiSurvivesReorder = Math.abs((await value(opacityT.path)).value - 1.0) < 0.02 && (await mapById(opId)).resolved === true;
+
+  // (13) A deleted target becomes unresolved (no crash on later events).
+  await openLayers();
+  const wfRow = page.locator('#lp-list .lp-row').filter({ has: page.locator('.nm[title="waveform"]') }).first();
+  const wfId = await wfRow.getAttribute('data-id');
+  const delId = await learn(`layer.${wfId}.opacity`, CH0, 30, 100);
+  const delResolvedBefore = (await mapById(delId)).resolved;
+  await openLayers();
+  await page.locator(`#lp-list .lp-row[data-id="${wfId}"] .rm`).click();
+  await sleep(300);
+  const delResolvedAfter = (await mapById(delId)).resolved;
+  await inject('testdev', CH0, 30, 127); // must not throw
+  await sleep(100);
+  results.midiDeletedTargetUnresolved = delResolvedBefore === true && delResolvedAfter === false;
+
+  // (14) Mappings persist across reload. Navigate explicitly with ?miditest —
+  //      the earlier Share test's history.replaceState dropped the query, so a
+  //      bare reload would lose the injection hook.
+  await sleep(450); // flush debounced MIDI save
+  const beforeReload = await mappings();
+  await page.goto(`${URL_BASE}?miditest=1`, { waitUntil: 'load' });
+  await sleep(3500);
+  const afterReload = await mappings();
+  results.midiSurvivesReload = afterReload.length === beforeReload.length && afterReload.some((m) => m.target === opacityT.path);
+  await page.click('#midi-btn'); // open the panel so the screenshot shows restored mappings
+  await sleep(300);
+  await shot(page, 'p8b-01-midi');
 
   results.consolePanics = logs.filter((l) => /panicked|RuntimeError|unreachable/.test(l)).length;
   results.consoleErrors = logs.filter((l) => l.startsWith('[error]') || l.startsWith('[pageerror]')).length;

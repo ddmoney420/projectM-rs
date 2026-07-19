@@ -153,6 +153,7 @@ export class LayerPanel {
   private row(l: LayerInfo): HTMLElement {
     const row = document.createElement('div');
     row.className = 'lp-row' + (l.selected ? ' sel' : '');
+    row.dataset.id = String(l.id);
     row.innerHTML = `
       <div class="lp-head">
         <input class="en" type="checkbox" ${l.enabled ? 'checked' : ''} title="enabled" />
@@ -217,6 +218,29 @@ export class LayerPanel {
       }
     });
     return row;
+  }
+
+  /** Reflect live engine values (opacity + selected-layer transform) into the
+   *  existing sliders without a full rebuild — so MIDI-driven changes show up.
+   *  Skips any input the user is actively dragging. */
+  syncValues(): void {
+    const layers = this.layers();
+    for (const l of layers) {
+      const op = this.list.querySelector(`.lp-row[data-id="${l.id}"] .op`) as HTMLInputElement | null;
+      if (op && document.activeElement !== op) op.value = String(l.opacity);
+    }
+    const sel = layers.find((l) => l.selected);
+    if (sel) {
+      const setv = (c: string, v: number) => {
+        const e = this.host.querySelector(`#lp-transform .${c}`) as HTMLInputElement | null;
+        if (e && document.activeElement !== e) e.value = String(v);
+      };
+      setv('tx', sel.tx);
+      setv('ty', sel.ty);
+      setv('sx', sel.sx);
+      setv('sy', sel.sy);
+      setv('rot', sel.rot);
+    }
   }
 
   /** Notify listeners of the current selection + its shader state. */
