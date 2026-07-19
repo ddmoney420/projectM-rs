@@ -689,7 +689,11 @@ impl Compositor {
             if !enabled || !visible {
                 continue;
             }
-            let opaque = matches!(self.layers[i].kind(), LayerKind::Milkdrop | LayerKind::Shader);
+            // Only Milkdrop is opaque (its output alpha is unreliable). Shader
+            // layers use their real alpha: a compiled shader writes alpha 1
+            // (visible); an *un-compiled* shader layer is cleared transparent
+            // (alpha 0 → contributes nothing) instead of covering the stack black.
+            let opaque = matches!(self.layers[i].kind(), LayerKind::Milkdrop);
             let has_fx = !self.layers[i].effects.is_empty_enabled();
             let src_view: &wgpu::TextureView = if has_fx {
                 &self.layers[i].effect_output.view

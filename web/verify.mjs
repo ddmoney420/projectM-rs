@@ -59,9 +59,12 @@ const run = async () => {
   await shot(page, 'p6-02-layers-default');
   results.defaultRows = await rows();
 
-  // Add a Shader layer, make it semi-transparent so Milkdrop shows through.
+  // Add a Shader layer. Before compiling anything it must be transparent (an
+  // un-compiled shader layer must NOT black out the stack).
   await page.click('.lp-add button[data-k="1"]');
-  await sleep(300);
+  await sleep(500);
+  await shot(page, 'p7-04-empty-shader-nonblack');
+  // Then make it semi-transparent so Milkdrop shows through.
   await page.locator('#lp-list .lp-row').first().locator('.op').fill('0.55');
   await page.locator('#lp-list .lp-row').first().locator('.bl').selectOption('2'); // screen
   await sleep(200);
