@@ -9,8 +9,11 @@ import { ShaderConsole } from './shader-console';
 import { ControlsPanel } from './controls';
 import { LayerPanel } from './layers';
 import { EffectRack } from './effects-ui';
+import { Recorder, WakeLock, toggleFullscreen } from './output';
+import { copyShareUrl, loadFromUrl } from './share';
 
 let controlsPanel: ControlsPanel | null = null;
+let layerPanel: LayerPanel | null = null;
 
 const canvas = document.getElementById('viz') as HTMLCanvasElement;
 
@@ -135,9 +138,10 @@ function wireUI(): void {
   shaderConsole.onControls = (controls) => controlsPanel?.buildUserControls(controls);
 
   let selectedLayer: number | null = null;
-  const layerPanel = new LayerPanel($('layers-host'));
+  const lp = new LayerPanel($('layers-host'));
+  layerPanel = lp;
   const effectRack = new EffectRack($('effects-host'), () => selectedLayer);
-  effectRack.onChanged = () => layerPanel.save();
+  effectRack.onChanged = () => lp.save();
 
   layerPanel.onSelect = (kind, shader, layerId) => {
     selectedLayer = layerId;
@@ -168,6 +172,33 @@ function wireUI(): void {
     $('effects').classList.toggle('open');
     $('controls').classList.remove('open');
   });
+
+  wireOutput();
+}
+
+// --- Output & sharing: share URL, recording, fullscreen, wake lock --------
+
+function wireOutput(): void {
+  $('share-btn').addEventListener('click', async () => {
+    setStatus(await copyShareUrl());
+  });
+
+  const recorder = new Recorder();
+  const recBtn = $('rec-btn') as HTMLButtonElement;
+  recorder.onState = (on) => {
+    recBtn.classList.toggle('on', on);
+    recBtn.textContent = on ? '■ Stop' : 'Rec';
+    setStatus(on ? 'Recording…' : 'Recording saved');
+  };
+  recBtn.addEventListener('click', () => recorder.toggle(canvas, engine.captureAudioStream()));
+
+  $('full-btn').addEventListener('click', () => void toggleFullscreen(canvas));
+
+  const wake = new WakeLock();
+  const wakeBtn = $('wake-btn') as HTMLButtonElement;
+  if (!wake.supported) wakeBtn.style.display = 'none';
+  wake.onState = (held) => wakeBtn.classList.toggle('on', held);
+  wakeBtn.addEventListener('click', () => void wake.toggle());
 }
 
 // --- iMouse pointer handling ----------------------------------------------
@@ -267,10 +298,26 @@ async function boot(): Promise<void> {
   }
 
   // Renderer is up. Audio is optional and must not affect it.
-  $('ui').style.display = 'flex';
+  const ui = $('ui');
+  ui.style.display = 'flex';
+  // The control bar wraps on narrow widths; keep the side panels docked exactly
+  // above it (not under a hardcoded height) so they never cover the bar.
+  const syncBarHeight = () =>
+    document.documentElement.style.setProperty('--bar-h', `${ui.offsetHeight}px`);
+  new ResizeObserver(syncBarHeight).observe(ui);
+  syncBarHeight();
   wireAudioUI();
   wireUI();
   wireMouse();
+
+  // A shared scene in the URL fragment overrides the locally-restored scene.
+  if (await loadFromUrl()) {
+    layerPanel?.refresh();
+    layerPanel?.emitSelect();
+    layerPanel?.save();
+    setStatus('Loaded shared scene from URL');
+  }
+
   setInterval(updateDiagnostics, 200);
 }
 

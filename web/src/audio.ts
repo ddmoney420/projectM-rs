@@ -234,6 +234,19 @@ export class AudioEngine {
     if (this.ctx && this.ctx.state === 'suspended') await this.ctx.resume();
   }
 
+  /** A MediaStream of the mixed program audio (post master gain), for recording.
+   *  Taps the capture bus so it mirrors what the analyzer hears without altering
+   *  the audible graph. Returns null if no audio context exists yet. */
+  private recordDest: MediaStreamAudioDestinationNode | null = null;
+  captureAudioStream(): MediaStream | null {
+    if (!this.ctx || !this.captureBus) return null;
+    if (!this.recordDest) {
+      this.recordDest = this.ctx.createMediaStreamDestination();
+      this.captureBus.connect(this.recordDest);
+    }
+    return this.recordDest.stream;
+  }
+
   status(): AudioStatus {
     return {
       contextState: this.ctx?.state ?? 'none',

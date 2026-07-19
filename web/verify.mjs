@@ -41,6 +41,8 @@ const run = async () => {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   page.on('console', (m) => logs.push(`[${m.type()}] ${m.text()}`));
   page.on('pageerror', (e) => logs.push(`[pageerror] ${e.message}`));
+  // Share URL copies to the clipboard; grant so copyShareUrl takes the happy path.
+  try { await page.context().grantPermissions(['clipboard-read', 'clipboard-write']); } catch {}
 
   // Console + Layers are mutually-exclusive left panels; open the right one.
   const openLayers = async () => { if (!(await page.locator('#layers.open').count())) await page.click('#layers-btn'); await sleep(250); };
@@ -209,6 +211,59 @@ const run = async () => {
   await page.setViewportSize({ width: 900, height: 600 });
   await sleep(800);
   await shot(page, 'p6-09-resized');
+
+  // --- Phase 8: output & sharing ------------------------------------------
+
+  // Recording: start, let a couple of frames capture, stop → a WebM download.
+  const recBtn = page.locator('#rec-btn');
+  const dlPromise = page.waitForEvent('download', { timeout: 8000 }).catch(() => null);
+  await recBtn.click();
+  await sleep(300);
+  results.recStarted = (await recBtn.textContent())?.includes('Stop') === true;
+  await sleep(1500);
+  await recBtn.click(); // stop → triggers download
+  const dl = await dlPromise;
+  if (dl) {
+    const recPath = p('recording.webm');
+    await dl.saveAs(recPath);
+    results.recFilename = dl.suggestedFilename();
+    results.recBytes = readFileSync(recPath).length;
+  }
+  results.recDownloaded = !!dl && results.recBytes > 0;
+
+  // Share URL round-trip: capture the current scene's layer signature, build a
+  // share URL, open it in a fresh page, and confirm the scene is restored.
+  const sig = (scn) => (scn.layers || []).map((l) => l.source.kind).join(',');
+  const beforeScene = JSON.parse((await page.evaluate(() => localStorage.getItem('pm-web-scene-v1'))) || '{}');
+  results.shareBeforeSig = sig(beforeScene);
+  await page.locator('#share-btn').click();
+  await sleep(500);
+  const shareUrl = await page.evaluate(() => location.href);
+  results.shareUrlHasScene = shareUrl.includes('#s=');
+
+  // Fresh page loads the shared URL. Clear localStorage first so a restored
+  // scene can only come from the URL fragment, not prior persistence.
+  const page2 = await browser.newPage({ viewport: { width: 1000, height: 700 } });
+  page2.on('console', (m) => logs.push(`[p2:${m.type()}] ${m.text()}`));
+  page2.on('pageerror', (e) => logs.push(`[p2:pageerror] ${e.message}`));
+  await page2.goto(URL_BASE, { waitUntil: 'load' });
+  await page2.evaluate(() => localStorage.removeItem('pm-web-scene-v1'));
+  await page2.goto(shareUrl, { waitUntil: 'load' });
+  await sleep(3500);
+  const afterScene = JSON.parse((await page2.evaluate(() => localStorage.getItem('pm-web-scene-v1'))) || '{}');
+  results.shareAfterSig = sig(afterScene);
+  results.shareRoundTrip = results.shareBeforeSig.length > 0 && results.shareAfterSig === results.shareBeforeSig;
+  await shot(page2, 'p8-01-shared-scene-restored');
+  await page2.close();
+
+  // Fullscreen last (it puts the canvas in the top layer): a Playwright click is
+  // a trusted gesture so requestFullscreen should take. Exit programmatically —
+  // the Escape key is unreliable under automation.
+  await page.locator('#full-btn').click();
+  await sleep(400);
+  results.fullscreenEntered = await page.evaluate(() => document.fullscreenElement != null);
+  await page.evaluate(() => document.exitFullscreen?.());
+  await sleep(300);
 
   results.consolePanics = logs.filter((l) => /panicked|RuntimeError|unreachable/.test(l)).length;
   results.consoleErrors = logs.filter((l) => l.startsWith('[error]') || l.startsWith('[pageerror]')).length;

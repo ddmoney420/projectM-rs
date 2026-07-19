@@ -52,7 +52,7 @@
       .src-toggle button.on { background: #1f6feb; }
 
       /* Shader console panel (left-docked, slides in) */
-      #console { position: fixed; top: 0; bottom: 44px; left: 0; width: min(520px, 92vw);
+      #console { position: fixed; top: 0; bottom: var(--bar-h, 44px); left: 0; width: min(520px, 92vw);
         display: flex; flex-direction: column; background: rgba(16,18,23,.96);
         border-right: 1px solid rgba(255,255,255,.12); transform: translateX(-101%);
         transition: transform .18s ease; z-index: 5; }
@@ -73,7 +73,7 @@
       #sc-errors:empty { display: none; }
 
       /* Controls panel (right-docked, slides in) */
-      #controls { position: fixed; top: 0; bottom: 44px; right: 0; width: min(320px, 92vw);
+      #controls { position: fixed; top: 0; bottom: var(--bar-h, 44px); right: 0; width: min(320px, 92vw);
         overflow-y: auto; background: rgba(16,18,23,.96);
         border-left: 1px solid rgba(255,255,255,.12); transform: translateX(101%);
         transition: transform .18s ease; z-index: 5; padding: .5rem .6rem; }
@@ -95,7 +95,7 @@
       #controls b { font-weight: 600; }
 
       /* Layer stack panel (left, above console in z so it wins when both open) */
-      #layers { position: fixed; top: 0; bottom: 44px; left: 0; width: min(300px, 92vw);
+      #layers { position: fixed; top: 0; bottom: var(--bar-h, 44px); left: 0; width: min(300px, 92vw);
         overflow-y: auto; background: rgba(16,18,23,.97);
         border-right: 1px solid rgba(255,255,255,.12); transform: translateX(-101%);
         transition: transform .18s ease; z-index: 6; padding: .5rem .55rem; }
@@ -120,7 +120,7 @@
       .lp-xform .reset { margin-top: .3rem; }
 
       /* Effects rack (right-docked) */
-      #effects { position: fixed; top: 0; bottom: 44px; right: 0; width: min(320px, 92vw);
+      #effects { position: fixed; top: 0; bottom: var(--bar-h, 44px); right: 0; width: min(320px, 92vw);
         overflow-y: auto; background: rgba(16,18,23,.97);
         border-left: 1px solid rgba(255,255,255,.12); transform: translateX(101%);
         transition: transform .18s ease; z-index: 6; padding: .5rem .6rem; }
@@ -176,6 +176,11 @@
       <button id="console-btn">Console</button>
       <button id="controls-btn">Controls</button>
       <button id="effects-btn">Effects</button>
+      <span class="sep"></span>
+      <button id="share-btn" title="Copy a shareable URL of the current scene (nothing is uploaded)">Share</button>
+      <button id="rec-btn" title="Record the canvas to a WebM file">Rec</button>
+      <button id="full-btn" title="Fullscreen">⛶</button>
+      <button id="wake-btn" title="Keep the screen awake">Keep awake</button>
       <label>master <input id="master-gain" type="range" min="0" max="2" step="0.01" value="1" /></label>
       <span id="audio-status">No audio source</span>
     </div>
