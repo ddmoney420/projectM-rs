@@ -6,6 +6,9 @@
 import init, { run, webgpu_supported, get_diagnostics, set_render_source, set_mouse } from './pm_web/pm_web.js';
 import { AudioEngine } from './audio';
 import { ShaderConsole } from './shader-console';
+import { ControlsPanel } from './controls';
+
+let controlsPanel: ControlsPanel | null = null;
 
 const canvas = document.getElementById('viz') as HTMLCanvasElement;
 
@@ -132,8 +135,11 @@ function wireConsole(): void {
     srcShader.classList.toggle('on', s === 'shader');
   };
 
+  controlsPanel = new ControlsPanel($('controls-host'));
+
   const console_ = new ShaderConsole($('console-host'));
   console_.onRenderSource = (s) => setSourceUI(s);
+  console_.onControls = (controls) => controlsPanel?.buildUserControls(controls);
 
   srcPreset.addEventListener('click', () => {
     set_render_source(0);
@@ -144,6 +150,7 @@ function wireConsole(): void {
     setSourceUI('shader');
   });
   $('console-btn').addEventListener('click', () => panel.classList.toggle('open'));
+  $('controls-btn').addEventListener('click', () => $('controls').classList.toggle('open'));
   setSourceUI('preset');
 }
 
@@ -194,8 +201,11 @@ function updateDiagnostics(): void {
   const rows: [string, string][] = [
     ['render source', d.shaderSource ? 'live shader' : 'milkdrop'],
     ['iTime', `${((d.time as number) ?? 0).toFixed(2)} s`],
+    ['speed', `${((d.scale as number) ?? 1).toFixed(2)}× ${d.paused ? '(paused)' : ''}`],
     ['frame', String(d.frame ?? 0)],
     ['resolution', `${d.width ?? 0}×${d.height ?? 0}`],
+    ['BPM', `${((d.bpm as number) ?? 0).toFixed(0)} ${d.tempoManual ? '(man)' : '(auto)'}`],
+    ['beat', `${bar(d.beatPulse as number)} phase ${((d.beatPhase as number) ?? 0).toFixed(2)}`],
     ['crossOriginIsolated', String(self.crossOriginIsolated === true)],
     ['transport', s.shared ? 'SharedArrayBuffer' : 'postMessage (fallback)'],
     ['AudioContext', s.contextState],
@@ -214,6 +224,7 @@ function updateDiagnostics(): void {
   $('diag-body').innerHTML = rows
     .map(([k, v]) => `<div class="row"><span class="k">${k}</span><span class="v">${v}</span></div>`)
     .join('');
+  controlsPanel?.showBpm((d.bpm as number) ?? 0, Boolean(d.tempoManual));
 }
 
 // --- Boot -----------------------------------------------------------------

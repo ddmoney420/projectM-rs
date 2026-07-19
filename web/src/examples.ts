@@ -93,4 +93,63 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     fragColor = vec4(col, 1.0);
 }`,
   },
+  {
+    name: 'Beat-pulsing plasma',
+    mode: 'shadertoy',
+    source: `// Original example (LGPL-2.1). Plasma pulsing on the beat (iBeatPulse/iBeatPhase).
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    vec2 p = (fragCoord / iResolution.xy) * 8.0;
+    float pulse = 1.0 + iBeatPulse * 0.8;
+    float v = sin(p.x * pulse + iTime)
+            + sin(p.y * pulse + iTime * 0.7)
+            + sin(length(p - 4.0) - iTime);
+    vec3 col = 0.5 + 0.5 * cos(vec3(0.0, 2.0, 4.0) + v + iBeatPhase * 6.2831853);
+    fragColor = vec4(col, 1.0);
+}`,
+  },
+  {
+    name: 'BPM tunnel',
+    mode: 'shadertoy',
+    source: `// Original example (LGPL-2.1). Tunnel synced to the bar (iBarPhase), tinted by iBPM.
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    vec2 uv = (fragCoord - 0.5 * iResolution.xy) / iResolution.y;
+    float r = length(uv);
+    float depth = 0.3 / r + iBarPhase * 4.0;
+    float rings = 0.5 + 0.5 * sin(depth * 6.2831853);
+    vec3 hue = 0.5 + 0.5 * cos(vec3(0.0, 2.0, 4.0) + iBPM * 0.03);
+    vec3 col = mix(vec3(0.03, 0.0, 0.1), hue, rings) * clamp(r * 2.0, 0.0, 1.0);
+    fragColor = vec4(col, 1.0);
+}`,
+  },
+  {
+    name: 'Bass color shift (controls)',
+    mode: 'shadertoy',
+    source: `// Original example (LGPL-2.1). Declares user controls; bass drives brightness.
+// @control saturation float 0.0 2.0 1.0
+// @control tint color #ff8040
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    vec2 uv = fragCoord / iResolution.xy;
+    float g = 0.5 + 0.5 * sin(uv.x * 10.0 + iTime) * cos(uv.y * 8.0 - iTime);
+    vec3 base = tint * (g + iBass);
+    vec3 gray = vec3(dot(base, vec3(0.299, 0.587, 0.114)));
+    fragColor = vec4(mix(gray, base, saturation), 1.0);
+}`,
+  },
+  {
+    name: 'Tempo grid (controls)',
+    mode: 'shadertoy',
+    source: `// Original example (LGPL-2.1). Grid steps each beat; user controls zoom & speed.
+// @control zoom float 0.5 4.0 1.5
+// @control speed float 0.0 3.0 1.0
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    vec2 uv = (fragCoord - 0.5 * iResolution.xy) / iResolution.y * zoom;
+    float step4 = floor(iBeatPhase * 4.0) / 4.0;
+    uv *= 1.0 + step4 * 0.5;
+    float t = iTime * speed;
+    vec2 g = abs(fract(uv * 4.0) - 0.5);
+    float line = smoothstep(0.06, 0.0, min(g.x, g.y));
+    vec3 col = line * (0.5 + 0.5 * cos(vec3(0.0, 2.0, 4.0) + t + iBeatPulse * 3.0));
+    fragColor = vec4(col, 1.0);
+}`,
+  },
 ];

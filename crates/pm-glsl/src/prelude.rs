@@ -52,6 +52,14 @@ uniform PmUniforms {
     float iMidAtt;
     float iTrebAtt;
     float iVolAtt;
+    float iBPM;
+    float iBeatPhase;
+    float iBeatPulse;
+    float iBeatIndex;
+    float iBarPhase;
+    float iTempoConfidence;
+    float pm_pad1;
+    float pm_pad2;
 };
 
 layout(set = 0, binding = 1) uniform texture2D pm_ch0_tex;
@@ -59,6 +67,11 @@ layout(set = 0, binding = 2) uniform texture2D pm_ch1_tex;
 layout(set = 0, binding = 3) uniform texture2D pm_ch2_tex;
 layout(set = 0, binding = 4) uniform texture2D pm_ch3_tex;
 layout(set = 0, binding = 5) uniform sampler pm_smp;
+
+layout(std140, set = 0, binding = 6)
+uniform PmUserControls {
+    vec4 pm_user[16];
+};
 
 #define iChannel0 sampler2D(pm_ch0_tex, pm_smp)
 #define iChannel1 sampler2D(pm_ch1_tex, pm_smp)
@@ -88,6 +101,14 @@ pub struct ShaderUniforms {
     pub i_mid_att: f32,         // 148
     pub i_treb_att: f32,        // 152
     pub i_vol_att: f32,         // 156
+    pub i_bpm: f32,             // 160
+    pub i_beat_phase: f32,      // 164
+    pub i_beat_pulse: f32,      // 168
+    pub i_beat_index: f32,      // 172
+    pub i_bar_phase: f32,       // 176
+    pub i_tempo_confidence: f32, // 180
+    pub pm_pad1: f32,           // 184
+    pub pm_pad2: f32,           // 188
 }
 
 impl Default for ShaderUniforms {
@@ -96,5 +117,5 @@ impl Default for ShaderUniforms {
     }
 }
 
-// Compile-time check that the layout is 160 bytes (7 std140 rows... 10 × 16).
-const _: () = assert!(std::mem::size_of::<ShaderUniforms>() == 160);
+// Compile-time check that the layout is 192 bytes (12 × 16), std140-compatible.
+const _: () = assert!(std::mem::size_of::<ShaderUniforms>() == 192);

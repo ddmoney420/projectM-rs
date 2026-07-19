@@ -71,6 +71,28 @@
         color: #ff9a9a; background: rgba(60,20,20,.35); white-space: pre-wrap;
         font: 12px/1.4 ui-monospace, monospace; }
       #sc-errors:empty { display: none; }
+
+      /* Controls panel (right-docked, slides in) */
+      #controls { position: fixed; top: 0; bottom: 44px; right: 0; width: min(320px, 92vw);
+        overflow-y: auto; background: rgba(16,18,23,.96);
+        border-left: 1px solid rgba(255,255,255,.12); transform: translateX(101%);
+        transition: transform .18s ease; z-index: 5; padding: .5rem .6rem; }
+      #controls.open { transform: none; }
+      #controls details { border: 1px solid rgba(255,255,255,.08); border-radius: 6px;
+        margin-bottom: .5rem; padding: .1rem .5rem .4rem; }
+      #controls summary { cursor: pointer; padding: .35rem 0; font-weight: 600; }
+      .cp-row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin: .25rem 0; }
+      .cp-row input[type="range"] { width: 96px; vertical-align: middle; }
+      #controls button, #controls select, #controls input[type="number"] {
+        background: #222833; color: #eee; border: 1px solid #39424f; border-radius: 5px;
+        padding: .25rem .5rem; cursor: pointer; }
+      #controls .cp-hint { opacity: .6; font-size: 12px; }
+      .cp-lfo, .cp-ctl { border-top: 1px solid rgba(255,255,255,.07); padding: .35rem 0; }
+      .cp-ctl-head { display: flex; justify-content: space-between; }
+      .cp-kind { opacity: .5; font-size: 11px; }
+      .cp-mod { display: flex; gap: .4rem; align-items: center; margin-top: .2rem; opacity: .9; }
+      .cp-mod .src { font-size: 11px; }
+      #controls b { font-weight: 600; }
     </style>
   </head>
   <body>
@@ -109,11 +131,13 @@
         <button id="src-shader">Shader</button>
       </span>
       <button id="console-btn">Console</button>
+      <button id="controls-btn">Controls</button>
       <label>master <input id="master-gain" type="range" min="0" max="2" step="0.01" value="1" /></label>
       <span id="audio-status">No audio source</span>
     </div>
 
     <div id="console"><div id="console-host"></div></div>
+    <div id="controls"><div id="controls-host"></div></div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

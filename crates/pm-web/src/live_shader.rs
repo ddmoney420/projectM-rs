@@ -8,8 +8,11 @@
 //! keeps rendering.
 
 use pm_audio::FrameAudioData;
-use pm_glsl::{compile, Diagnostic, ShaderMode, ShaderUniforms, AUDIO_TEX_HEIGHT, AUDIO_TEX_WIDTH};
+use pm_glsl::{compile, Control, Diagnostic, ShaderMode, ShaderUniforms, AUDIO_TEX_HEIGHT, AUDIO_TEX_WIDTH};
 use pm_render::GpuContext;
+
+/// Number of `vec4` user-control slots (mirrors `pm_glsl::MAX_CONTROLS`).
+const USER_SLOTS: usize = 16;
 
 /// Fullscreen-triangle vertex stage, appended to every translated fragment
 /// module. The fragment entry naga emits is `main(@builtin(position) ..)`, so
@@ -27,12 +30,14 @@ fn pm_vs(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
 pub struct CompileOutcome {
     pub ok: bool,
     pub diagnostics: Vec<Diagnostic>,
+    pub controls: Vec<Control>,
 }
 
 pub struct LiveShader {
     format: wgpu::TextureFormat,
     pipeline_layout: wgpu::PipelineLayout,
     uniform_buf: wgpu::Buffer,
+    user_buf: wgpu::Buffer,
     audio_tex: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     pipeline: Option<wgpu::RenderPipeline>,
@@ -69,6 +74,17 @@ impl LiveShader {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // 6: user controls (pm_user[16])
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -81,6 +97,13 @@ impl LiveShader {
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("live-shader uniforms"),
             size: std::mem::size_of::<ShaderUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let user_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("live-shader user controls"),
+            size: (USER_SLOTS * 16) as u64, // 16 vec4
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -133,6 +156,7 @@ impl LiveShader {
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&placeholder_view) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&placeholder_view) },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&sampler) },
+                wgpu::BindGroupEntry { binding: 6, resource: user_buf.as_entire_binding() },
             ],
         });
 
@@ -140,11 +164,17 @@ impl LiveShader {
             format,
             pipeline_layout,
             uniform_buf,
+            user_buf,
             audio_tex,
             bind_group,
             pipeline: None,
             audio_upload: vec![0u8; (AUDIO_TEX_WIDTH * AUDIO_TEX_HEIGHT) as usize],
         }
+    }
+
+    /// Upload the 16 user-control `vec4` slots.
+    pub fn update_user_controls(&self, ctx: &GpuContext, slots: &[[f32; 4]; USER_SLOTS]) {
+        ctx.queue.write_buffer(&self.user_buf, 0, bytemuck::cast_slice(slots));
     }
 
     pub fn has_pipeline(&self) -> bool {
@@ -190,9 +220,9 @@ impl LiveShader {
                     cache: None,
                 });
                 self.pipeline = Some(pipeline);
-                CompileOutcome { ok: true, diagnostics: Vec::new() }
+                CompileOutcome { ok: true, diagnostics: Vec::new(), controls: translated.controls }
             }
-            Err(diagnostics) => CompileOutcome { ok: false, diagnostics },
+            Err(diagnostics) => CompileOutcome { ok: false, diagnostics, controls: Vec::new() },
         }
     }
 

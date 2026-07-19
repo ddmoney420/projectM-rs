@@ -11,8 +11,10 @@
 //! diagnostics), and handed to wgpu as a WGSL string. This crate is
 //! platform-neutral and unit-tested on native — no wgpu device required.
 
+mod controls;
 mod prelude;
 
+pub use controls::{control_defines, parse_controls, Control, ControlKind, MAX_CONTROLS};
 pub use prelude::{ShaderUniforms, AUDIO_TEX_HEIGHT, AUDIO_TEX_WIDTH, PRELUDE};
 
 /// Which authoring dialect the user source is written in.
@@ -35,46 +37,46 @@ pub struct Diagnostic {
     pub message: String,
 }
 
-/// Build the full GLSL source (prelude + user code + optional wrapper) for a mode.
-pub fn wrap(mode: ShaderMode, user_src: &str) -> String {
-    match mode {
-        ShaderMode::Shadertoy => format!(
-            "{PRELUDE}\n\
-             layout(location = 0) out vec4 pm_fragColor;\n\
-             {user_src}\n\
-             void main() {{\n\
-             \tvec4 pm_c = vec4(0.0);\n\
-             \t// Shadertoy fragCoord: bottom-left origin (flip Vulkan's top-left).\n\
-             \tvec2 pm_fc = vec2(gl_FragCoord.x, iResolution.y - gl_FragCoord.y);\n\
-             \tmainImage(pm_c, pm_fc);\n\
-             \tpm_fragColor = pm_c;\n\
-             }}\n"
-        ),
-        ShaderMode::Raw => format!("{PRELUDE}\n{user_src}\n"),
-    }
+const SHADERTOY_TAIL: &str = "
+void main() {
+\tvec4 pm_c = vec4(0.0);
+\t// Shadertoy fragCoord: bottom-left origin (flip Vulkan's top-left).
+\tvec2 pm_fc = vec2(gl_FragCoord.x, iResolution.y - gl_FragCoord.y);
+\tmainImage(pm_c, pm_fc);
+\tpm_fragColor = pm_c;
+}
+";
+
+/// Assemble the full GLSL (prelude + control `#define`s + user code + wrapper),
+/// returning it with the line offset to subtract from diagnostics and the
+/// parsed user controls.
+fn build_full(mode: ShaderMode, user_src: &str) -> (String, u32, Vec<Control>) {
+    let controls = parse_controls(user_src);
+    let defines = control_defines(&controls);
+    let prefix = match mode {
+        ShaderMode::Shadertoy => {
+            format!("{PRELUDE}\n{defines}layout(location = 0) out vec4 pm_fragColor;\n")
+        }
+        ShaderMode::Raw => format!("{PRELUDE}\n{defines}"),
+    };
+    let offset = prefix.matches('\n').count() as u32;
+    let full = match mode {
+        ShaderMode::Shadertoy => format!("{prefix}{user_src}{SHADERTOY_TAIL}"),
+        ShaderMode::Raw => format!("{prefix}{user_src}\n"),
+    };
+    (full, offset, controls)
 }
 
-/// Number of lines a `wrap(mode, ..)` prepends before the user's line 1, so
-/// diagnostics can be mapped back to user coordinates. `wrap` joins the prelude
-/// with a newline (+1 line); Shadertoy adds one extra `out` line before the user.
-fn prelude_lines(mode: ShaderMode) -> u32 {
-    let n = PRELUDE.matches('\n').count() as u32;
-    match mode {
-        ShaderMode::Shadertoy => n + 2,
-        ShaderMode::Raw => n + 1,
-    }
-}
-
-/// Successful translation: the WGSL to hand to wgpu.
+/// Successful translation: the WGSL to hand to wgpu, plus parsed user controls.
 #[derive(Debug, Clone)]
 pub struct Translated {
     pub wgsl: String,
+    pub controls: Vec<Control>,
 }
 
 /// Translate user GLSL of the given mode to WGSL, or return diagnostics.
 pub fn compile(mode: ShaderMode, user_src: &str) -> Result<Translated, Vec<Diagnostic>> {
-    let full = wrap(mode, user_src);
-    let offset = prelude_lines(mode);
+    let (full, offset, controls) = build_full(mode, user_src);
 
     let mut frontend = naga::front::glsl::Frontend::default();
     let options = naga::front::glsl::Options::from(naga::ShaderStage::Fragment);
@@ -120,7 +122,7 @@ pub fn compile(mode: ShaderMode, user_src: &str) -> Result<Translated, Vec<Diagn
     };
 
     match naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty()) {
-        Ok(wgsl) => Ok(Translated { wgsl }),
+        Ok(wgsl) => Ok(Translated { wgsl, controls }),
         Err(e) => Err(vec![Diagnostic { line: 0, column: 0, message: e.to_string() }]),
     }
 }

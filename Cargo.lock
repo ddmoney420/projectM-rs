@@ -1523,6 +1523,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-params"
+version = "0.0.1"
+
+[[package]]
 name = "pm-preset"
 version = "0.0.1"
 dependencies = [
@@ -1562,6 +1566,7 @@ dependencies = [
  "pm-audio",
  "pm-core",
  "pm-glsl",
+ "pm-params",
  "pm-preset",
  "pm-render",
  "wasm-bindgen",
