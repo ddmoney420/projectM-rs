@@ -166,6 +166,137 @@ impl Default for OverlayConfig {
     }
 }
 
+// --- Multipass shader projects (Phase 8d) ---------------------------------
+
+/// Max Buffer passes (A–D) plus one Image pass, and channels per pass.
+pub const MAX_BUFFER_PASSES: usize = 4;
+pub const MAX_PASSES: usize = MAX_BUFFER_PASSES + 1;
+pub const MAX_CHANNELS: usize = 4;
+/// Total source budget across all passes of one shader project.
+pub const MAX_PROJECT_SOURCE: usize = 256 * 1024;
+
+/// A `iChannelN` input source. Serialized as a lowercase string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelSource {
+    None,
+    Audio,
+    /// Buffer A–D by index 0–3.
+    Buffer(u8),
+    /// This pass's own previous-frame output (feedback).
+    SelfPrev,
+}
+
+impl ChannelSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChannelSource::None => "none",
+            ChannelSource::Audio => "audio",
+            ChannelSource::Buffer(0) => "buffera",
+            ChannelSource::Buffer(1) => "bufferb",
+            ChannelSource::Buffer(2) => "bufferc",
+            ChannelSource::Buffer(_) => "bufferd",
+            ChannelSource::SelfPrev => "self",
+        }
+    }
+    pub fn parse(s: &str) -> ChannelSource {
+        match s {
+            "audio" => ChannelSource::Audio,
+            "buffera" => ChannelSource::Buffer(0),
+            "bufferb" => ChannelSource::Buffer(1),
+            "bufferc" => ChannelSource::Buffer(2),
+            "bufferd" => ChannelSource::Buffer(3),
+            "self" => ChannelSource::SelfPrev,
+            _ => ChannelSource::None,
+        }
+    }
+}
+
+/// `pass_type` string ↔ execution index: Buffer A–D = 0–3, Image = 4.
+pub fn pass_type_index(s: &str) -> Option<usize> {
+    Some(match s {
+        "buffera" => 0,
+        "bufferb" => 1,
+        "bufferc" => 2,
+        "bufferd" => 3,
+        "image" => 4,
+        _ => return None,
+    })
+}
+pub fn pass_type_str(index: usize) -> &'static str {
+    match index {
+        0 => "buffera",
+        1 => "bufferb",
+        2 => "bufferc",
+        3 => "bufferd",
+        _ => "image",
+    }
+}
+
+fn default_channels() -> [String; 4] {
+    std::array::from_fn(|_| "none".to_string())
+}
+
+/// One pass of a multipass shader project (a Buffer A–D or the Image pass).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PassData {
+    pub pass_type: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub source: String,
+    #[serde(default)]
+    pub mode: u8,
+    #[serde(default = "default_channels")]
+    pub channels: [String; 4],
+}
+
+impl PassData {
+    pub fn index(&self) -> Option<usize> {
+        pass_type_index(&self.pass_type)
+    }
+}
+
+/// Detect a dependency cycle among Buffer passes (excluding self-loops, which
+/// are legitimate feedback). Returns true if any cycle exists. Cycles are not
+/// rejected at runtime (they resolve via previous-frame history in fixed
+/// A→B→C→D execution order); this is provided for diagnostics/tests.
+pub fn buffer_graph_has_cycle(deps: &[[Option<u8>; 4]]) -> bool {
+    let n = deps.len();
+    // 0 = unvisited, 1 = in-progress, 2 = done
+    let mut state = vec![0u8; n];
+    fn dfs(v: usize, deps: &[[Option<u8>; 4]], state: &mut [u8]) -> bool {
+        state[v] = 1;
+        for ch in &deps[v] {
+            if let Some(b) = ch {
+                let b = *b as usize;
+                if b == v || b >= deps.len() {
+                    continue; // self-loop or out of range
+                }
+                if state[b] == 1 {
+                    return true; // back-edge → cycle
+                }
+                if state[b] == 0 && dfs(b, deps, state) {
+                    return true;
+                }
+            }
+        }
+        state[v] = 2;
+        false
+    }
+    (0..n).any(|v| state[v] == 0 && dfs(v, deps, &mut state))
+}
+
+/// The effective pass list for a shader layer: an explicit multipass `passes`
+/// list if present, otherwise a single Image pass migrated from the legacy
+/// `source`/`mode` (with `iChannel0` = audio, matching prior behavior).
+pub fn shader_project_passes(source: &str, mode: u8, passes: &[PassData]) -> Vec<PassData> {
+    if !passes.is_empty() {
+        return passes.to_vec();
+    }
+    let mut channels = default_channels();
+    channels[0] = "audio".to_string();
+    vec![PassData { pass_type: "image".to_string(), enabled: true, source: source.to_string(), mode, channels }]
+}
+
 /// Per-layer source and its serializable state.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -179,6 +310,10 @@ pub enum SourceState {
         mods: Vec<ModMapping>,
         #[serde(default)]
         attribution: Attribution,
+        /// Multipass project (Buffer A–D + Image). Empty = legacy single-pass,
+        /// where `source`/`mode` above is the sole Image pass.
+        #[serde(default)]
+        passes: Vec<PassData>,
     },
     Waveform(OverlayConfig),
     Spectrum(OverlayConfig),
@@ -292,10 +427,24 @@ impl SceneData {
                 l.effects.truncate(MAX_EFFECTS_PER_LAYER);
             }
             total_effects += l.effects.len();
-            if let SourceState::Shader { source, .. } = &l.source {
+            if let SourceState::Shader { source, passes, .. } = &mut l.source {
                 shader_count += 1;
                 if source.len() > MAX_SHADER_SOURCE {
                     return Err(format!("shader source exceeds {MAX_SHADER_SOURCE} bytes"));
+                }
+                // Multipass: bound pass count and per-pass + total source size.
+                if passes.len() > MAX_PASSES {
+                    passes.truncate(MAX_PASSES);
+                }
+                let mut total = source.len();
+                for p in passes.iter() {
+                    if p.source.len() > MAX_SHADER_SOURCE {
+                        return Err(format!("shader pass source exceeds {MAX_SHADER_SOURCE} bytes"));
+                    }
+                    total += p.source.len();
+                }
+                if total > MAX_PROJECT_SOURCE {
+                    return Err(format!("shader project source exceeds {MAX_PROJECT_SOURCE} bytes"));
                 }
             }
         }
@@ -378,6 +527,7 @@ mod tests {
                         controls: vec![[0.5, 0.0, 0.0, 0.0]],
                         mods: vec![ModMapping { slot: 0, source: "bass".into(), amount: 0.5, smoothing: 0.2 }],
                         attribution: Attribution { author: "me".into(), license: "LGPL-2.1".into(), ..Default::default() },
+                        passes: vec![],
                     },
                     effects: vec![],
                 },
@@ -497,6 +647,100 @@ mod tests {
                   BlendMode::Difference, BlendMode::Lighten, BlendMode::Darken] {
             assert_eq!(BlendMode::from_u32(m.as_u32()), m);
         }
+    }
+
+    #[test]
+    fn legacy_single_pass_migrates_to_image() {
+        // A shader layer with no `passes` migrates to one Image pass with audio.
+        let passes = shader_project_passes("void mainImage(out vec4 c, in vec2 f){c=vec4(1.0);}", 0, &[]);
+        assert_eq!(passes.len(), 1);
+        assert_eq!(passes[0].pass_type, "image");
+        assert_eq!(passes[0].channels[0], "audio");
+    }
+
+    #[test]
+    fn multipass_round_trips() {
+        let mut scene = sample_scene();
+        scene.layers[1].source = SourceState::Shader {
+            source: "void mainImage(out vec4 c, in vec2 f){c=texture(iChannel0, f/iResolution.xy);}".into(),
+            mode: 0,
+            controls: vec![],
+            mods: vec![],
+            attribution: Attribution::default(),
+            passes: vec![
+                PassData {
+                    pass_type: "buffera".into(),
+                    enabled: true,
+                    source: "void mainImage(out vec4 c, in vec2 f){c=texture(iChannel0,f/iResolution.xy)*0.98+0.01;}".into(),
+                    mode: 0,
+                    channels: ["self".into(), "audio".into(), "none".into(), "none".into()],
+                },
+                PassData {
+                    pass_type: "image".into(),
+                    enabled: true,
+                    source: "void mainImage(out vec4 c, in vec2 f){c=texture(iChannel0,f/iResolution.xy);}".into(),
+                    mode: 0,
+                    channels: ["buffera".into(), "none".into(), "none".into(), "none".into()],
+                },
+            ],
+        };
+        let back = parse_scene(&to_json(&scene)).unwrap();
+        if let SourceState::Shader { passes, .. } = &back.layers[1].source {
+            assert_eq!(passes.len(), 2);
+            assert_eq!(passes[0].pass_type, "buffera");
+            assert_eq!(passes[0].channels[0], "self");
+            assert_eq!(passes[1].channels[0], "buffera");
+        } else {
+            panic!("expected shader");
+        }
+    }
+
+    #[test]
+    fn channel_source_round_trips() {
+        for s in ["none", "audio", "buffera", "bufferb", "bufferc", "bufferd", "self"] {
+            assert_eq!(ChannelSource::parse(s).as_str(), s);
+        }
+        assert_eq!(ChannelSource::parse("garbage"), ChannelSource::None);
+        assert_eq!(pass_type_index("buffera"), Some(0));
+        assert_eq!(pass_type_index("image"), Some(4));
+        assert_eq!(pass_type_index("bogus"), None);
+    }
+
+    #[test]
+    fn cycle_detection() {
+        // A→B, B→Image (acyclic among buffers): no cycle. deps[i][ch] = Some(buffer_index).
+        let acyclic = [
+            [None, None, None, None],        // buffer A reads nothing
+            [Some(0u8), None, None, None],   // buffer B reads A
+        ];
+        assert!(!buffer_graph_has_cycle(&acyclic));
+        // A→B and B→A: cycle.
+        let cyclic = [[Some(1u8), None, None, None], [Some(0u8), None, None, None]];
+        assert!(buffer_graph_has_cycle(&cyclic));
+        // Self-loop is feedback, not a cycle.
+        let self_loop = [[Some(0u8), None, None, None]];
+        assert!(!buffer_graph_has_cycle(&self_loop));
+    }
+
+    #[test]
+    fn project_source_size_limits() {
+        let mut scene = sample_scene();
+        // One oversize pass is rejected.
+        scene.layers[1].source = SourceState::Shader {
+            source: "x".into(),
+            mode: 0,
+            controls: vec![],
+            mods: vec![],
+            attribution: Attribution::default(),
+            passes: vec![PassData {
+                pass_type: "image".into(),
+                enabled: true,
+                source: "x".repeat(MAX_SHADER_SOURCE + 1),
+                mode: 0,
+                channels: default_channels(),
+            }],
+        };
+        assert!(scene.validate().is_err());
     }
 
     #[test]

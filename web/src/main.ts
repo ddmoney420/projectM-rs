@@ -9,6 +9,14 @@ import init, {
   get_diagnostics,
   set_mouse,
   set_shader_source,
+  set_pass_source,
+  add_buffer_pass,
+  remove_buffer_pass,
+  set_pass_channel,
+  reset_shader_buffers,
+  project_json,
+  export_scene,
+  import_scene,
   midi_handle,
   midi_import,
   midi_export,
@@ -386,6 +394,7 @@ function updateDiagnostics(): void {
   const s = engine.status();
   const rows: [string, string][] = [
     ['layers', `${d.enabledCount ?? 0}/${d.layerCount ?? 0} on · ${d.shaderCount ?? 0} shader`],
+    ['shader passes', `${d.shaderPasses ?? 0} total · ${d.bufferPasses ?? 0} buffer`],
     ['iTime', `${((d.time as number) ?? 0).toFixed(2)} s`],
     ['speed', `${((d.scale as number) ?? 1).toFixed(2)}× ${d.paused ? '(paused)' : ''}`],
     ['frame', String(d.frame ?? 0)],
@@ -495,6 +504,17 @@ async function boot(): Promise<void> {
       } catch {
         return {};
       }
+    };
+    // Multipass shader project driving (wraps the same exports the console uses).
+    (window as unknown as Record<string, unknown>).__pmShader = {
+      project: () => JSON.parse(project_json()),
+      setPass: (i: number, mode: number, src: string) => JSON.parse(set_pass_source(i, mode, src)),
+      addBuffer: (i: number) => add_buffer_pass(i),
+      removeBuffer: (i: number) => remove_buffer_pass(i),
+      setChannel: (i: number, c: number, s: string) => set_pass_channel(i, c, s),
+      resetBuffers: () => reset_shader_buffers(),
+      exportScene: () => export_scene(),
+      importScene: (j: string) => JSON.parse(import_scene(j)),
     };
   }
 

@@ -13,17 +13,17 @@
 //! their renderer and last-known-good state.
 
 use pm_audio::FrameAudioData;
-use pm_glsl::{Control, ShaderMode, ShaderUniforms};
+use pm_glsl::{Control, Diagnostic, ShaderMode, ShaderUniforms};
 use pm_params::{ModContext, Parameter};
 use pm_render::{Blit, GpuContext, Texture, TARGET_FORMAT};
 use pm_scene::{
-    Attribution, BlendMode, LayerData, ModMapping, OverlayConfig, SceneData, SourceState, Transform,
-    SCHEMA_VERSION,
+    shader_project_passes, Attribution, BlendMode, ChannelSource, LayerData, ModMapping, OverlayConfig,
+    PassData, SceneData, SourceState, Transform, SCHEMA_VERSION,
 };
 
 use crate::effects::{EffectChain, EffectKind, Effects};
-use crate::live_shader::{CompileOutcome, LiveShader};
 use crate::overlay::OverlayRenderer;
+use crate::shader_project::ShaderProject;
 
 const USER_SLOTS: usize = 16;
 
@@ -46,16 +46,23 @@ impl LayerKind {
     }
 }
 
-/// A shader layer's editable state (source + user controls + attribution).
+/// A shader layer's editable state: a multipass project plus the project-level
+/// user controls (values/ranges/modulation) and attribution. The project owns
+/// the pass sources, channel wiring, pipelines, and buffer history.
 struct ShaderState {
-    shader: LiveShader,
-    source: String,
-    mode: u8,
+    project: ShaderProject,
     user_slots: [[f32; 4]; USER_SLOTS],
     user_mods: [Option<Parameter>; USER_SLOTS],
     user_range: [[f32; 2]; USER_SLOTS],
-    controls: Vec<Control>,
     attribution: Attribution,
+}
+
+/// Outcome of compiling a pass: diagnostics for that pass + the (possibly
+/// changed) project-level control registry.
+pub struct CompileOutcome {
+    pub ok: bool,
+    pub diagnostics: Vec<Diagnostic>,
+    pub controls: Vec<Control>,
 }
 
 enum Runtime {
@@ -377,13 +384,10 @@ impl Compositor {
         match kind {
             LayerKind::Milkdrop => Runtime::Milkdrop,
             LayerKind::Shader => Runtime::Shader(ShaderState {
-                shader: LiveShader::new(ctx, self.width, self.height),
-                source: String::new(),
-                mode: 0,
+                project: ShaderProject::new(ctx, self.width, self.height),
                 user_slots: [[0.0; 4]; USER_SLOTS],
                 user_mods: std::array::from_fn(|_| None),
                 user_range: [[0.0, 1.0]; USER_SLOTS],
-                controls: Vec::new(),
                 attribution: Attribution::default(),
             }),
             LayerKind::Waveform => Runtime::Waveform(OverlayRenderer::new(ctx, self.width, self.height)),
@@ -472,22 +476,22 @@ impl Compositor {
     fn copy_source_state(&mut self, ctx: &GpuContext, from: usize, to: usize) {
         // Split borrow: pull the needed data out of `from` first.
         enum Copy {
-            Shader(String, u8),
+            Shader(Vec<PassData>, [[f32; 4]; USER_SLOTS], Attribution),
             Overlay(OverlayConfig),
             None,
         }
         let payload = match &self.layers[from].runtime {
-            Runtime::Shader(s) => Copy::Shader(s.source.clone(), s.mode),
+            Runtime::Shader(s) => Copy::Shader(s.project.to_passes(), s.user_slots, s.attribution.clone()),
             Runtime::Waveform(o) | Runtime::Spectrum(o) => Copy::Overlay(o.cfg.into()),
             Runtime::Milkdrop => Copy::None,
         };
         match (payload, &mut self.layers[to].runtime) {
-            (Copy::Shader(src, mode), Runtime::Shader(d)) => {
-                let m = if mode == 1 { ShaderMode::Raw } else { ShaderMode::Shadertoy };
-                let outcome = d.shader.set_shader(ctx, m, &src);
-                d.source = src;
-                d.mode = mode;
-                apply_controls(d, &outcome.controls);
+            (Copy::Shader(passes, slots, attr), Runtime::Shader(d)) => {
+                // The copy gets its own fresh buffer history (feedback restarts).
+                d.project.load_passes(ctx, &passes);
+                d.attribution = attr;
+                refresh_control_ranges(d);
+                d.user_slots = slots;
             }
             (Copy::Overlay(cfg), Runtime::Waveform(o)) | (Copy::Overlay(cfg), Runtime::Spectrum(o)) => {
                 o.cfg = cfg.into();
@@ -549,17 +553,64 @@ impl Compositor {
         self.layers.iter_mut().find(|l| l.id == id)
     }
 
-    /// Compile a shader into the selected shader layer (or a specific one).
+    /// Compile GLSL into the Image pass of a shader layer (single-pass entry).
     pub fn set_shader(&mut self, ctx: &GpuContext, id: u64, mode: ShaderMode, src: &str) -> Option<CompileOutcome> {
+        self.set_pass(ctx, id, 4, mode, src)
+    }
+
+    /// Compile GLSL into a specific pass (0–3 = Buffer A–D, 4 = Image).
+    pub fn set_pass(&mut self, ctx: &GpuContext, id: u64, pass_index: usize, mode: ShaderMode, src: &str) -> Option<CompileOutcome> {
         let l = self.layer_mut(id)?;
         let Runtime::Shader(s) = &mut l.runtime else { return None };
-        let outcome = s.shader.set_shader(ctx, mode, src);
-        if outcome.ok {
-            s.source = src.to_string();
-            s.mode = if mode == ShaderMode::Raw { 1 } else { 0 };
-            apply_controls(s, &outcome.controls);
+        let diagnostics = s.project.set_pass_source(ctx, pass_index, mode, src);
+        apply_project_controls(s);
+        let ok = diagnostics.is_empty();
+        Some(CompileOutcome { ok, diagnostics, controls: s.project.controls().to_vec() })
+    }
+
+    pub fn add_buffer_pass(&mut self, ctx: &GpuContext, id: u64, index: usize) -> bool {
+        let Some(l) = self.layer_mut(id) else { return false };
+        let Runtime::Shader(s) = &mut l.runtime else { return false };
+        let ok = s.project.add_buffer(ctx, index);
+        if ok {
+            apply_project_controls(s);
         }
-        Some(outcome)
+        ok
+    }
+    pub fn remove_buffer_pass(&mut self, ctx: &GpuContext, id: u64, index: usize) {
+        if let Some(l) = self.layer_mut(id) {
+            if let Runtime::Shader(s) = &mut l.runtime {
+                s.project.remove_buffer(ctx, index);
+                apply_project_controls(s);
+            }
+        }
+    }
+    pub fn set_pass_channel(&mut self, id: u64, pass_index: usize, channel: usize, source: &str) -> bool {
+        let Some(l) = self.layer_mut(id) else { return false };
+        let Runtime::Shader(s) = &mut l.runtime else { return false };
+        s.project.set_channel(pass_index, channel, ChannelSource::parse(source))
+    }
+    pub fn set_pass_enabled(&mut self, id: u64, pass_index: usize, enabled: bool) {
+        if let Some(l) = self.layer_mut(id) {
+            if let Runtime::Shader(s) = &mut l.runtime {
+                s.project.set_pass_enabled(pass_index, enabled);
+            }
+        }
+    }
+    pub fn reset_shader_buffers(&mut self, ctx: &GpuContext, id: u64) {
+        if let Some(l) = self.layer_mut(id) {
+            if let Runtime::Shader(s) = &mut l.runtime {
+                s.project.reset_buffers(ctx);
+            }
+        }
+    }
+    pub fn project_json(&self, id: u64) -> Option<String> {
+        let l = self.layers.iter().find(|l| l.id == id)?;
+        if let Runtime::Shader(s) = &l.runtime {
+            Some(s.project.project_json())
+        } else {
+            None
+        }
     }
 
     /// Set an overlay layer's config.
@@ -612,7 +663,7 @@ impl Compositor {
         self.global_chain.reset_feedback(); // history is size-dependent
         for l in &mut self.layers {
             match &mut l.runtime {
-                Runtime::Shader(s) => s.shader.resize(ctx, width, height),
+                Runtime::Shader(s) => s.project.resize(ctx, width, height),
                 Runtime::Waveform(o) | Runtime::Spectrum(o) => o.resize(ctx, width, height),
                 Runtime::Milkdrop => {}
             }
@@ -643,6 +694,8 @@ impl Compositor {
             match &mut l.runtime {
                 Runtime::Milkdrop => {} // shared player already rendered
                 Runtime::Shader(s) => {
+                    // MIDI/UI sets the control base; audio/LFO modulation is
+                    // applied here, then the multipass project renders all passes.
                     let mut slots = s.user_slots;
                     for i in 0..USER_SLOTS {
                         if let Some(p) = s.user_mods[i].as_mut() {
@@ -650,10 +703,8 @@ impl Compositor {
                             slots[i][0] = p.eval(modctx);
                         }
                     }
-                    s.shader.update_audio(ctx, audio);
-                    s.shader.update_uniforms(ctx, base);
-                    s.shader.update_user_controls(ctx, &slots);
-                    s.shader.render(ctx);
+                    s.project.update_user_controls(ctx, &slots);
+                    s.project.render(ctx, audio, base);
                 }
                 Runtime::Waveform(o) | Runtime::Spectrum(o) => {
                     o.update_audio(ctx, audio);
@@ -671,7 +722,7 @@ impl Compositor {
             }
             let source_tex: &Texture = match &layer.runtime {
                 Runtime::Milkdrop => player_output,
-                Runtime::Shader(s) => s.shader.output(),
+                Runtime::Shader(s) => s.project.output(),
                 Runtime::Waveform(o) | Runtime::Spectrum(o) => o.output(),
             };
             self.effects.apply(ctx, &mut layer.effects, source_tex, &layer.effect_output, modctx, time);
@@ -700,7 +751,7 @@ impl Compositor {
             } else {
                 match &self.layers[i].runtime {
                     Runtime::Milkdrop => &player_output.view,
-                    Runtime::Shader(s) => &s.shader.output().view,
+                    Runtime::Shader(s) => &s.project.output().view,
                     Runtime::Waveform(o) | Runtime::Spectrum(o) => &o.output().view,
                 }
             };
@@ -794,6 +845,19 @@ impl Compositor {
     pub fn shader_count(&self) -> usize {
         self.layers.iter().filter(|l| l.kind() == LayerKind::Shader).count()
     }
+    /// `(total buffer passes, total shader render passes/frame)` across all
+    /// shader layers — for the multipass performance diagnostics.
+    pub fn shader_pass_stats(&self) -> (u32, u32) {
+        let mut buffers = 0u32;
+        let mut total = 0u32;
+        for l in &self.layers {
+            if let Runtime::Shader(s) = &l.runtime {
+                buffers += s.project.buffer_pass_count() as u32;
+                total += s.project.active_pass_count() as u32;
+            }
+        }
+        (buffers, total)
+    }
     pub fn has_milkdrop(&self) -> bool {
         self.layers.iter().any(|l| l.kind() == LayerKind::Milkdrop)
     }
@@ -831,8 +895,9 @@ impl Compositor {
         if let Some(id) = self.selected {
             if let Some(l) = self.layers.iter().find(|l| l.id == id) {
                 if let Runtime::Shader(s) = &l.runtime {
-                    let cs: Vec<String> = s.controls.iter().map(control_json).collect();
-                    return format!("{{\"source\":{},\"mode\":{},\"controls\":[{}]}}", json_str(&s.source), s.mode, cs.join(","));
+                    let cs: Vec<String> = s.project.controls().iter().map(control_json).collect();
+                    let (src, mode) = s.project.image_source();
+                    return format!("{{\"source\":{},\"mode\":{},\"controls\":[{}]}}", json_str(src), mode, cs.join(","));
                 }
             }
         }
@@ -853,13 +918,17 @@ impl Compositor {
                 transform: l.transform,
                 source: match &l.runtime {
                     Runtime::Milkdrop => SourceState::Milkdrop,
-                    Runtime::Shader(s) => SourceState::Shader {
-                        source: s.source.clone(),
-                        mode: s.mode,
-                        controls: s.user_slots.to_vec(),
-                        mods: collect_mods(s),
-                        attribution: s.attribution.clone(),
-                    },
+                    Runtime::Shader(s) => {
+                        let (src, mode) = s.project.image_source();
+                        SourceState::Shader {
+                            source: src.to_string(),
+                            mode,
+                            controls: s.user_slots.to_vec(),
+                            mods: collect_mods(s),
+                            attribution: s.attribution.clone(),
+                            passes: s.project.to_passes(),
+                        }
+                    }
                     Runtime::Waveform(o) => SourceState::Waveform(o.cfg.into()),
                     Runtime::Spectrum(o) => SourceState::Spectrum(o.cfg.into()),
                 },
@@ -905,13 +974,13 @@ impl Compositor {
             }
             let mut runtime = self.make_runtime(ctx, kind);
             match (&ld.source, &mut runtime) {
-                (SourceState::Shader { source, mode, controls, mods, attribution }, Runtime::Shader(s)) => {
-                    let m = if *mode == 1 { ShaderMode::Raw } else { ShaderMode::Shadertoy };
-                    let outcome = s.shader.set_shader(ctx, m, source);
-                    s.source = source.clone();
-                    s.mode = *mode;
+                (SourceState::Shader { source, mode, controls, mods, attribution, passes }, Runtime::Shader(s)) => {
+                    // Build the multipass project (legacy single-pass migrates to
+                    // one Image pass); histories start clean.
+                    let effective = shader_project_passes(source, *mode, passes);
+                    s.project.load_passes(ctx, &effective);
                     s.attribution = attribution.clone();
-                    apply_controls(s, &outcome.controls);
+                    refresh_control_ranges(s);
                     for (i, c) in controls.iter().enumerate().take(USER_SLOTS) {
                         s.user_slots[i] = *c;
                     }
@@ -1027,11 +1096,11 @@ impl Compositor {
     }
     pub fn control_kind(&self, id: u64, slot: usize) -> Option<&'static str> {
         let s = self.shader_state(id)?;
-        s.controls.iter().find(|c| c.slot as usize == slot).map(|c| c.kind.as_str())
+        s.project.controls().iter().find(|c| c.slot as usize == slot).map(|c| c.kind.as_str())
     }
     pub fn control_scalar(&self, id: u64, slot: usize) -> Option<f32> {
         let s = self.shader_state(id)?;
-        if slot < USER_SLOTS && s.controls.iter().any(|c| c.slot as usize == slot) {
+        if slot < USER_SLOTS && s.project.controls().iter().any(|c| c.slot as usize == slot) {
             Some(s.user_slots[slot][0])
         } else {
             None
@@ -1040,7 +1109,7 @@ impl Compositor {
     pub fn set_control_scalar(&mut self, id: u64, slot: usize, v: f32) -> bool {
         let Some(l) = self.layer_mut(id) else { return false };
         let Runtime::Shader(s) = &mut l.runtime else { return false };
-        if slot < USER_SLOTS && s.controls.iter().any(|c| c.slot as usize == slot) {
+        if slot < USER_SLOTS && s.project.controls().iter().any(|c| c.slot as usize == slot) {
             let [mn, mx] = s.user_range[slot];
             s.user_slots[slot][0] = v.clamp(mn.min(mx), mn.max(mx));
             true
@@ -1050,7 +1119,7 @@ impl Compositor {
     }
     pub fn control_range(&self, id: u64, slot: usize) -> Option<[f32; 2]> {
         let s = self.shader_state(id)?;
-        s.controls.iter().find(|c| c.slot as usize == slot).map(|c| [c.min, c.max])
+        s.project.controls().iter().find(|c| c.slot as usize == slot).map(|c| [c.min, c.max])
     }
 
     pub fn has_effect(&self, target: u64, eid: u64) -> bool {
@@ -1083,7 +1152,7 @@ impl Compositor {
             out.push(target_json(&format!("{lp}.transform.rot"), "Rotation", &group, "continuous", -3.1416, 3.1416));
 
             if let Runtime::Shader(s) = &l.runtime {
-                for c in &s.controls {
+                for c in s.project.controls() {
                     let path = format!("{lp}.control.{}", c.slot);
                     let label = format!("control: {}", c.name);
                     match c.kind.as_str() {
@@ -1121,18 +1190,32 @@ fn target_json(path: &str, label: &str, group: &str, kind: &str, min: f32, max: 
     )
 }
 
-fn apply_controls(s: &mut ShaderState, controls: &[Control]) {
+/// After a (re)compile, reset control values to the project's declared defaults
+/// and clear modulation — matching the single-pass behavior where compiling
+/// resets controls. Ranges come from the merged project control registry.
+fn apply_project_controls(s: &mut ShaderState) {
     s.user_slots = [[0.0; 4]; USER_SLOTS];
     s.user_mods = std::array::from_fn(|_| None);
     s.user_range = [[0.0, 1.0]; USER_SLOTS];
-    for c in controls {
+    for c in s.project.controls() {
         let slot = c.slot as usize;
         if slot < USER_SLOTS {
             s.user_slots[slot] = c.default;
             s.user_range[slot] = [c.min, c.max];
         }
     }
-    s.controls = controls.to_vec();
+}
+
+/// Refresh only the control ranges from the project registry, preserving the
+/// caller-set slot values (used on duplicate/import where values are supplied).
+fn refresh_control_ranges(s: &mut ShaderState) {
+    s.user_range = [[0.0, 1.0]; USER_SLOTS];
+    for c in s.project.controls() {
+        let slot = c.slot as usize;
+        if slot < USER_SLOTS {
+            s.user_range[slot] = [c.min, c.max];
+        }
+    }
 }
 
 fn collect_mods(s: &ShaderState) -> Vec<ModMapping> {

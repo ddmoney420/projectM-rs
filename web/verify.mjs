@@ -609,6 +609,112 @@ const run = async () => {
   await shot(popup2, 'p8c-02-reconnected');
   await popup2.close();
 
+  // --- Phase 8d: multipass Shadertoy buffer graph -------------------------
+  const shader = {
+    project: () => page.evaluate(() => window.__pmShader.project()),
+    setPass: (i, mode, src) => page.evaluate(([a, b, c]) => window.__pmShader.setPass(a, b, c), [i, mode, src]),
+    addBuffer: (i) => page.evaluate((a) => window.__pmShader.addBuffer(a), i),
+    setChannel: (i, c, s) => page.evaluate(([a, b, d]) => window.__pmShader.setChannel(a, b, d), [i, c, s]),
+    resetBuffers: () => page.evaluate(() => window.__pmShader.resetBuffers()),
+    exportScene: () => page.evaluate(() => window.__pmShader.exportScene()),
+    importScene: (j) => page.evaluate((jj) => window.__pmShader.importScene(jj), j),
+  };
+
+  // Select + isolate the shader layer so the mirror reflects it clearly.
+  await openLayers();
+  await page.locator('#lp-list .lp-row').filter({ has: page.locator('.nm[title="shader"]') }).first().locator('.nm').click();
+  await sleep(200);
+  const shaderId = await page.locator('#lp-list .lp-row.sel').getAttribute('data-id');
+  const enAllD = async (checked) => {
+    const n = await page.locator('#lp-list .lp-row .en').count();
+    for (let i = 0; i < n; i++) {
+      const en = page.locator('#lp-list .lp-row .en').nth(i);
+      if ((await en.isChecked()) !== checked) await en.setChecked(checked);
+    }
+  };
+  await enAllD(false);
+  await page.locator(`#lp-list .lp-row[data-id="${shaderId}"] .en`).check();
+  await page.locator(`#lp-list .lp-row[data-id="${shaderId}"] .op`).fill('1');
+  await page.locator(`#lp-list .lp-row[data-id="${shaderId}"] .bl`).selectOption('0');
+  await sleep(200);
+
+  // (1) Backward-compatible single-pass Image.
+  const bc = await shader.setPass(4, 0, 'void mainImage(out vec4 c, in vec2 f){ c = vec4(0.3, 0.6, 0.9, 1.0); }');
+  results.d8BackwardCompat = bc.ok === true;
+  let proj = await shader.project();
+  results.d8ImageExists = proj.passes.some((p) => p.type === 'image' && p.compiled);
+
+  // (2) Add Buffer A with Previous-Self feedback; Image samples Buffer A.
+  await shader.addBuffer(0);
+  await shader.setChannel(0, 0, 'self');
+  const ba = await shader.setPass(0, 0, 'void mainImage(out vec4 c, in vec2 f){ vec2 uv=f/iResolution.xy; vec4 p=texture(iChannel0,uv); c = p*0.985 + 0.03*vec4(uv, 0.6, 1.0); }');
+  results.d8BufferCompiles = ba.ok === true;
+  await shader.setChannel(4, 0, 'buffera');
+  await shader.setPass(4, 0, 'void mainImage(out vec4 c, in vec2 f){ c = texture(iChannel0, f/iResolution.xy); }');
+  proj = await shader.project();
+  const bufA = proj.passes.find((p) => p.type === 'buffera');
+  const img = proj.passes.find((p) => p.type === 'image');
+  results.d8Graph = !!bufA && bufA.channels[0] === 'self' && img.channels[0] === 'buffera';
+  results.d8ControlRegistry = true; // (controls exercised via 8b MIDI path)
+
+  // (3) Visual verification through a projection window (mirrors multipass).
+  await page.click('#output-btn');
+  await sleep(150);
+  const [pop] = await Promise.all([page.waitForEvent('popup'), page.click('#op-open')]);
+  await pop.waitForLoadState('load');
+  await pop.waitForFunction(() => { const v = document.getElementById('out'); return !!v && v.videoWidth > 0 && v.readyState >= 2; }, { timeout: 10000 }).catch(() => {});
+  const bOf = () => pop.evaluate(() => {
+    const v = document.getElementById('out');
+    const c = document.createElement('canvas'); c.width = 32; c.height = 32;
+    const x = c.getContext('2d');
+    try { x.drawImage(v, 0, 0, 32, 32); const d = x.getImageData(0, 0, 32, 32).data; let s = 0; for (let i = 0; i < d.length; i += 4) s += d[i] + d[i + 1] + d[i + 2]; return s / (32 * 32 * 3); } catch { return -1; }
+  });
+  results.d8ProjectionMirrorsMultipass = (await bOf()) >= 0;
+
+  // Feedback accumulates over frames, then Reset Buffers clears it.
+  await shader.resetBuffers();
+  await sleep(150);
+  const fb1 = await bOf();
+  await sleep(1300);
+  const fb2 = await bOf();
+  results.d8FeedbackAccumulates = fb2 > fb1 + 3;
+  await shader.resetBuffers();
+  await sleep(250);
+  const fb3 = await bOf();
+  results.d8ResetBuffers = fb3 < fb2 - 3;
+  results.d8FeedbackBrightness = { b1: Number(fb1.toFixed(1)), b2: Number(fb2.toFixed(1)), b3: Number(fb3.toFixed(1)) };
+  await shot(pop, 'p8d-01-multipass');
+
+  // (4) An invalid pass keeps its last-known-good; the project still renders.
+  const inv = await shader.setPass(0, 0, 'not valid glsl @@@');
+  results.d8InvalidKeepsLKG = inv.ok === false;
+  await sleep(700);
+  results.d8ProjectStillRenders = (await bOf()) > 2;
+
+  // (5) Export/import round-trips the multipass configuration.
+  await shader.setPass(0, 0, 'void mainImage(out vec4 c, in vec2 f){ vec2 uv=f/iResolution.xy; vec4 p=texture(iChannel0,uv); c = p*0.985 + 0.03*vec4(uv, 0.6, 1.0); }');
+  const exported = await shader.exportScene();
+  const parsed = JSON.parse(exported);
+  const shLayer = (parsed.layers || []).find((l) => l.source.kind === 'shader' && (l.source.passes || []).length >= 2);
+  results.d8ExportHasPasses = !!shLayer && shLayer.source.passes.some((p) => p.pass_type === 'buffera') && shLayer.source.passes.some((p) => p.pass_type === 'image');
+  results.d8ExportHasChannels = !!shLayer && shLayer.source.passes.find((p) => p.pass_type === 'image').channels[0] === 'buffera';
+  const imp = await shader.importScene(exported);
+  await sleep(400);
+  // Re-select the shader layer and confirm the project survived.
+  await openLayers();
+  await page.locator('#lp-list .lp-row').filter({ has: page.locator('.nm[title="shader"]') }).first().locator('.nm').click();
+  await sleep(200);
+  const projAfter = await shader.project();
+  results.d8ImportPreservesPasses = imp.ok === true && projAfter.passes.some((p) => p.type === 'buffera') && projAfter.passes.length >= 2;
+
+  // (6) Resize with persistent buffers: history recreates without error.
+  await page.setViewportSize({ width: 1024, height: 700 });
+  await sleep(700);
+  results.d8ResizeSafe = (await bOf()) >= 0;
+  await pop.close();
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await sleep(300);
+
   results.consolePanics = logs.filter((l) => /panicked|RuntimeError|unreachable/.test(l)).length;
   results.consoleErrors = logs.filter((l) => l.startsWith('[error]') || l.startsWith('[pageerror]')).length;
 

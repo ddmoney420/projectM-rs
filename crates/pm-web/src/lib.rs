@@ -24,9 +24,9 @@ use web_sys::HtmlCanvasElement;
 
 mod compositor;
 mod effects;
-mod live_shader;
 mod midi;
 mod overlay;
+mod shader_project;
 
 use compositor::{Compositor, LayerKind};
 use midi::MidiRouter;
@@ -143,6 +143,8 @@ struct Diagnostics {
     layer_count: u32,
     enabled_count: u32,
     shader_count: u32,
+    buffer_passes: u32,
+    shader_passes: u32,
     bpm: f32,
     beat_phase: f32,
     beat_pulse: f32,
@@ -194,6 +196,7 @@ pub fn get_diagnostics() -> String {
              \"time\":{:.2},\"delta\":{:.4},\"scale\":{:.2},\"paused\":{},\
              \"frame\":{},\"width\":{},\"height\":{},\
              \"layerCount\":{},\"enabledCount\":{},\"shaderCount\":{},\
+             \"bufferPasses\":{},\"shaderPasses\":{},\
              \"bpm\":{:.1},\"beatPhase\":{:.3},\"beatPulse\":{:.3},\
              \"tempoConfidence\":{:.2},\"tempoManual\":{}}}",
             d.has_audio,
@@ -217,6 +220,8 @@ pub fn get_diagnostics() -> String {
             d.layer_count,
             d.enabled_count,
             d.shader_count,
+            d.buffer_passes,
+            d.shader_passes,
             d.bpm,
             d.beat_phase,
             d.beat_pulse,
@@ -461,6 +466,9 @@ impl State {
             d.layer_count = self.compositor.layer_count() as u32;
             d.enabled_count = self.compositor.enabled_count() as u32;
             d.shader_count = self.compositor.shader_count() as u32;
+            let (buffer_passes, shader_passes) = self.compositor.shader_pass_stats();
+            d.buffer_passes = buffer_passes;
+            d.shader_passes = shader_passes;
             d.bpm = self.tempo.bpm();
             d.beat_phase = self.tempo.beat_phase();
             d.beat_pulse = self.tempo.beat_pulse();
@@ -899,16 +907,24 @@ fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
     APP.with(|a| a.borrow().as_ref().map(|s| f(&mut s.borrow_mut())))
 }
 
-/// Compile GLSL into the **selected** shader layer (mode 0 = Shadertoy, 1 = raw).
-/// Synchronous: a newer call wins; a failed compile keeps that layer's
-/// last-known-good and never affects other layers, audio, or the render loop.
+/// Compile GLSL into the **Image pass** of the selected shader layer (mode 0 =
+/// Shadertoy, 1 = raw). Backward-compatible single-pass entry point. Synchronous:
+/// a newer call wins; a failed compile keeps that pass's last-known-good and
+/// never affects other passes/layers, audio, or the render loop.
 #[wasm_bindgen]
 pub fn set_shader_source(mode: u8, src: String) -> String {
+    set_pass_source(4, mode, src)
+}
+
+/// Compile GLSL into a specific pass of the selected shader layer
+/// (0–3 = Buffer A–D, 4 = Image). Returns the pass diagnostics + project controls.
+#[wasm_bindgen]
+pub fn set_pass_source(pass_index: u32, mode: u8, src: String) -> String {
     let m = if mode == 1 { ShaderMode::Raw } else { ShaderMode::Shadertoy };
     let t0 = js_sys::Date::now();
     let outcome = with_state(|s| {
         let id = s.compositor.selected()?;
-        s.compositor.set_shader(&s.ctx, id, m, &src)
+        s.compositor.set_pass(&s.ctx, id, pass_index as usize, m, &src)
     })
     .flatten();
     let ms = js_sys::Date::now() - t0;
@@ -930,6 +946,63 @@ pub fn set_shader_source(mode: u8, src: String) -> String {
         }
         None => "{\"ok\":false,\"compileMs\":0,\"diagnostics\":[{\"line\":0,\"column\":0,\"message\":\"select a shader layer first\"}],\"controls\":[]}".to_string(),
     }
+}
+
+/// Add Buffer pass A–D (index 0–3) to the selected shader layer.
+#[wasm_bindgen]
+pub fn add_buffer_pass(index: u32) -> bool {
+    with_state(|s| {
+        let id = s.compositor.selected()?;
+        Some(s.compositor.add_buffer_pass(&s.ctx, id, index as usize))
+    })
+    .flatten()
+    .unwrap_or(false)
+}
+/// Remove Buffer pass A–D (index 0–3) from the selected shader layer.
+#[wasm_bindgen]
+pub fn remove_buffer_pass(index: u32) {
+    with_state(|s| {
+        if let Some(id) = s.compositor.selected() {
+            s.compositor.remove_buffer_pass(&s.ctx, id, index as usize);
+        }
+    });
+}
+/// Set `iChannelN` of a pass. `source` is one of none/audio/buffera..bufferd/self.
+#[wasm_bindgen]
+pub fn set_pass_channel(pass_index: u32, channel: u32, source: String) -> bool {
+    with_state(|s| {
+        let id = s.compositor.selected()?;
+        Some(s.compositor.set_pass_channel(id, pass_index as usize, channel as usize, &source))
+    })
+    .flatten()
+    .unwrap_or(false)
+}
+#[wasm_bindgen]
+pub fn set_pass_enabled(pass_index: u32, enabled: bool) {
+    with_state(|s| {
+        if let Some(id) = s.compositor.selected() {
+            s.compositor.set_pass_enabled(id, pass_index as usize, enabled);
+        }
+    });
+}
+/// Clear all buffer histories of the selected shader layer (feedback restart).
+#[wasm_bindgen]
+pub fn reset_shader_buffers() {
+    with_state(|s| {
+        if let Some(id) = s.compositor.selected() {
+            s.compositor.reset_shader_buffers(&s.ctx, id);
+        }
+    });
+}
+/// The selected shader layer's multipass project (passes + channels + status).
+#[wasm_bindgen]
+pub fn project_json() -> String {
+    with_state(|s| {
+        let id = s.compositor.selected()?;
+        s.compositor.project_json(id)
+    })
+    .flatten()
+    .unwrap_or_else(|| "{\"passes\":[],\"conflicts\":[]}".into())
 }
 
 fn control_json(c: &pm_glsl::Control) -> String {
