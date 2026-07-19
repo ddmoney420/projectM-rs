@@ -243,6 +243,9 @@ impl EffectChain {
     pub fn len(&self) -> usize {
         self.effects.len()
     }
+    pub fn enabled_count(&self) -> usize {
+        self.effects.iter().filter(|e| e.enabled).count()
+    }
     pub fn add(&mut self, id: u64, kind: EffectKind) -> u64 {
         self.effects.push(Effect::new(id, kind));
         self.selected = Some(id);

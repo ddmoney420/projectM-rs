@@ -224,3 +224,94 @@ untested framework before the first visible browser render.
   browser product gains independent maintainers/cadence.
 - **WebGPU only**, no WebGL2 fallback; capability *tiers* (Core/Enhanced/Maximum)
   gate effects by adapter limits instead of a second renderer.
+
+---
+
+# Final architecture (Phases 3–9, as built)
+
+The sections above are the Phase-0 design note; this section documents the
+system as actually built. Where they differ, this section wins.
+
+## Rendering pipeline
+
+```
+Audio sources (file / mic / tab)
+   ↓  AudioWorklet → lock-free SPSC ring (SharedArrayBuffer, postMessage fallback)
+pm_audio::PCM  (projectM FFT / beat / waveform — NOT AnalyserNode)
+   ↓  FrameAudioData
+Tempo + LFO bank + Parameter modulation (pm-params)
+   ↓  per-frame ModContext + ShaderUniforms (iTime/iFrame/iBass/iBeat…)
+Per-layer source render:
+   • Milkdrop (one shared engine)
+   • ShaderProject  → Buffer A → B → C → D → Image   (multipass, ping-pong history)
+   • Waveform / Spectrum overlays
+   ↓
+Per-layer effect chains (übershader; bounded RT pool)
+   ↓
+Layer compositor (ordered stack, 7 blend modes, 2D transform, opaque-base vs coverage-alpha)
+   ↓
+Global effect chain
+   ↓
+Final canvas ──► Recording (canvas.captureStream → MediaRecorder → WebM)
+            └──► Projection mirror (captureStream shared to the output window)
+```
+
+## Subsystems
+
+- **Layers / compositor** (`compositor.rs`) — stable u64 layer ids (preserved
+  across save/reload), two ping-pong accumulators, per-layer effect output. Ids
+  are the stable address for MIDI + persistence.
+- **Effects** (`effects.rs` + `effects.wgsl`) — one übershader selected by a
+  `mode` uniform so live params never recompile; multipass bloom; stateful
+  feedback owns independent history. **This is separate from Shadertoy Buffer
+  feedback** — resetting one does not touch the other.
+- **Multipass shaders** (`shader_project.rs`) — Buffer A–D + Image on the shared
+  WGSL binding contract (uniform@0, iChannel0-3@1-4, sampler@5, user@6). Fixed
+  execution order A→B→C→D→Image; a channel reads a buffer's `front`, so forward
+  deps (earlier buffer, already flipped) get this frame and self/later get the
+  previous frame — cycles resolve via one-frame history. `@control`s aggregate
+  across passes into one project registry (shared `pm_user` slots). Per-pass
+  last-known-good; history never serialized.
+- **Parameter model** (`pm-params`) — base + one ModSource (bass/mid/treb/vol/
+  atts/beatPulse/beatPhase/lfo0-3) × amount, curve, smoothing, clamp. MIDI and
+  the UI set the **base**; modulation applies after.
+
+## MIDI routing (`pm-midi` + `midi.rs`)
+
+Web MIDI (gesture-gated, never SysEx) → the single `midi_handle` entry point
+(also used by the `?miditest` injection hook). Events are parsed (`pm-midi`,
+system real-time dropped), matched against mappings (device/channel/selector),
+and applied to a **stable target path** (`layer.<id>.opacity`,
+`layer.<id>.effect.<eid>.param.<i>`, `global.speed`, …). MIDI writes the
+parameter base; app-level triggers (`app.*`, e.g. record) go through a decoupled
+action queue drained by JS. Mappings persist globally (localStorage), keyed by
+stable ids so they survive reload/reorder.
+
+## Scene persistence & share URLs
+
+`pm-scene` is the versioned serde model (layers, sources incl. multipass
+`passes`, effects, transforms, tempo). Import is transactional (parse+validate,
+then swap); ids and multipass config round-trip; GPU history is never
+serialized. Local persistence is `localStorage`. **Share URLs** deflate-raw +
+base64url the scene JSON into the URL **fragment** (`#s=…`) — decoded and
+imported on load, entirely client-side.
+
+## Projection (second screen)
+
+The output window (`output.html`) runs no engine: it displays a `MediaStream`
+captured from the control canvas (`captureStream`). Because `MediaStreamTrack`
+`postMessage` transfer is unsupported in the target Chrome, the same-origin
+stream is shared by reference via `window.opener`; a tiny versioned protocol
+(`projection-protocol.ts`: hello/track/bye/ping + peer id) drives the handshake,
+status, and automatic reconnect after a controller reload. The mirror is
+pixel-identical with perfect temporal fidelity and cannot destabilize the main
+renderer.
+
+## Verification
+
+Headed-Chrome Playwright (`web/verify.mjs`) exercises the whole system on a real
+GPU across ~99 checks (audio, shaders, multipass feedback, layers, effects,
+scenes, share URLs, MIDI via synthetic injection, projection, recording, resize,
+reload persistence, About/onboarding, and a soak segment) with 0 WebGPU errors
+and 0 WASM panics. Pure logic (blend math, parameter model, MIDI mapping,
+scene/graph validation + migration, projection protocol) is native-unit-tested.

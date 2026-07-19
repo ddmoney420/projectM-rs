@@ -28,16 +28,19 @@ import init, {
   midi_take_updates,
 } from './pm_web/pm_web.js';
 import { AudioEngine } from './audio';
-import { ShaderConsole } from './shader-console';
 import { ControlsPanel } from './controls';
 import { LayerPanel } from './layers';
 import { EffectRack } from './effects-ui';
 import { Recorder, WakeLock, toggleFullscreen } from './output';
 import { copyShareUrl, loadFromUrl } from './share';
-import { MidiManager } from './midi';
-import { MidiPanel } from './midi-ui';
 import { ProjectionManager } from './projection';
+// Heavy UI modules are lazy-loaded on first open (code-splitting): the shader
+// editor pulls in CodeMirror (~0.5 MB) and the MIDI panel its own bundle, so
+// neither is downloaded before the first rendered frame.
+import type { ShaderConsole } from './shader-console';
+import type { MidiPanel } from './midi-ui';
 import { parseMessage, PROTOCOL_VERSION } from './projection-protocol';
+import { showAbout, maybeShowOnboarding } from './help';
 
 const MIDI_KEY = 'pm-web-midi-v1';
 
@@ -45,8 +48,49 @@ let controlsPanel: ControlsPanel | null = null;
 let layerPanel: LayerPanel | null = null;
 let effectRack: EffectRack | null = null;
 let midiPanel: MidiPanel | null = null;
+let shaderConsole: ShaderConsole | null = null;
 let projection: ProjectionManager | null = null;
 const recorder = new Recorder();
+
+// Lazy-load state for the code-split heavy panels.
+let consoleLoading: Promise<ShaderConsole> | null = null;
+let midiLoading: Promise<void> | null = null;
+let pendingShader: { source: string; mode: number } | null = null;
+
+/** Load the CodeMirror shader console on demand. */
+async function ensureConsole(): Promise<ShaderConsole> {
+  if (shaderConsole) return shaderConsole;
+  if (!consoleLoading) {
+    consoleLoading = (async () => {
+      $('console-host').innerHTML = '<div class="sc-loading">Loading editor…</div>';
+      const { ShaderConsole } = await import('./shader-console');
+      const c = new ShaderConsole($('console-host'));
+      c.onControls = (controls) => controlsPanel?.buildUserControls(controls);
+      shaderConsole = c;
+      if (pendingShader) {
+        c.loadLayer(pendingShader.source, pendingShader.mode);
+        pendingShader = null;
+      }
+      return c;
+    })();
+  }
+  return consoleLoading;
+}
+
+/** Load the MIDI panel + Web-MIDI manager on demand. */
+async function ensureMidi(): Promise<void> {
+  if (midiPanel) return;
+  if (!midiLoading) {
+    midiLoading = (async () => {
+      $('midi-host').innerHTML = '<div class="sc-loading">Loading MIDI…</div>';
+      const [{ MidiManager }, { MidiPanel }] = await Promise.all([import('./midi'), import('./midi-ui')]);
+      const p = new MidiPanel($('midi-host'), new MidiManager());
+      p.onChange = saveMidi;
+      midiPanel = p;
+    })();
+  }
+  return midiLoading;
+}
 
 const canvas = document.getElementById('viz') as HTMLCanvasElement;
 
@@ -167,9 +211,6 @@ function errMsg(e: unknown): string {
 function wireUI(): void {
   controlsPanel = new ControlsPanel($('controls-host'));
 
-  const shaderConsole = new ShaderConsole($('console-host'));
-  shaderConsole.onControls = (controls) => controlsPanel?.buildUserControls(controls);
-
   let selectedLayer: number | null = null;
   const lp = new LayerPanel($('layers-host'));
   layerPanel = lp;
@@ -181,7 +222,9 @@ function wireUI(): void {
     selectedLayer = layerId;
     er.refresh();
     if (kind === 'shader') {
-      shaderConsole.loadLayer(shader.source, shader.mode);
+      // The shader already renders (in Rust); only sync the editor if it's open.
+      if (shaderConsole) shaderConsole.loadLayer(shader.source, shader.mode);
+      else pendingShader = { source: shader.source, mode: shader.mode };
       controlsPanel?.buildUserControls(shader.controls);
     } else {
       controlsPanel?.buildUserControls([]);
@@ -189,8 +232,11 @@ function wireUI(): void {
   };
 
   // Console and Layers both dock on the left — keep them mutually exclusive.
-  $('console-btn').addEventListener('click', () => {
-    $('console').classList.toggle('open');
+  // Opening the console lazy-loads the editor bundle.
+  $('console-btn').addEventListener('click', async () => {
+    const willOpen = !$('console').classList.contains('open');
+    if (willOpen) await ensureConsole();
+    $('console').classList.toggle('open', willOpen);
     $('layers').classList.remove('open');
   });
   $('layers-btn').addEventListener('click', () => {
@@ -206,13 +252,12 @@ function wireUI(): void {
   };
   $('controls-btn').addEventListener('click', () => openRight('controls'));
   $('effects-btn').addEventListener('click', () => openRight('effects'));
-  $('midi-btn').addEventListener('click', () => openRight('midi'));
+  $('midi-btn').addEventListener('click', async () => {
+    if (!$('midi').classList.contains('open')) await ensureMidi();
+    openRight('midi');
+  });
   $('output-btn').addEventListener('click', () => openRight('output'));
-
-  // MIDI performance control (Phase 8b).
-  const midiManager = new MidiManager();
-  midiPanel = new MidiPanel($('midi-host'), midiManager);
-  midiPanel.onChange = saveMidi;
+  $('help-btn').addEventListener('click', () => showAbout());
 
   wireOutput();
   wireProjection();
@@ -384,6 +429,10 @@ function bar(v: number): string {
   return `<span class="bar"><span style="width:${pct.toFixed(0)}%"></span></span>`;
 }
 
+let fpsLastFrame = 0;
+let fpsLastTime = 0;
+let fps = 0;
+
 function updateDiagnostics(): void {
   let d: Record<string, number | boolean> = {};
   try {
@@ -391,10 +440,21 @@ function updateDiagnostics(): void {
   } catch {
     /* wasm not ready */
   }
+  // Render FPS from the frame-counter delta (smoothed).
+  const now = performance.now();
+  const frame = (d.frame as number) ?? 0;
+  if (fpsLastTime && now > fpsLastTime) {
+    const inst = ((frame - fpsLastFrame) * 1000) / (now - fpsLastTime);
+    if (Number.isFinite(inst) && inst >= 0) fps = fps ? fps * 0.7 + inst * 0.3 : inst;
+  }
+  fpsLastFrame = frame;
+  fpsLastTime = now;
+
   const s = engine.status();
   const rows: [string, string][] = [
+    ['fps', `${fps.toFixed(0)} · ${((d.cpuMs as number) ?? 0).toFixed(1)} ms cpu`],
     ['layers', `${d.enabledCount ?? 0}/${d.layerCount ?? 0} on · ${d.shaderCount ?? 0} shader`],
-    ['shader passes', `${d.shaderPasses ?? 0} total · ${d.bufferPasses ?? 0} buffer`],
+    ['passes', `${d.shaderPasses ?? 0} shader · ${d.bufferPasses ?? 0} buffer · ${d.effectPasses ?? 0} effect`],
     ['iTime', `${((d.time as number) ?? 0).toFixed(2)} s`],
     ['speed', `${((d.scale as number) ?? 1).toFixed(2)}× ${d.paused ? '(paused)' : ''}`],
     ['frame', String(d.frame ?? 0)],
@@ -516,10 +576,27 @@ async function boot(): Promise<void> {
       exportScene: () => export_scene(),
       importScene: (j: string) => JSON.parse(import_scene(j)),
     };
+    // Help/onboarding driving for the harness.
+    (window as unknown as Record<string, unknown>).__pmHelp = {
+      about: () => showAbout(),
+      onboarding: () => {
+        try {
+          localStorage.removeItem('pm-web-onboarded-v1');
+        } catch {
+          /* ignore */
+        }
+        maybeShowOnboarding();
+      },
+      overlayShown: () => document.getElementById('pm-overlay')?.classList.contains('show') === true,
+    };
   }
 
   setInterval(updateDiagnostics, 200);
   setInterval(midiTick, 100);
+
+  // First-run welcome (once). Never blocks rendering. Suppressed under the test
+  // flag so the harness isn't blocked by the overlay (it tests it explicitly).
+  if (!location.search.includes('miditest')) maybeShowOnboarding();
 }
 
 void boot();

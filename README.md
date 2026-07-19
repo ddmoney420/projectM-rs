@@ -32,6 +32,60 @@ shader translate failed: 323  (98.0% translate OK)
 Some features remain **deferred** — most notably external sampler/image assets and a parser long-tail
 (see [Current limitations](#current-limitations)).
 
+## Browser app — pm-web (WebGPU/WASM)
+
+Alongside the native player, **`pm-web`** is a full browser frontend: the same
+`pm-*` engine compiled to WebAssembly and rendered on **WebGPU**, wrapped in a
+live VJ-style UI.
+
+**Features**
+
+- **Sources** — audio file, microphone, or tab/system-audio capture, analyzed by
+  the real projectM FFT/beat pipeline (via an AudioWorklet + lock-free ring, not
+  the browser `AnalyserNode`).
+- **Visuals** — a shared Milkdrop engine, a live GLSL console (Shadertoy + raw),
+  and waveform/spectrum overlays, combined in a **layer compositor** (7 blend
+  modes, per-layer 2D transform, opacity/enable).
+- **Effects** — a reorderable per-layer and global effect rack (22 effects incl.
+  bloom, feedback, kaleidoscope) driven by one übershader.
+- **Reactivity** — tempo/beat (auto + tap + manual), an LFO bank, and a
+  base + modulation parameter model (audio bands, beat, LFOs).
+- **Multipass shaders** — Shadertoy-style Buffer A–D + Image with previous-frame
+  feedback, cross-buffer channels, and the projectM audio texture.
+- **MIDI** — Web MIDI mapping with MIDI-Learn, soft-takeover, and
+  absolute/toggle/momentary/trigger modes.
+- **Scenes** — versioned JSON export/import, local persistence, and shareable
+  URLs (scene encoded in the URL fragment — nothing is uploaded).
+- **Output** — canvas recording to WebM, fullscreen + wake lock, and a
+  **second-screen projection** window that mirrors the rendered canvas.
+
+**Quick start**
+
+```bash
+cd web
+npm install
+npm run dev      # builds the wasm module + starts Vite (http://localhost:5173)
+```
+
+Open it in a **WebGPU browser** (recent Chrome, Edge, Firefox, or Safari). There
+is **no WebGL fallback**. Production build: `npm run build` → static `web/dist/`.
+
+**Browser support**: WebGPU is the only hard requirement. Web MIDI (Chrome/Edge),
+tab-audio capture, recording, wake lock, and cross-origin-isolated
+SharedArrayBuffer audio are feature-detected and shown in **About → Browser
+capabilities**.
+
+**Privacy**: all audio, shader source, MIDI, and recordings stay local; share
+URLs encode the scene client-side in the URL fragment; no account, no telemetry.
+
+**More docs**: [architecture](docs/pm-web-architecture.md) ·
+[deployment/headers](docs/deployment.md) ·
+[security review](docs/security-review.md) ·
+[performance](docs/performance-baseline.md) ·
+[known limitations](docs/known-limitations.md) ·
+[release checklist](docs/release-checklist.md). Full verification:
+`bash scripts/release-check.sh`.
+
 ## Quick start
 
 ### Prerequisites

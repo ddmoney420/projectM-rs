@@ -46,7 +46,12 @@ const run = async () => {
 
   // Console + Layers are mutually-exclusive left panels; open the right one.
   const openLayers = async () => { if (!(await page.locator('#layers.open').count())) await page.click('#layers-btn'); await sleep(250); };
-  const openConsole = async () => { if (!(await page.locator('#console.open').count())) await page.click('#console-btn'); await sleep(250); };
+  // Opening the console lazy-loads the CodeMirror bundle; wait for its DOM.
+  const openConsole = async () => {
+    if (!(await page.locator('#console.open').count())) await page.click('#console-btn');
+    await page.waitForSelector('#sc-example', { timeout: 10000 }).catch(() => {});
+    await sleep(250);
+  };
   const rows = () => page.locator('#lp-list .lp-row').count();
   // Range inputs need value + input event (Playwright fill() rejects type=range).
   const setRange = (sel, val) => page.$eval(sel, (e, v) => { e.value = v; e.dispatchEvent(new Event('input', { bubbles: true })); }, String(val));
@@ -276,7 +281,11 @@ const run = async () => {
   const value = async (p) => page.evaluate((pp) => window.__pmMidi.value(pp), p); // hook returns an object
   const setField = (id, f, v) => page.evaluate(([i, ff, vv]) => window.__pmMidi.setField(i, ff, vv), [id, f, String(v)]);
   const mapById = async (id) => (await mappings()).find((m) => m.id === id);
-  const openMidi = async () => { if (!(await page.locator('#midi.open').count())) await page.click('#midi-btn'); await sleep(150); };
+  const openMidi = async () => {
+    if (!(await page.locator('#midi.open').count())) await page.click('#midi-btn');
+    await page.waitForSelector('#midi-target', { timeout: 10000 }).catch(() => {});
+    await sleep(150);
+  };
   const openEffects = async () => { if (!(await page.locator('#effects.open').count())) await page.click('#effects-btn'); await sleep(150); };
   // Learn a mapping via the panel workflow; returns the new mapping id.
   const learn = async (target, s, d1, d2, dev = 'testdev') => {
@@ -714,6 +723,40 @@ const run = async () => {
   await pop.close();
   await page.setViewportSize({ width: 1280, height: 800 });
   await sleep(300);
+
+  // --- Phase 9: release readiness (diagnostics, About, onboarding, soak) ---
+  const diag1 = await page.evaluate(() => window.__pmDiag());
+  results.p9CpuMs = typeof diag1.cpuMs === 'number' && diag1.cpuMs >= 0;
+  results.p9EffectPasses = typeof diag1.effectPasses === 'number';
+  results.p9ShaderPasses = typeof diag1.shaderPasses === 'number';
+
+  // Soak: the renderer keeps advancing frames (≈ FPS) over a few seconds.
+  const f0 = diag1.frame ?? 0;
+  await sleep(3000);
+  const diag2 = await page.evaluate(() => window.__pmDiag());
+  const soakFps = ((diag2.frame ?? 0) - f0) / 3;
+  results.p9SoakFps = Number(soakFps.toFixed(1));
+  results.p9SoakAdvances = soakFps > 30;
+  results.p9CpuMsValue = Number((diag2.cpuMs ?? 0).toFixed(2));
+
+  // About panel: version + capability matrix.
+  await page.evaluate(() => window.__pmHelp.about());
+  await sleep(250);
+  results.p9AboutShown = await page.evaluate(() => window.__pmHelp.overlayShown());
+  results.p9AboutHasVersion = (await page.locator('#pm-overlay .ver').innerText()).includes('v0.9');
+  results.p9CapabilityMatrix = (await page.locator('#pm-overlay .pm-cap').count()) >= 8;
+  results.p9WebgpuCapability = (await page.locator('#pm-overlay .pm-cap').first().locator('.ok').count()) === 1;
+  await page.locator('#pm-overlay .pm-ov-x').click();
+  await sleep(200);
+  results.p9AboutCloses = (await page.evaluate(() => window.__pmHelp.overlayShown())) === false;
+
+  // First-run onboarding overlay shows + dismisses.
+  await page.evaluate(() => window.__pmHelp.onboarding());
+  await sleep(200);
+  results.p9OnboardingShown = await page.evaluate(() => window.__pmHelp.overlayShown());
+  await page.locator('#pm-overlay #pm-ov-start').click();
+  await sleep(200);
+  results.p9OnboardingDismisses = (await page.evaluate(() => window.__pmHelp.overlayShown())) === false;
 
   results.consolePanics = logs.filter((l) => /panicked|RuntimeError|unreachable/.test(l)).length;
   results.consoleErrors = logs.filter((l) => l.startsWith('[error]') || l.startsWith('[pageerror]')).length;

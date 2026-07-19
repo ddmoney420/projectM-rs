@@ -145,6 +145,9 @@ struct Diagnostics {
     shader_count: u32,
     buffer_passes: u32,
     shader_passes: u32,
+    effect_passes: u32,
+    /// Exponential moving average of CPU time spent in `render()` (ms).
+    cpu_ms: f32,
     bpm: f32,
     beat_phase: f32,
     beat_pulse: f32,
@@ -196,7 +199,7 @@ pub fn get_diagnostics() -> String {
              \"time\":{:.2},\"delta\":{:.4},\"scale\":{:.2},\"paused\":{},\
              \"frame\":{},\"width\":{},\"height\":{},\
              \"layerCount\":{},\"enabledCount\":{},\"shaderCount\":{},\
-             \"bufferPasses\":{},\"shaderPasses\":{},\
+             \"bufferPasses\":{},\"shaderPasses\":{},\"effectPasses\":{},\"cpuMs\":{:.2},\
              \"bpm\":{:.1},\"beatPhase\":{:.3},\"beatPulse\":{:.3},\
              \"tempoConfidence\":{:.2},\"tempoManual\":{}}}",
             d.has_audio,
@@ -222,6 +225,8 @@ pub fn get_diagnostics() -> String {
             d.shader_count,
             d.buffer_passes,
             d.shader_passes,
+            d.effect_passes,
+            d.cpu_ms,
             d.bpm,
             d.beat_phase,
             d.beat_pulse,
@@ -338,7 +343,14 @@ pub async fn run(canvas_id: String) -> Result<(), JsValue> {
     let g = f.clone();
     let st = state.clone();
     *g.borrow_mut() = Some(Closure::wrap(Box::new(move || {
+        let t0 = perf_now();
         st.borrow_mut().render();
+        let dt = (perf_now() - t0) as f32;
+        DIAG.with(|d| {
+            let mut d = d.borrow_mut();
+            // EMA so the panel reads a stable CPU-in-render time.
+            d.cpu_ms = if d.cpu_ms > 0.0 { d.cpu_ms * 0.9 + dt * 0.1 } else { dt };
+        });
         request_animation_frame(f.borrow().as_ref().unwrap());
     }) as Box<dyn FnMut()>));
     request_animation_frame(g.borrow().as_ref().unwrap());
@@ -469,6 +481,7 @@ impl State {
             let (buffer_passes, shader_passes) = self.compositor.shader_pass_stats();
             d.buffer_passes = buffer_passes;
             d.shader_passes = shader_passes;
+            d.effect_passes = self.compositor.effect_pass_count();
             d.bpm = self.tempo.bpm();
             d.beat_phase = self.tempo.beat_phase();
             d.beat_pulse = self.tempo.beat_pulse();
@@ -1440,6 +1453,11 @@ pub fn midi_target_value(path: String) -> String {
         )
     })
     .unwrap_or_else(|| "{\"value\":null,\"bool\":null}".into())
+}
+
+/// High-resolution timestamp (ms) for CPU frame-time measurement.
+fn perf_now() -> f64 {
+    web_sys::window().and_then(|w| w.performance()).map(|p| p.now()).unwrap_or(0.0)
 }
 
 fn request_animation_frame(f: &Closure<dyn FnMut()>) {

@@ -845,6 +845,12 @@ impl Compositor {
     pub fn shader_count(&self) -> usize {
         self.layers.iter().filter(|l| l.kind() == LayerKind::Shader).count()
     }
+    /// Total enabled effect passes across all layer chains + the global chain.
+    pub fn effect_pass_count(&self) -> u32 {
+        let layer: usize = self.layers.iter().map(|l| l.effects.enabled_count()).sum();
+        (layer + self.global_chain.enabled_count()) as u32
+    }
+
     /// `(total buffer passes, total shader render passes/frame)` across all
     /// shader layers — for the multipass performance diagnostics.
     pub fn shader_pass_stats(&self) -> (u32, u32) {

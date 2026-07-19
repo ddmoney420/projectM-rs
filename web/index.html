@@ -65,6 +65,8 @@
       .sc-bar #sc-compile { background: #1f6feb; border-color: #1f6feb; }
       .sc-bar .sc-auto { opacity: .85; }
       .sc-bar #sc-status { margin-left: auto; opacity: .85; font-variant-numeric: tabular-nums; }
+      .sc-loading { padding: 1rem; opacity: .6; font-size: 13px; }
+
       /* Multipass tabs + channel config */
       .sc-tabs { display: flex; gap: .2rem; align-items: center; flex-wrap: wrap;
         padding: .3rem .55rem; border-bottom: 1px solid rgba(255,255,255,.08); }
@@ -215,6 +217,37 @@
       body.clean #ui, body.clean #diag, body.clean #console, body.clean #controls,
       body.clean #layers, body.clean #effects, body.clean #midi, body.clean #output { display: none !important; }
       body.clean.hide-cursor { cursor: none; }
+
+      /* About / Help + onboarding overlay */
+      #pm-overlay { position: fixed; inset: 0; display: none; place-items: center; z-index: 20;
+        background: rgba(0,0,0,.6); padding: 1rem; }
+      #pm-overlay.show { display: grid; }
+      .pm-ov-card { position: relative; max-width: 40rem; max-height: 86vh; overflow-y: auto;
+        background: #12141a; border: 1px solid rgba(255,255,255,.14); border-radius: 12px;
+        padding: 1.2rem 1.5rem; box-shadow: 0 10px 40px rgba(0,0,0,.5); }
+      .pm-ov-card h1 { font-size: 1.35rem; margin: 0 0 .5rem; }
+      .pm-ov-card h1 .ver { font-size: .8rem; opacity: .6; font-weight: 400; }
+      .pm-ov-card h2 { font-size: 1rem; margin: 1rem 0 .3rem; }
+      .pm-ov-card h2.warn { color: #ffcf8a; }
+      .pm-ov-card p, .pm-ov-card li { opacity: .9; line-height: 1.5; }
+      .pm-ov-card p.warn { color: #ffcf8a; opacity: 1; }
+      .pm-ov-card ol, .pm-ov-card ul { margin: .3rem 0; padding-left: 1.3rem; }
+      .pm-keys, .pm-caps { list-style: none; padding-left: 0; }
+      .pm-keys li { margin: .15rem 0; }
+      .pm-ov-card kbd { background: #222833; border: 1px solid #39424f; border-radius: 4px;
+        padding: 0 .3rem; font: 12px ui-monospace, monospace; }
+      .pm-caps { display: grid; gap: .2rem; margin-top: .3rem; }
+      .pm-cap { display: grid; grid-template-columns: 1.2rem 9rem 1fr; gap: .4rem; align-items: baseline; font-size: 13px; }
+      .pm-cap .ok { color: #35d0a5; } .pm-cap .no { color: #ff9a9a; }
+      .pm-cap .note { opacity: .55; font-size: 12px; }
+      .pm-ov-x { position: absolute; top: .6rem; right: .7rem; background: transparent; color: #eee;
+        border: 0; font-size: 1.4rem; line-height: 1; cursor: pointer; opacity: .7; }
+      .pm-ov-x:hover { opacity: 1; }
+      .pm-ov-dns { display: flex; gap: .4rem; align-items: center; margin: .6rem 0; opacity: .85; }
+      .pm-ov-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1rem; }
+      .pm-ov-actions button { background: #222833; color: #eee; border: 1px solid #39424f;
+        border-radius: 6px; padding: .45rem .9rem; cursor: pointer; }
+      .pm-ov-actions button.primary { background: #1f6feb; border-color: #1f6feb; }
     </style>
   </head>
   <body>
@@ -254,6 +287,7 @@
       <button id="effects-btn">Effects</button>
       <button id="midi-btn">MIDI</button>
       <button id="output-btn">Output</button>
+      <button id="help-btn" title="Help / About">?</button>
       <span class="sep"></span>
       <button id="share-btn" title="Copy a shareable URL of the current scene (nothing is uploaded)">Share</button>
       <button id="rec-btn" title="Record the canvas to a WebM file">Rec</button>
