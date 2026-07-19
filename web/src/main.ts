@@ -157,7 +157,28 @@ function wireAudioUI(): void {
     if (el) el.loop = loop.checked;
   });
 
-  $('mic-btn').addEventListener('click', async () => {
+  // Media-capture capability detection. Some browsers (notably iOS Safari) do
+  // not implement getDisplayMedia at all, and getUserMedia needs a secure
+  // context — so feature-detect and disable the buttons rather than throwing a
+  // raw "… is not a function" error on click.
+  const micSupported = typeof navigator.mediaDevices?.getUserMedia === 'function';
+  const displaySupported = typeof navigator.mediaDevices?.getDisplayMedia === 'function';
+  const micBtn = $('mic-btn') as HTMLButtonElement;
+  const tabBtn = $('tab-btn') as HTMLButtonElement;
+  if (!micSupported) {
+    micBtn.disabled = true;
+    micBtn.title = "Microphone input isn't available in this browser/context.";
+  }
+  if (!displaySupported) {
+    tabBtn.disabled = true;
+    tabBtn.title = "Tab/system audio capture isn't supported on this browser (e.g. iOS Safari).";
+  }
+
+  micBtn.addEventListener('click', async () => {
+    if (!micSupported) {
+      setStatus("Microphone input isn't available in this browser");
+      return;
+    }
     if (engine.hasSource('mic')) {
       engine.removeSource('mic');
       setStatus('Microphone stopped');
@@ -171,7 +192,11 @@ function wireAudioUI(): void {
     }
   });
 
-  $('tab-btn').addEventListener('click', async () => {
+  tabBtn.addEventListener('click', async () => {
+    if (!displaySupported) {
+      setStatus("Tab/system audio capture isn't supported on this browser");
+      return;
+    }
     if (engine.hasSource('display')) {
       engine.removeSource('display');
       setStatus('Tab/system capture stopped');

@@ -149,6 +149,9 @@ export class AudioEngine {
 
   /** Enable the microphone (analysis only — never monitored back to output). */
   async enableMic(): Promise<void> {
+    if (typeof navigator.mediaDevices?.getUserMedia !== 'function') {
+      throw new Error('Microphone input is not available in this browser.');
+    }
     await this.ensureContext();
     this.removeSource('mic');
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -167,6 +170,9 @@ export class AudioEngine {
 
   /** Capture tab/system audio (analysis only, to avoid echo). Video is dropped. */
   async enableDisplay(): Promise<void> {
+    if (typeof navigator.mediaDevices?.getDisplayMedia !== 'function') {
+      throw new Error('Tab/system audio capture is not supported in this browser (e.g. iOS Safari).');
+    }
     await this.ensureContext();
     this.removeSource('display');
     const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
