@@ -1,8 +1,11 @@
 # pm-web Release Checklist
 
-The browser visualizer (`crates/pm-web` + `web/`) release gate. Run from `web/`
-unless noted. Real-WebGPU browser tests are a **local** gate (hosted CI cannot
-run headed WebGPU reliably — see `docs/deployment.md`).
+The browser visualizer (`crates/pm-web-vj` + `crates/pm-web-player` + `web/`)
+release gate. Run from `web/` unless noted. Real-WebGPU browser tests are a
+**local** gate (hosted CI cannot run headed WebGPU reliably — see
+`docs/deployment.md`). To **publish** a build to production, see
+`docs/deployment.md` → *Production deploy — Cloudflare Pages* and use
+`scripts/deploy-cloudflare-pages.sh`.
 
 ## One-shot verification
 
@@ -13,7 +16,7 @@ bash scripts/release-check.sh
 
 This runs, in order (failing fast):
 
-1. `cargo build --target wasm32-unknown-unknown -p pm-web`
+1. `cargo build --target wasm32-unknown-unknown -p pm-web-vj` (and `-p pm-web-player`)
 2. `cargo build --workspace`
 3. `cargo test --workspace`
 4. `cd web && npx tsc --noEmit`
@@ -26,7 +29,7 @@ This runs, in order (failing fast):
 - [ ] Tracked working tree clean (`git status`).
 - [ ] `web/src/version.ts` `APP_VERSION` bumped.
 - [ ] Rust: `cargo build --workspace` + `cargo test --workspace` pass.
-- [ ] wasm32 build passes (`cargo build --target wasm32-unknown-unknown -p pm-web`).
+- [ ] wasm32 builds pass (`cargo build --target wasm32-unknown-unknown -p pm-web-vj` and `-p pm-web-player`).
 - [ ] TypeScript: `npx tsc --noEmit` clean.
 - [ ] Production build: `npm run build` produces `web/dist/`.
 - [ ] Browser regression: `node verify.mjs` — all checks true, 0 WebGPU errors,
@@ -35,6 +38,9 @@ This runs, in order (failing fast):
       `docs/performance-baseline.md`.
 - [ ] Known issues reviewed (`docs/known-limitations.md`).
 - [ ] Release notes prepared.
+- [ ] Production publish (if deploying): `scripts/deploy-cloudflare-pages.sh <tag> --dry-run`
+      passes, then the real run reports the canonical alias serving the expected
+      hashed asset on branch `main` with COOP/COEP (see `docs/deployment.md`).
 
 ### Manual smoke tests (mark which were actually done)
 
