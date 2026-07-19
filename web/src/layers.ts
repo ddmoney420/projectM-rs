@@ -43,8 +43,8 @@ export class LayerPanel {
   private host: HTMLElement;
   private list!: HTMLElement;
 
-  /** Fired when the selected layer changes (kind + its shader state). */
-  onSelect: ((kind: string, shader: SelectedShader) => void) | null = null;
+  /** Fired when the selected layer changes (kind + its shader state + id). */
+  onSelect: ((kind: string, shader: SelectedShader, layerId: number) => void) | null = null;
 
   constructor(host: HTMLElement) {
     this.host = host;
@@ -180,7 +180,7 @@ export class LayerPanel {
     } catch {
       /* ignore */
     }
-    this.onSelect?.(sel.kind, shader);
+    this.onSelect?.(sel.kind, shader, sel.id);
   }
 
   // --- Scenes -------------------------------------------------------------
@@ -219,7 +219,7 @@ export class LayerPanel {
     return false;
   }
 
-  private save(): void {
+  save(): void {
     try {
       localStorage.setItem(SCENE_KEY, export_scene());
     } catch {

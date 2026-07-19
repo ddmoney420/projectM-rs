@@ -8,6 +8,7 @@ import { AudioEngine } from './audio';
 import { ShaderConsole } from './shader-console';
 import { ControlsPanel } from './controls';
 import { LayerPanel } from './layers';
+import { EffectRack } from './effects-ui';
 
 let controlsPanel: ControlsPanel | null = null;
 
@@ -133,8 +134,14 @@ function wireUI(): void {
   const shaderConsole = new ShaderConsole($('console-host'));
   shaderConsole.onControls = (controls) => controlsPanel?.buildUserControls(controls);
 
+  let selectedLayer: number | null = null;
   const layerPanel = new LayerPanel($('layers-host'));
-  layerPanel.onSelect = (kind, shader) => {
+  const effectRack = new EffectRack($('effects-host'), () => selectedLayer);
+  effectRack.onChanged = () => layerPanel.save();
+
+  layerPanel.onSelect = (kind, shader, layerId) => {
+    selectedLayer = layerId;
+    effectRack.refresh();
     if (kind === 'shader') {
       shaderConsole.loadLayer(shader.source, shader.mode);
       controlsPanel?.buildUserControls(shader.controls);
@@ -152,7 +159,15 @@ function wireUI(): void {
     $('layers').classList.toggle('open');
     $('console').classList.remove('open');
   });
-  $('controls-btn').addEventListener('click', () => $('controls').classList.toggle('open'));
+  // Controls and Effects both dock on the right — mutually exclusive.
+  $('controls-btn').addEventListener('click', () => {
+    $('controls').classList.toggle('open');
+    $('effects').classList.remove('open');
+  });
+  $('effects-btn').addEventListener('click', () => {
+    $('effects').classList.toggle('open');
+    $('controls').classList.remove('open');
+  });
 }
 
 // --- iMouse pointer handling ----------------------------------------------

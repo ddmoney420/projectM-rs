@@ -124,6 +124,44 @@ const run = async () => {
   results.rowsAfterImport = await page.locator('#lp-list .lp-row').count();
   await shot(page, 'p6-08-after-import');
 
+  // Phase 6 regression: duplicate a layer.
+  const rowsBeforeDup = await rows();
+  await page.locator('#lp-list .lp-row').first().locator('.dup').click();
+  await sleep(400);
+  results.dupLayerAdded = (await rows()) === rowsBeforeDup + 1;
+
+  // --- Phase 7: effects ---------------------------------------------------
+  await page.click('#effects-btn'); // right panel, Global mode by default
+  await sleep(300);
+  await page.selectOption('#fx-type', 'bloom');
+  await page.click('#fx-add');
+  await sleep(400);
+  await page.selectOption('#fx-type', 'feedback');
+  await page.click('#fx-add');
+  await sleep(900);
+  results.globalEffects = await page.locator('#fx-list .fx-row').count();
+  await shot(page, 'p7-01-global-bloom-feedback');
+  await sleep(700);
+  await shot(page, 'p7-02-feedback-trail'); // temporal — should differ from p7-01
+
+  // Per-layer effect: select a layer, switch Effects to the Layer tab, add one.
+  await openLayers();
+  await page.locator('#lp-list .lp-row').first().locator('.nm').click();
+  await sleep(200);
+  await page.click('#fx-layer');
+  await sleep(200);
+  await page.selectOption('#fx-type', 'kaleidoscope');
+  await page.click('#fx-add');
+  await sleep(500);
+  results.layerEffects = await page.locator('#fx-list .fx-row').count();
+  await shot(page, 'p7-03-layer-effect');
+
+  // Effects serialize into the persisted scene.
+  const sceneEff = await page.evaluate(() => localStorage.getItem('pm-web-scene-v1'));
+  const se = sceneEff ? JSON.parse(sceneEff) : {};
+  results.sceneGlobalEffects = (se.global_effects || []).length;
+  results.sceneLayerHasEffects = (se.layers || []).some((l) => (l.effects || []).length > 0);
+
   // Invalid scene import must be rejected (keep current).
   const badPath = p('bad-scene.json');
   writeFileSync(badPath, '{"schema_version":999,"layers":[]}');

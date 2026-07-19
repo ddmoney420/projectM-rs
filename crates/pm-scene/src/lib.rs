@@ -195,6 +195,45 @@ impl SourceState {
     }
 }
 
+/// Effect limits (documented; enforced by [`SceneData::validate`]).
+pub const MAX_EFFECTS_PER_LAYER: usize = 8;
+pub const MAX_GLOBAL_EFFECTS: usize = 8;
+pub const MAX_TOTAL_EFFECTS: usize = 64;
+
+/// A modulatable effect parameter's serialized state (mirrors `pm_params::Parameter`
+/// config; min/max/meaning come from the effect type's Rust definition).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ParamData {
+    pub base: f32,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub amount: f32,
+    #[serde(default)]
+    pub smoothing: f32,
+    #[serde(default)]
+    pub curve: String,
+    #[serde(default)]
+    pub invert: bool,
+}
+
+impl ParamData {
+    pub fn new(base: f32) -> Self {
+        ParamData { base, source: String::new(), amount: 0.0, smoothing: 0.0, curve: String::new(), invert: false }
+    }
+}
+
+/// One effect in a chain. `effect_type` is a stable kind name; `params` are the
+/// effect's parameters in a fixed, type-defined order.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct EffectData {
+    pub id: u64,
+    pub name: String,
+    pub effect_type: String,
+    pub enabled: bool,
+    pub params: Vec<ParamData>,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -212,6 +251,8 @@ pub struct LayerData {
     #[serde(default)]
     pub transform: Transform,
     pub source: SourceState,
+    #[serde(default)]
+    pub effects: Vec<EffectData>,
 }
 
 /// A complete scene: ordered layers + global time/tempo settings.
@@ -226,6 +267,8 @@ pub struct SceneData {
     pub bpm: f32,
     pub tempo_manual: bool,
     pub subdivision: f32,
+    #[serde(default)]
+    pub global_effects: Vec<EffectData>,
 }
 
 impl SceneData {
@@ -241,9 +284,14 @@ impl SceneData {
             self.layers.truncate(MAX_LAYERS);
         }
         let mut shader_count = 0;
+        let mut total_effects = 0;
         for l in &mut self.layers {
             l.opacity = l.opacity.clamp(0.0, 1.0);
             l.transform.clamp();
+            if l.effects.len() > MAX_EFFECTS_PER_LAYER {
+                l.effects.truncate(MAX_EFFECTS_PER_LAYER);
+            }
+            total_effects += l.effects.len();
             if let SourceState::Shader { source, .. } = &l.source {
                 shader_count += 1;
                 if source.len() > MAX_SHADER_SOURCE {
@@ -253,6 +301,13 @@ impl SceneData {
         }
         if shader_count > MAX_SHADER_LAYERS {
             return Err(format!("too many shader layers ({shader_count} > {MAX_SHADER_LAYERS})"));
+        }
+        if self.global_effects.len() > MAX_GLOBAL_EFFECTS {
+            self.global_effects.truncate(MAX_GLOBAL_EFFECTS);
+        }
+        total_effects += self.global_effects.len();
+        if total_effects > MAX_TOTAL_EFFECTS {
+            return Err(format!("too many effects ({total_effects} > {MAX_TOTAL_EFFECTS})"));
         }
         self.speed = self.speed.clamp(0.0, 8.0);
         self.bpm = self.bpm.clamp(20.0, 400.0);
@@ -296,6 +351,18 @@ mod tests {
                     blend: BlendMode::Normal,
                     transform: Transform::default(),
                     source: SourceState::Milkdrop,
+                    effects: vec![EffectData {
+                        id: 10,
+                        name: "Bloom".into(),
+                        effect_type: "bloom".into(),
+                        enabled: true,
+                        params: vec![ParamData::new(0.7), {
+                            let mut p = ParamData::new(1.0);
+                            p.source = "bass".into();
+                            p.amount = 0.5;
+                            p
+                        }],
+                    }],
                 },
                 LayerData {
                     id: 2,
@@ -312,6 +379,7 @@ mod tests {
                         mods: vec![ModMapping { slot: 0, source: "bass".into(), amount: 0.5, smoothing: 0.2 }],
                         attribution: Attribution { author: "me".into(), license: "LGPL-2.1".into(), ..Default::default() },
                     },
+                    effects: vec![],
                 },
                 LayerData {
                     id: 3,
@@ -322,6 +390,7 @@ mod tests {
                     blend: BlendMode::Screen,
                     transform: Transform::default(),
                     source: SourceState::Waveform(OverlayConfig::default()),
+                    effects: vec![],
                 },
             ],
             speed: 1.0,
@@ -329,6 +398,13 @@ mod tests {
             bpm: 120.0,
             tempo_manual: false,
             subdivision: 1.0,
+            global_effects: vec![EffectData {
+                id: 20,
+                name: "Vignette".into(),
+                effect_type: "vignette".into(),
+                enabled: true,
+                params: vec![ParamData::new(0.8), ParamData::new(0.5)],
+            }],
         }
     }
 
@@ -421,5 +497,38 @@ mod tests {
                   BlendMode::Difference, BlendMode::Lighten, BlendMode::Darken] {
             assert_eq!(BlendMode::from_u32(m.as_u32()), m);
         }
+    }
+
+    #[test]
+    fn effects_survive_round_trip() {
+        let back = parse_scene(&to_json(&sample_scene())).unwrap();
+        assert_eq!(back.layers[0].effects[0].effect_type, "bloom");
+        assert_eq!(back.layers[0].effects[0].params[1].source, "bass"); // modulation preserved
+        assert!((back.layers[0].effects[0].params[1].amount - 0.5).abs() < 1e-6);
+        assert_eq!(back.global_effects[0].effect_type, "vignette");
+    }
+
+    #[test]
+    fn effects_per_layer_truncated() {
+        let mut scene = sample_scene();
+        let e = scene.layers[0].effects[0].clone();
+        scene.layers[0].effects = (0..20).map(|i| EffectData { id: i, ..e.clone() }).collect();
+        scene.validate().unwrap();
+        assert_eq!(scene.layers[0].effects.len(), MAX_EFFECTS_PER_LAYER);
+    }
+
+    #[test]
+    fn too_many_total_effects_rejected() {
+        let mut scene = sample_scene();
+        let e = scene.global_effects[0].clone();
+        // Fill several layers to blow the total-effects budget.
+        for l in &mut scene.layers {
+            l.effects = (0..MAX_EFFECTS_PER_LAYER).map(|i| EffectData { id: 1000 + i as u64, ..e.clone() }).collect();
+        }
+        // 3 layers × 8 = 24, still under 64; add more layers of effects via clones.
+        let full = scene.layers[0].clone();
+        scene.layers = (0..MAX_LAYERS).map(|i| LayerData { id: i as u64, ..full.clone() }).collect();
+        // MAX_LAYERS(16) × 8 = 128 > MAX_TOTAL_EFFECTS(64) → reject.
+        assert!(scene.validate().is_err());
     }
 }

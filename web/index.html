@@ -112,6 +112,27 @@
       .lp-body { display: flex; gap: .4rem; align-items: center; margin-top: .3rem; }
       .lp-body input[type="range"] { width: 90px; }
       .lp-scene { margin-top: .3rem; border-top: 1px solid rgba(255,255,255,.08); padding-top: .4rem; }
+
+      /* Effects rack (right-docked) */
+      #effects { position: fixed; top: 0; bottom: 44px; right: 0; width: min(320px, 92vw);
+        overflow-y: auto; background: rgba(16,18,23,.97);
+        border-left: 1px solid rgba(255,255,255,.12); transform: translateX(101%);
+        transition: transform .18s ease; z-index: 6; padding: .5rem .6rem; }
+      #effects.open { transform: none; }
+      #effects button, #effects select { background: #222833; color: #eee; border: 1px solid #39424f;
+        border-radius: 5px; padding: .25rem .5rem; cursor: pointer; font-size: 12px; }
+      .fx-tabs button.on { background: #1f6feb; border-color: #1f6feb; }
+      .fx-add, .fx-presets, .fx-bar { display: flex; gap: .3rem; flex-wrap: wrap; margin-bottom: .4rem; }
+      .fx-row { display: flex; align-items: center; gap: .4rem; border: 1px solid rgba(255,255,255,.09);
+        border-radius: 6px; padding: .3rem .4rem; margin-bottom: .3rem; }
+      .fx-row.sel { border-color: #1f6feb; background: rgba(31,111,235,.12); }
+      .fx-row .nm { flex: 1; cursor: pointer; }
+      .fx-btns button { padding: .1rem .3rem; }
+      #fx-params { border-top: 1px solid rgba(255,255,255,.08); margin-top: .4rem; padding-top: .4rem; }
+      .fx-param { margin-bottom: .4rem; }
+      .fx-param input[type="range"] { width: 110px; }
+      .fx-mod { display: flex; gap: .35rem; align-items: center; margin-top: .2rem; opacity: .9; }
+      .fx-mod .src { font-size: 11px; }
     </style>
   </head>
   <body>
@@ -148,6 +169,7 @@
       <button id="layers-btn">Layers</button>
       <button id="console-btn">Console</button>
       <button id="controls-btn">Controls</button>
+      <button id="effects-btn">Effects</button>
       <label>master <input id="master-gain" type="range" min="0" max="2" step="0.01" value="1" /></label>
       <span id="audio-status">No audio source</span>
     </div>
@@ -155,6 +177,7 @@
     <div id="console"><div id="console-host"></div></div>
     <div id="controls"><div id="controls-host"></div></div>
     <div id="layers"><div id="layers-host"></div></div>
+    <div id="effects"><div id="effects-host"></div></div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

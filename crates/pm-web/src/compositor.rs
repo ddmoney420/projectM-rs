@@ -21,6 +21,7 @@ use pm_scene::{
     SCHEMA_VERSION,
 };
 
+use crate::effects::{EffectChain, EffectKind, Effects};
 use crate::live_shader::{CompileOutcome, LiveShader};
 use crate::overlay::OverlayRenderer;
 
@@ -73,6 +74,10 @@ struct Layer {
     blend: BlendMode,
     transform: Transform,
     runtime: Runtime,
+    effects: EffectChain,
+    /// Where this layer's effect chain writes (sampled by the compositor when
+    /// the layer has enabled effects).
+    effect_output: Texture,
 }
 
 impl Layer {
@@ -156,6 +161,7 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
 pub struct Compositor {
     layers: Vec<Layer>,
     next_id: u64,
+    next_effect_id: u64,
     selected: Option<u64>,
     accum_a: Texture,
     accum_b: Texture,
@@ -164,6 +170,9 @@ pub struct Compositor {
     sampler: wgpu::Sampler,
     uniform_buf: wgpu::Buffer,
     blit: Blit,
+    effects: Effects,
+    global_chain: EffectChain,
+    global_output: Texture,
     width: u32,
     height: u32,
 }
@@ -240,6 +249,7 @@ impl Compositor {
         let mut c = Compositor {
             layers: Vec::new(),
             next_id: 1,
+            next_effect_id: 1,
             selected: None,
             accum_a: Texture::new_render_target(device, "accum-a", width, height, TARGET_FORMAT),
             accum_b: Texture::new_render_target(device, "accum-b", width, height, TARGET_FORMAT),
@@ -248,6 +258,9 @@ impl Compositor {
             sampler,
             uniform_buf,
             blit: Blit::new(ctx, surface_format),
+            effects: Effects::new(ctx, width, height),
+            global_chain: EffectChain::default(),
+            global_output: Texture::new_render_target(device, "global-fx", width, height, TARGET_FORMAT),
             width,
             height,
         };
@@ -259,10 +272,105 @@ impl Compositor {
     pub fn load_default(&mut self, ctx: &GpuContext) {
         self.layers.clear();
         self.next_id = 1;
+        self.global_chain = EffectChain::default();
         let m = self.add_layer(ctx, LayerKind::Milkdrop).unwrap();
         let w = self.add_layer(ctx, LayerKind::Waveform).unwrap();
         self.selected = Some(m);
         let _ = w;
+    }
+
+    // --- Effect chains (target 0 = global, else the layer id) --------------
+
+    fn chain_mut(&mut self, target: u64) -> Option<&mut EffectChain> {
+        if target == 0 {
+            Some(&mut self.global_chain)
+        } else {
+            self.layers.iter_mut().find(|l| l.id == target).map(|l| &mut l.effects)
+        }
+    }
+    fn chain(&self, target: u64) -> Option<&EffectChain> {
+        if target == 0 {
+            Some(&self.global_chain)
+        } else {
+            self.layers.iter().find(|l| l.id == target).map(|l| &l.effects)
+        }
+    }
+
+    pub fn add_effect(&mut self, target: u64, type_str: &str) -> Option<u64> {
+        let kind = EffectKind::from_str(type_str)?;
+        let id = self.next_effect_id;
+        let limit = if target == 0 { pm_scene::MAX_GLOBAL_EFFECTS } else { pm_scene::MAX_EFFECTS_PER_LAYER };
+        {
+            let chain = self.chain_mut(target)?;
+            if chain.len() >= limit {
+                return None;
+            }
+            chain.add(id, kind);
+        }
+        self.next_effect_id += 1;
+        Some(id)
+    }
+    pub fn remove_effect(&mut self, target: u64, id: u64) {
+        if let Some(c) = self.chain_mut(target) {
+            c.remove(id);
+        }
+    }
+    pub fn duplicate_effect(&mut self, target: u64, id: u64) -> Option<u64> {
+        let nid = self.next_effect_id;
+        let r = self.chain_mut(target).and_then(|c| c.duplicate(id, nid));
+        if r.is_some() {
+            self.next_effect_id += 1;
+        }
+        r
+    }
+    pub fn move_effect(&mut self, target: u64, id: u64, up: bool) {
+        if let Some(c) = self.chain_mut(target) {
+            c.move_effect(id, up);
+        }
+    }
+    pub fn set_effect_enabled(&mut self, target: u64, id: u64, enabled: bool) {
+        if let Some(c) = self.chain_mut(target) {
+            c.set_enabled(id, enabled);
+        }
+    }
+    pub fn select_effect(&mut self, target: u64, id: u64) {
+        if let Some(c) = self.chain_mut(target) {
+            c.select(id);
+        }
+    }
+    pub fn set_effect_param(&mut self, target: u64, id: u64, idx: usize, base: f32) {
+        if let Some(c) = self.chain_mut(target) {
+            c.set_param(id, idx, base);
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_effect_param_mod(&mut self, target: u64, id: u64, idx: usize, source: &str, amount: f32, smoothing: f32, curve: &str, invert: bool) {
+        if let Some(c) = self.chain_mut(target) {
+            c.set_param_mod(id, idx, source, amount, smoothing, curve, invert);
+        }
+    }
+    pub fn reset_feedback(&mut self, target: u64) {
+        if let Some(c) = self.chain_mut(target) {
+            c.reset_feedback();
+        }
+    }
+    pub fn effects_json(&self, target: u64) -> String {
+        let label = if target == 0 { "global".to_string() } else { target.to_string() };
+        self.chain(target).map(|c| c.to_json(&label)).unwrap_or_else(|| "{\"target\":\"none\",\"effects\":[]}".into())
+    }
+
+    /// Instantiate a built-in effect-rack preset into the target chain.
+    pub fn add_effect_preset(&mut self, target: u64, preset: &str) {
+        let kinds: &[&str] = match preset {
+            "dreamy" => &["bloom", "chromatic", "vignette"],
+            "vhs" => &["rgbsplit", "scanlines", "noise"],
+            "tunnel" => &["feedback", "kaleidoscope"],
+            "acid" => &["hue", "posterize", "feedback"],
+            _ => &[],
+        };
+        for k in kinds {
+            self.add_effect(target, k);
+        }
     }
 
     fn make_runtime(&self, ctx: &GpuContext, kind: LayerKind) -> Runtime {
@@ -313,6 +421,8 @@ impl Compositor {
             blend: BlendMode::Normal,
             transform: Transform::default(),
             runtime,
+            effects: EffectChain::default(),
+            effect_output: Texture::new_render_target(&ctx.device, "layer-fx", self.width, self.height, TARGET_FORMAT),
         });
         self.selected = Some(id);
         Some(id)
@@ -497,12 +607,17 @@ impl Compositor {
         self.height = height;
         self.accum_a = Texture::new_render_target(&ctx.device, "accum-a", width, height, TARGET_FORMAT);
         self.accum_b = Texture::new_render_target(&ctx.device, "accum-b", width, height, TARGET_FORMAT);
+        self.effects.resize(width, height);
+        self.global_output = Texture::new_render_target(&ctx.device, "global-fx", width, height, TARGET_FORMAT);
+        self.global_chain.reset_feedback(); // history is size-dependent
         for l in &mut self.layers {
             match &mut l.runtime {
                 Runtime::Shader(s) => s.shader.resize(ctx, width, height),
                 Runtime::Waveform(o) | Runtime::Spectrum(o) => o.resize(ctx, width, height),
                 Runtime::Milkdrop => {}
             }
+            l.effect_output = Texture::new_render_target(&ctx.device, "layer-fx", width, height, TARGET_FORMAT);
+            l.effects.reset_feedback();
         }
     }
 
@@ -518,6 +633,7 @@ impl Compositor {
         audio: &FrameAudioData,
         base: &ShaderUniforms,
         modctx: &ModContext,
+        time: f32,
     ) {
         // Render each enabled+visible layer's source into its own texture.
         for l in &mut self.layers {
@@ -546,25 +662,44 @@ impl Compositor {
             }
         }
 
+        // Apply per-layer effect chains (source texture → the layer's effect_output).
+        self.effects.begin_frame();
+        for i in 0..self.layers.len() {
+            let layer = &mut self.layers[i];
+            if !layer.enabled || !layer.visible || layer.effects.is_empty_enabled() {
+                continue;
+            }
+            let source_tex: &Texture = match &layer.runtime {
+                Runtime::Milkdrop => player_output,
+                Runtime::Shader(s) => s.shader.output(),
+                Runtime::Waveform(o) | Runtime::Spectrum(o) => o.output(),
+            };
+            self.effects.apply(ctx, &mut layer.effects, source_tex, &layer.effect_output, modctx, time);
+        }
+
         // Clear the first accumulator to opaque black.
         clear_black(ctx, &self.accum_a.view);
         let mut read_is_a = true;
 
         for i in 0..self.layers.len() {
-            let (enabled, visible, opacity, blend, transform, id) = {
+            let (enabled, visible, opacity, blend, transform) = {
                 let l = &self.layers[i];
-                (l.enabled, l.visible, l.opacity, l.blend, l.transform, l.id)
+                (l.enabled, l.visible, l.opacity, l.blend, l.transform)
             };
             if !enabled || !visible {
                 continue;
             }
             let opaque = matches!(self.layers[i].kind(), LayerKind::Milkdrop | LayerKind::Shader);
-            let src_view: &wgpu::TextureView = match &self.layers[i].runtime {
-                Runtime::Milkdrop => &player_output.view,
-                Runtime::Shader(s) => &s.shader.output().view,
-                Runtime::Waveform(o) | Runtime::Spectrum(o) => &o.output().view,
+            let has_fx = !self.layers[i].effects.is_empty_enabled();
+            let src_view: &wgpu::TextureView = if has_fx {
+                &self.layers[i].effect_output.view
+            } else {
+                match &self.layers[i].runtime {
+                    Runtime::Milkdrop => &player_output.view,
+                    Runtime::Shader(s) => &s.shader.output().view,
+                    Runtime::Waveform(o) | Runtime::Spectrum(o) => &o.output().view,
+                }
             };
-            let _ = id;
 
             let (read, write) = if read_is_a {
                 (&self.accum_a, &self.accum_b)
@@ -575,8 +710,14 @@ impl Compositor {
             read_is_a = !read_is_a;
         }
 
+        // Global effects on the composited scene, then blit.
         let final_tex = if read_is_a { &self.accum_a } else { &self.accum_b };
-        self.blit.draw(ctx, final_tex, target);
+        if self.global_chain.is_empty_enabled() {
+            self.blit.draw(ctx, final_tex, target);
+        } else {
+            self.effects.apply(ctx, &mut self.global_chain, final_tex, &self.global_output, modctx, time);
+            self.blit.draw(ctx, &self.global_output, target);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -712,6 +853,7 @@ impl Compositor {
                     Runtime::Waveform(o) => SourceState::Waveform(o.cfg.into()),
                     Runtime::Spectrum(o) => SourceState::Spectrum(o.cfg.into()),
                 },
+                effects: l.effects.to_data(),
             })
             .collect();
         SceneData {
@@ -724,6 +866,7 @@ impl Compositor {
             bpm,
             tempo_manual,
             subdivision,
+            global_effects: self.global_chain.to_data(),
         }
     }
 
@@ -773,6 +916,15 @@ impl Compositor {
             }
             let id = self.next_id;
             self.next_id += 1;
+            let mut chain = EffectChain::default();
+            {
+                let next = &mut self.next_effect_id;
+                chain.from_data(&ld.effects, &mut || {
+                    let eid = *next;
+                    *next += 1;
+                    eid
+                });
+            }
             self.layers.push(Layer {
                 id,
                 name: ld.name.clone(),
@@ -782,6 +934,17 @@ impl Compositor {
                 blend: ld.blend,
                 transform: ld.transform,
                 runtime,
+                effects: chain,
+                effect_output: Texture::new_render_target(&ctx.device, "layer-fx", self.width, self.height, TARGET_FORMAT),
+            });
+        }
+        // Rebuild global effects (feedback history starts clean).
+        {
+            let next = &mut self.next_effect_id;
+            self.global_chain.from_data(&scene.global_effects, &mut || {
+                let eid = *next;
+                *next += 1;
+                eid
             });
         }
         self.selected = self.layers.first().map(|l| l.id);

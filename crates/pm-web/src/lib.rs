@@ -23,6 +23,7 @@ use wasm_bindgen::JsCast;
 use web_sys::HtmlCanvasElement;
 
 mod compositor;
+mod effects;
 mod live_shader;
 mod overlay;
 
@@ -506,7 +507,7 @@ impl State {
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let player_out = self.player.output_texture();
         self.compositor
-            .render(&self.ctx, &view, player_out, &audio, &uniforms, &modctx);
+            .render(&self.ctx, &view, player_out, &audio, &uniforms, &modctx, time);
         frame.present();
     }
 }
@@ -854,6 +855,54 @@ pub fn import_scene(json: String) -> String {
 #[wasm_bindgen]
 pub fn reset_scene() {
     with_state(|s| s.compositor.load_default(&s.ctx));
+}
+
+// --- Effects (target 0 = global scene effects, else a layer id) -----------
+
+#[wasm_bindgen]
+pub fn add_effect(target: f64, type_str: String) -> f64 {
+    with_state(|s| s.compositor.add_effect(target as u64, &type_str).map(|id| id as f64).unwrap_or(-1.0)).unwrap_or(-1.0)
+}
+#[wasm_bindgen]
+pub fn remove_effect(target: f64, id: f64) {
+    with_state(|s| s.compositor.remove_effect(target as u64, id as u64));
+}
+#[wasm_bindgen]
+pub fn duplicate_effect(target: f64, id: f64) -> f64 {
+    with_state(|s| s.compositor.duplicate_effect(target as u64, id as u64).map(|i| i as f64).unwrap_or(-1.0)).unwrap_or(-1.0)
+}
+#[wasm_bindgen]
+pub fn move_effect(target: f64, id: f64, up: bool) {
+    with_state(|s| s.compositor.move_effect(target as u64, id as u64, up));
+}
+#[wasm_bindgen]
+pub fn set_effect_enabled(target: f64, id: f64, enabled: bool) {
+    with_state(|s| s.compositor.set_effect_enabled(target as u64, id as u64, enabled));
+}
+#[wasm_bindgen]
+pub fn select_effect(target: f64, id: f64) {
+    with_state(|s| s.compositor.select_effect(target as u64, id as u64));
+}
+#[wasm_bindgen]
+pub fn set_effect_param(target: f64, id: f64, idx: u32, base: f32) {
+    with_state(|s| s.compositor.set_effect_param(target as u64, id as u64, idx as usize, base));
+}
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn set_effect_param_mod(target: f64, id: f64, idx: u32, source: String, amount: f32, smoothing: f32, curve: String, invert: bool) {
+    with_state(|s| s.compositor.set_effect_param_mod(target as u64, id as u64, idx as usize, &source, amount, smoothing, &curve, invert));
+}
+#[wasm_bindgen]
+pub fn reset_feedback(target: f64) {
+    with_state(|s| s.compositor.reset_feedback(target as u64));
+}
+#[wasm_bindgen]
+pub fn effects_json(target: f64) -> String {
+    with_state(|s| s.compositor.effects_json(target as u64)).unwrap_or_else(|| "{}".into())
+}
+#[wasm_bindgen]
+pub fn add_effect_preset(target: f64, preset: String) {
+    with_state(|s| s.compositor.add_effect_preset(target as u64, &preset));
 }
 
 fn request_animation_frame(f: &Closure<dyn FnMut()>) {
