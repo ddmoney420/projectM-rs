@@ -15,8 +15,9 @@ PORT="${PMW_PORT:-5174}"
 step() { echo; echo "==== $* ===="; }
 fail() { echo "RELEASE-CHECK FAILED: $*" >&2; exit 1; }
 
-step "cargo build (wasm32 -p pm-web)"
-cargo build --target wasm32-unknown-unknown -p pm-web || fail "wasm32 build"
+step "cargo build (wasm32: pm-web-vj + pm-web-player)"
+cargo build --target wasm32-unknown-unknown -p pm-web-vj || fail "wasm32 build (pm-web-vj)"
+cargo build --target wasm32-unknown-unknown -p pm-web-player || fail "wasm32 build (pm-web-player)"
 
 step "cargo build --workspace"
 cargo build --workspace || fail "workspace build"
