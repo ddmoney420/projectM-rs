@@ -28,6 +28,8 @@ import { Recorder, WakeLock, toggleFullscreen } from './output';
 import { copyShareUrl, loadFromUrl } from './share';
 import { MidiManager } from './midi';
 import { MidiPanel } from './midi-ui';
+import { ProjectionManager } from './projection';
+import { parseMessage, PROTOCOL_VERSION } from './projection-protocol';
 
 const MIDI_KEY = 'pm-web-midi-v1';
 
@@ -35,6 +37,7 @@ let controlsPanel: ControlsPanel | null = null;
 let layerPanel: LayerPanel | null = null;
 let effectRack: EffectRack | null = null;
 let midiPanel: MidiPanel | null = null;
+let projection: ProjectionManager | null = null;
 const recorder = new Recorder();
 
 const canvas = document.getElementById('viz') as HTMLCanvasElement;
@@ -186,8 +189,8 @@ function wireUI(): void {
     $('layers').classList.toggle('open');
     $('console').classList.remove('open');
   });
-  // Controls, Effects, and MIDI all dock on the right — mutually exclusive.
-  const rightPanels = ['controls', 'effects', 'midi'];
+  // Controls, Effects, MIDI, Output all dock on the right — mutually exclusive.
+  const rightPanels = ['controls', 'effects', 'midi', 'output'];
   const openRight = (id: string) => {
     const wasOpen = $(id).classList.contains('open');
     rightPanels.forEach((p) => $(p).classList.remove('open'));
@@ -196,6 +199,7 @@ function wireUI(): void {
   $('controls-btn').addEventListener('click', () => openRight('controls'));
   $('effects-btn').addEventListener('click', () => openRight('effects'));
   $('midi-btn').addEventListener('click', () => openRight('midi'));
+  $('output-btn').addEventListener('click', () => openRight('output'));
 
   // MIDI performance control (Phase 8b).
   const midiManager = new MidiManager();
@@ -203,6 +207,70 @@ function wireUI(): void {
   midiPanel.onChange = saveMidi;
 
   wireOutput();
+  wireProjection();
+}
+
+// --- Projection / second-screen output (Phase 8c) -------------------------
+
+function wireProjection(): void {
+  const proj = new ProjectionManager(canvas);
+  projection = proj;
+  const host = $('output-host');
+  host.innerHTML = `
+    <div class="op-row"><button id="op-open" class="primary">Open Output</button><button id="op-close">Close</button></div>
+    <div class="op-status"><span class="op-dot" id="op-dot"></span><span id="op-state">No output window</span></div>
+    <div class="op-row"><button id="op-resync">Re-sync</button><button id="op-front">Bring to front</button></div>
+    <div class="op-row"><button id="op-clean">Clean Output (this window)</button></div>
+    <p class="op-hint">Opens a separate window that mirrors the rendered visuals — no controls, ready for a projector or second monitor. Move it to the other display, then click its ⛶ Fullscreen button. Esc exits Clean Output here.</p>
+    <div class="op-diag" id="op-diag"></div>`;
+
+  const update = () => {
+    const s = proj.status();
+    const dot = $('op-dot');
+    dot.className = 'op-dot' + (s.connected ? ' on' : s.open ? ' wait' : '');
+    $('op-state').textContent = s.connected ? 'Output connected' : s.open ? 'Output open — connecting…' : 'No output window';
+    $('op-diag').textContent = `source ${canvas.width}×${canvas.height} · frames served ${s.served}`;
+  };
+  proj.onStatus = update;
+
+  $('op-open').addEventListener('click', () => {
+    const r = proj.open();
+    if (r === 'blocked') setStatus('Output window blocked — allow pop-ups for this site');
+    else setStatus(r === 'exists' ? 'Output already open' : 'Output window opened');
+    update();
+  });
+  $('op-close').addEventListener('click', () => { proj.close(); update(); });
+  $('op-resync').addEventListener('click', () => proj.resync());
+  $('op-front').addEventListener('click', () => proj.focusOutput());
+  $('op-clean').addEventListener('click', () => setClean(!document.body.classList.contains('clean')));
+  // Esc leaves Clean Output (the UI is hidden, so give a keyboard way out).
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && document.body.classList.contains('clean')) setClean(false);
+  });
+  update();
+  setInterval(update, 1000);
+}
+
+// Clean Output on the control window: hide all UI + auto-hide the cursor.
+let cleanCursorTimer = 0;
+function setClean(on: boolean): void {
+  document.body.classList.toggle('clean', on);
+  ($('op-clean') as HTMLButtonElement | null)?.classList.toggle('on', on);
+  if (on) {
+    const poke = () => {
+      document.body.classList.remove('hide-cursor');
+      clearTimeout(cleanCursorTimer);
+      cleanCursorTimer = window.setTimeout(() => document.body.classList.add('hide-cursor'), 2500);
+    };
+    (window as unknown as { __pmCleanPoke?: () => void }).__pmCleanPoke = poke;
+    window.addEventListener('pointermove', poke);
+    poke();
+  } else {
+    const poke = (window as unknown as { __pmCleanPoke?: () => void }).__pmCleanPoke;
+    if (poke) window.removeEventListener('pointermove', poke);
+    clearTimeout(cleanCursorTimer);
+    document.body.classList.remove('hide-cursor');
+  }
 }
 
 // --- MIDI persistence + app-action dispatch -------------------------------
@@ -411,6 +479,22 @@ async function boot(): Promise<void> {
       compileSelected: (mode: number, src: string) => set_shader_source(mode, src),
       setField: (id: number, field: string, value: string) => midi_set_mapping_field(id, String(field), String(value)),
       value: (path: string) => JSON.parse(midi_target_value(path)),
+    };
+    // Projection protocol validation + live status, for harness assertions.
+    (window as unknown as Record<string, unknown>).__pmProto = {
+      VERSION: PROTOCOL_VERSION,
+      parse: (d: unknown) => parseMessage(d),
+    };
+    (window as unknown as Record<string, unknown>).__pmProj = {
+      status: () => projection?.status() ?? { open: false, connected: false, served: 0 },
+      clean: () => document.body.classList.contains('clean'),
+    };
+    (window as unknown as Record<string, unknown>).__pmDiag = () => {
+      try {
+        return JSON.parse(get_diagnostics());
+      } catch {
+        return {};
+      }
     };
   }
 

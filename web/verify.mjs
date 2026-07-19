@@ -486,6 +486,129 @@ const run = async () => {
   await sleep(300);
   await shot(page, 'p8b-01-midi');
 
+  // --- Phase 8c: projection / second-screen output ------------------------
+  // Architecture: the output window MIRRORS the control canvas via a transferred
+  // capture track, so every change propagates for free. We verify the mirror is
+  // live (deterministic black/recover), and the window lifecycle/protocol.
+  const brightnessOf = (pg, sel) =>
+    pg.evaluate((s) => {
+      const el = document.querySelector(s);
+      if (!el) return -1;
+      const c = document.createElement('canvas');
+      c.width = 32;
+      c.height = 32;
+      const ctx = c.getContext('2d');
+      try {
+        ctx.drawImage(el, 0, 0, 32, 32);
+        const d = ctx.getImageData(0, 0, 32, 32).data;
+        let sum = 0;
+        for (let i = 0; i < d.length; i += 4) sum += d[i] + d[i + 1] + d[i + 2];
+        return sum / (32 * 32 * 3);
+      } catch {
+        return -1;
+      }
+    }, sel);
+
+  await page.click('#output-btn');
+  await sleep(200);
+
+  // Protocol validation (pure).
+  results.projProtoValid = await page.evaluate(() => !!window.__pmProto.parse({ pm: 'proj', v: window.__pmProto.VERSION, t: 'hello', peer: 'p1' }));
+  results.projProtoVersionRejected = await page.evaluate(() => window.__pmProto.parse({ pm: 'proj', v: 999, t: 'hello', peer: 'p1' }) === null);
+  results.projProtoGarbageRejected = await page.evaluate(() => window.__pmProto.parse('nope') === null && window.__pmProto.parse({ t: 'hello' }) === null);
+
+  // Open the output window from the button (user gesture → popup).
+  const [popup] = await Promise.all([page.waitForEvent('popup'), page.click('#op-open')]);
+  await popup.waitForLoadState('load');
+  results.projPopupOpened = !!popup;
+  results.projNoControlUi = (await popup.locator('#ui').count()) === 0 && (await popup.locator('#out').count()) === 1;
+
+  // Wait for the capture track handshake → video shows frames.
+  await popup.waitForFunction(() => { const v = document.getElementById('out'); return !!v && v.videoWidth > 0 && v.readyState >= 2; }, { timeout: 10000 }).catch(() => {});
+  const vs = await popup.evaluate(() => { const v = document.getElementById('out'); return { hasSrc: !!v.srcObject, w: v.videoWidth, h: v.videoHeight, rs: v.readyState, paused: v.paused }; });
+  results.projVideoConnected = vs.hasSrc && vs.w > 0 && vs.rs >= 2;
+  results.projSourceResolution = `${vs.w}x${vs.h}`;
+  results.projControllerConnected = (await page.evaluate(() => window.__pmProj.status())).connected === true;
+  await sleep(300);
+  await shot(popup, 'p8c-01-output');
+
+  // Clear the global effect chain first so a saturated feedback/bloom
+  // accumulator (built up over earlier phases) doesn't mask control changes —
+  // then prove the mirror tracks a control-side change deterministically.
+  await openEffects();
+  await page.click('#fx-global');
+  await sleep(150);
+  const gCount = await page.locator('#fx-list .fx-row').count();
+  for (let i = 0; i < gCount; i++) {
+    await page.locator('#fx-list .fx-row .rm').first().click();
+    await sleep(150);
+  }
+  await sleep(700);
+
+  const enAll = async (checked) => {
+    const n = await page.locator('#lp-list .lp-row .en').count();
+    for (let i = 0; i < n; i++) {
+      const en = page.locator('#lp-list .lp-row .en').nth(i);
+      if ((await en.isChecked()) !== checked) await en.setChecked(checked);
+    }
+  };
+  await openLayers();
+  const bOn = await brightnessOf(popup, '#out');
+  await enAll(false);
+  await sleep(1500);
+  const bOff = await brightnessOf(popup, '#out');
+  await enAll(true);
+  await sleep(1200);
+  const bRec = await brightnessOf(popup, '#out');
+  results.projMirrorBrightness = { on: Number(bOn.toFixed(1)), off: Number(bOff.toFixed(1)), rec: Number(bRec.toFixed(1)) };
+  results.projMirrorContent = bOn > 8;
+  results.projMirrorTracksLayers = bOff < bOn - 3 && bRec > bOff + 3;
+
+  // A shader recompile + a MIDI inject still show up live in the mirror.
+  await page.evaluate(() => window.__pmMidi.compileSelected(0, '// @control g float 0 1 1\nvoid mainImage(out vec4 o, in vec2 f){ o = vec4(0.6, 0.2, 0.8, 1.0); }'));
+  await sleep(700);
+  results.projLiveAfterChange = (await brightnessOf(popup, '#out')) > 6;
+
+  // Resize the output window (aspect-preserving; source resolution is the mirror).
+  await popup.setViewportSize({ width: 640, height: 360 });
+  await sleep(500);
+  const winSize = await popup.evaluate(() => ({ w: window.innerWidth, h: window.innerHeight }));
+  results.projResize = winSize.w === 640 && winSize.h === 360;
+
+  // Clean Output on the control window hides all UI; Esc restores it.
+  await page.click('#output-btn'); // re-open the Output panel (Effects closed it)
+  await sleep(150);
+  await page.click('#op-clean');
+  await sleep(200);
+  results.projCleanHidesUi = (await page.evaluate(() => window.__pmProj.clean())) === true && !(await page.locator('#ui').isVisible());
+  await page.keyboard.press('Escape');
+  await sleep(200);
+  results.projCleanExits = (await page.evaluate(() => window.__pmProj.clean())) === false;
+
+  // Close output via the Close button → controller stays stable; then reopen.
+  // (Stability = the renderer keeps advancing frames; a WebGPU canvas can't be
+  // sampled with drawImage, so we read the frame counter from diagnostics.)
+  const frameBeforeClose = (await page.evaluate(() => window.__pmDiag())).frame ?? 0;
+  await page.click('#op-close');
+  await sleep(700);
+  const stClosed = await page.evaluate(() => window.__pmProj.status());
+  results.projCloseDetected = stClosed.connected === false && stClosed.open === false;
+  const frameAfterClose = (await page.evaluate(() => window.__pmDiag())).frame ?? 0;
+  results.projMainStableAfterClose = frameAfterClose > frameBeforeClose;
+
+  const [popup2] = await Promise.all([page.waitForEvent('popup'), page.click('#op-open')]);
+  await popup2.waitForLoadState('load');
+  await popup2.waitForFunction(() => { const v = document.getElementById('out'); return !!v && v.videoWidth > 0 && v.readyState >= 2; }, { timeout: 10000 }).catch(() => {});
+  results.projReopen = (await popup2.evaluate(() => { const v = document.getElementById('out'); return !!v.srcObject && v.videoWidth > 0; })) === true;
+
+  // Reload the controller while output stays open → automatic reconnection.
+  await page.goto(`${URL_BASE}?miditest=1`, { waitUntil: 'load' });
+  await sleep(3500);
+  await popup2.waitForFunction(() => { const v = document.getElementById('out'); return !!v && v.videoWidth > 0 && v.readyState >= 2; }, { timeout: 12000 }).catch(() => {});
+  results.projReconnectAfterReload = (await popup2.evaluate(() => { const v = document.getElementById('out'); return !!v.srcObject && v.videoWidth > 0 && v.readyState >= 2; })) === true;
+  await shot(popup2, 'p8c-02-reconnected');
+  await popup2.close();
+
   results.consolePanics = logs.filter((l) => /panicked|RuntimeError|unreachable/.test(l)).length;
   results.consoleErrors = logs.filter((l) => l.startsWith('[error]') || l.startsWith('[pageerror]')).length;
 

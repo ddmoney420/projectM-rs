@@ -32,6 +32,14 @@ function crossOriginIsolation(): Plugin {
 export default defineConfig({
   plugins: [crossOriginIsolation()],
   server: { port: 5173 },
+  // Two pages: the control app (index.html) and the projection output window
+  // (output.html) opened as a popup for a second screen / projector.
+  build: {
+    rollupOptions: {
+      // Relative to the project root; avoids a node types dependency here.
+      input: { main: 'index.html', output: 'output.html' },
+    },
+  },
   // The wasm-pack output is a hand-managed ESM package; don't pre-bundle it.
   optimizeDeps: { exclude: ['./src/pm_web/pm_web.js'] },
 });

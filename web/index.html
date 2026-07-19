@@ -175,6 +175,30 @@
         font-variant-numeric: tabular-nums; }
       .midi-diag .row { display: flex; justify-content: space-between; gap: .5rem; padding: 1px 0; font-size: 12px; }
       .midi-diag .k { opacity: .65; }
+
+      /* Output / projection panel (right-docked) */
+      #output { position: fixed; top: 0; bottom: var(--bar-h, 44px); right: 0; width: min(320px, 94vw);
+        overflow-y: auto; background: rgba(16,18,23,.97);
+        border-left: 1px solid rgba(255,255,255,.12); transform: translateX(101%);
+        transition: transform .18s ease; z-index: 6; padding: .5rem .6rem; }
+      #output.open { transform: none; }
+      #output button { background: #222833; color: #eee; border: 1px solid #39424f;
+        border-radius: 5px; padding: .3rem .6rem; cursor: pointer; font-size: 12px; }
+      #output button.on { background: #1f6feb; border-color: #1f6feb; }
+      #output button.primary { background: #1f6feb; border-color: #1f6feb; }
+      .op-row { display: flex; gap: .4rem; flex-wrap: wrap; align-items: center; margin: .4rem 0; }
+      .op-status { display: flex; align-items: center; gap: .4rem; margin: .3rem 0; }
+      .op-dot { width: 9px; height: 9px; border-radius: 50%; background: #555; }
+      .op-dot.on { background: #35d0a5; }
+      .op-dot.wait { background: #e0b341; }
+      .op-hint { opacity: .6; font-size: 12px; margin: .3rem 0; }
+      #output .op-diag { border-top: 1px solid rgba(255,255,255,.08); margin-top: .4rem; padding-top: .4rem;
+        font: 12px/1.5 ui-monospace, monospace; opacity: .8; }
+
+      /* Clean Output mode on the control window: only the canvas is shown. */
+      body.clean #ui, body.clean #diag, body.clean #console, body.clean #controls,
+      body.clean #layers, body.clean #effects, body.clean #midi, body.clean #output { display: none !important; }
+      body.clean.hide-cursor { cursor: none; }
     </style>
   </head>
   <body>
@@ -213,6 +237,7 @@
       <button id="controls-btn">Controls</button>
       <button id="effects-btn">Effects</button>
       <button id="midi-btn">MIDI</button>
+      <button id="output-btn">Output</button>
       <span class="sep"></span>
       <button id="share-btn" title="Copy a shareable URL of the current scene (nothing is uploaded)">Share</button>
       <button id="rec-btn" title="Record the canvas to a WebM file">Rec</button>
@@ -227,6 +252,7 @@
     <div id="layers"><div id="layers-host"></div></div>
     <div id="effects"><div id="effects-host"></div></div>
     <div id="midi"><div id="midi-host"></div></div>
+    <div id="output"><div id="output-host"></div></div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>
