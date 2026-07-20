@@ -118,9 +118,43 @@ export function parseDeploymentBranch(apiResponse) {
   throw new Error('could not find deployment_trigger.metadata.branch in API response');
 }
 
+const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Poll a canonical alias until it serves the expected hashed asset. Cloudflare
+ * edge-caches `index.html` briefly after a deploy, so the alias can serve the
+ * previous build for a short window — we retry a BOUNDED number of times and
+ * fail on exhaustion (never loop forever). `fetchHtml` and `sleep` are injected
+ * so this is unit-testable without the network. Returns
+ * `{ matched, attempts, asset }`.
+ */
+export async function pollForAssetMatch({
+  fetchHtml,
+  expected,
+  attempts = 10,
+  delayMs = 12000,
+  sleep = defaultSleep,
+  onAttempt,
+}) {
+  let last = null;
+  for (let i = 1; i <= attempts; i++) {
+    let asset = null;
+    try {
+      asset = extractMainAsset(await fetchHtml(i));
+    } catch {
+      asset = null;
+    }
+    last = asset;
+    if (onAttempt) onAttempt(i, asset);
+    if (asset === expected) return { matched: true, attempts: i, asset };
+    if (i < attempts) await sleep(delayMs);
+  }
+  return { matched: false, attempts, asset: last };
+}
+
 // --- CLI dispatch -----------------------------------------------------------
 
-function main(argv) {
+async function main(argv) {
   const [cmd, ...rest] = argv;
   try {
     switch (cmd) {
@@ -139,6 +173,22 @@ function main(argv) {
       case 'parse-deploy-branch':
         process.stdout.write(parseDeploymentBranch(readFileSync(rest[0], 'utf8')) + '\n');
         return 0;
+      case 'poll-asset': {
+        // poll-asset <url> <expected> [attempts] [delayMs]
+        const [url, expected, at, dl] = rest;
+        const r = await pollForAssetMatch({
+          // `connection: close` + no-store so undici doesn't keep a socket
+          // pooled — otherwise the process lingers / trips a libuv exit
+          // assertion on Windows.
+          fetchHtml: async () => (await fetch(url, { cache: 'no-store', headers: { connection: 'close' } })).text(),
+          expected,
+          attempts: at ? Number(at) : 10,
+          delayMs: dl ? Number(dl) : 12000,
+          onAttempt: (i, a) => process.stderr.write(`  attempt ${i}: ${a ?? '<none>'} (want ${expected})\n`),
+        });
+        process.stdout.write((r.asset ?? '') + '\n');
+        return r.matched ? 0 : 1;
+      }
       default:
         process.stderr.write(`unknown subcommand: ${cmd ?? '(none)'}\n`);
         return 2;
@@ -150,6 +200,11 @@ function main(argv) {
 }
 
 // Only run the CLI when executed directly (not when imported by the test file).
+// Set exitCode and let the event loop drain rather than calling process.exit()
+// synchronously — an abrupt exit while a fetch socket is still closing trips a
+// libuv assertion on Windows.
 if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith('deploy-verify.mjs')) {
-  process.exit(main(process.argv.slice(2)));
+  main(process.argv.slice(2)).then((code) => {
+    process.exitCode = code;
+  });
 }

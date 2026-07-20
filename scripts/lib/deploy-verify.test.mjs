@@ -10,7 +10,11 @@ import {
   assertCoopCoep,
   resolveProvenance,
   parseDeploymentBranch,
+  pollForAssetMatch,
 } from './deploy-verify.mjs';
+
+const noSleep = () => Promise.resolve();
+const htmlFor = (asset) => `<script src="/assets/${asset}"></script>`;
 
 // --- hashed asset detection ---
 test('extractMainAsset: pulls main-<hash>.js from a script tag', () => {
@@ -113,4 +117,55 @@ test('parseDeploymentBranch: accepts a JSON string', () => {
 
 test('parseDeploymentBranch: throws when branch absent', () => {
   assert.throws(() => parseDeploymentBranch({ result: {} }), /could not find/);
+});
+
+// --- edge-cache retry: stale index.html then the new build ---
+test('pollForAssetMatch: eventually matches after stale attempts', async () => {
+  const seq = ['main-Old.js', 'main-Old.js', 'main-New.js'];
+  let i = 0;
+  const r = await pollForAssetMatch({
+    fetchHtml: async () => htmlFor(seq[i++]),
+    expected: 'main-New.js',
+    attempts: 5,
+    sleep: noSleep,
+  });
+  assert.equal(r.matched, true);
+  assert.equal(r.attempts, 3);
+  assert.equal(r.asset, 'main-New.js');
+});
+
+test('pollForAssetMatch: fails after exhausting bounded attempts', async () => {
+  const r = await pollForAssetMatch({
+    fetchHtml: async () => htmlFor('main-Old.js'), // expected build never appears
+    expected: 'main-New.js',
+    attempts: 4,
+    sleep: noSleep,
+  });
+  assert.equal(r.matched, false);
+  assert.equal(r.attempts, 4); // bounded — did not loop forever
+  assert.equal(r.asset, 'main-Old.js');
+});
+
+test('pollForAssetMatch: matches on the first attempt when already live', async () => {
+  const r = await pollForAssetMatch({
+    fetchHtml: async () => htmlFor('main-New.js'),
+    expected: 'main-New.js',
+    attempts: 3,
+    sleep: noSleep,
+  });
+  assert.equal(r.matched, true);
+  assert.equal(r.attempts, 1);
+});
+
+test('pollForAssetMatch: tolerates a fetch/parse failure then recovers', async () => {
+  const seq = [() => { throw new Error('network'); }, () => htmlFor('main-New.js')];
+  let i = 0;
+  const r = await pollForAssetMatch({
+    fetchHtml: async () => seq[i++](),
+    expected: 'main-New.js',
+    attempts: 3,
+    sleep: noSleep,
+  });
+  assert.equal(r.matched, true);
+  assert.equal(r.attempts, 2);
 });

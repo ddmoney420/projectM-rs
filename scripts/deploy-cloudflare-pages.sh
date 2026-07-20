@@ -20,10 +20,14 @@
 # Any provenance check that does not match fails loudly.
 #
 # Usage:
-#   scripts/deploy-cloudflare-pages.sh <tag-or-commit> [--dry-run]
+#   scripts/deploy-cloudflare-pages.sh <tag-or-commit> [--dry-run|--verify-only]
 #
-#   --dry-run   resolve + build + detect asset + generate/verify _headers, then
-#               STOP before any Cloudflare operation. Publishes nothing.
+#   --dry-run      resolve + build + detect asset + generate/verify _headers,
+#                  then STOP before any Cloudflare operation. Publishes nothing.
+#   --verify-only  build the release, then verify the ALREADY-LIVE production
+#                  alias serves exactly that build (asset match + COOP/COEP).
+#                  Publishes nothing; needs no credentials (reads the public
+#                  alias). Use it to confirm what is currently in production.
 #
 # Credentials (real deploy only) come from the environment Wrangler expects:
 #   CLOUDFLARE_API_TOKEN   (Pages:Edit)     — never printed
@@ -47,18 +51,38 @@ usage() {
 log()  { echo; echo "==== $* ===="; }
 fail() { echo "DEPLOY FAILED: $*" >&2; exit 1; }
 
+# Verify the LIVE canonical production alias serves the exact build we produced
+# (bounded edge-cache poll — the retry semantics are unit-tested via
+# pollForAssetMatch in scripts/lib/deploy-verify.test.mjs) with the required
+# COOP/COEP headers. Shared by the real deploy path and --verify-only. Reads the
+# public alias only; requires $EXPECTED_ASSET to be set.
+verify_production() {
+  log "verify canonical production alias ($PROD_URL)"
+  node "$LIB" poll-asset "$PROD_URL/" "$EXPECTED_ASSET" "$POLL_ATTEMPTS" "$((POLL_INTERVAL * 1000))" \
+    || fail "production alias never served $EXPECTED_ASSET within $POLL_ATTEMPTS attempts (stale edge cache, or production was not updated)"
+  log "verify production headers"
+  local hdrs; hdrs="$(mktemp)"
+  curl -sI "$PROD_URL/" >"$hdrs"
+  node "$LIB" verify-headers "$hdrs" || { rm -f "$hdrs"; fail "production alias missing/incorrect COOP/COEP"; }
+  rm -f "$hdrs"
+  echo "production alias verified: serving $EXPECTED_ASSET with COOP/COEP"
+}
+
 # --- arg parsing ---
 RELEASE=""
 DRY_RUN=0
+VERIFY_ONLY=0
 for a in "$@"; do
   case "$a" in
     --dry-run) DRY_RUN=1 ;;
+    --verify-only) VERIFY_ONLY=1 ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "unknown option: $a" >&2; exit 2 ;;
     *) if [ -z "$RELEASE" ]; then RELEASE="$a"; else echo "unexpected extra arg: $a" >&2; exit 2; fi ;;
   esac
 done
-[ -n "$RELEASE" ] || { echo "usage: scripts/deploy-cloudflare-pages.sh <tag-or-commit> [--dry-run]" >&2; exit 2; }
+[ -n "$RELEASE" ] || { echo "usage: scripts/deploy-cloudflare-pages.sh <tag-or-commit> [--dry-run|--verify-only]" >&2; exit 2; }
+[ "$DRY_RUN" = "1" ] && [ "$VERIFY_ONLY" = "1" ] && { echo "--dry-run and --verify-only are mutually exclusive" >&2; exit 2; }
 
 # --- 1/2. resolve + verify release provenance (never create/move tags) ---
 log "resolve release provenance"
@@ -109,13 +133,27 @@ printf '/*\n  Cross-Origin-Opener-Policy: same-origin\n  Cross-Origin-Embedder-P
 node "$LIB" verify-headers "$DIST/_headers" || fail "generated _headers is missing COOP/COEP"
 echo "_headers present with COOP/COEP"
 
-# --- dry run stops here ---
+# --- dry run stops here (no deploy, no live verification) ---
 if [ "$DRY_RUN" = "1" ]; then
   log "DRY RUN OK"
-  echo "release        : $RELEASE ($COMMIT)"
-  echo "expected asset : $EXPECTED_ASSET"
-  echo "artifact       : $DIST (with verified _headers)"
+  echo "release          : $RELEASE ($COMMIT)"
+  echo "expected asset   : $EXPECTED_ASSET"
+  echo "artifact         : $DIST (with verified _headers)"
+  echo "intended project : $PROJECT   intended branch: $PROD_BRANCH"
   echo "NOT published — skipped Wrangler deploy + production alias verification."
+  exit 0
+fi
+
+# --- verify-only: compare the ALREADY-LIVE production alias to this build ---
+# No deploy, no credentials — reads the public alias. Confirms what is currently
+# in production actually matches the given release.
+if [ "$VERIFY_ONLY" = "1" ]; then
+  verify_production
+  log "VERIFY-ONLY OK"
+  echo "release        : $RELEASE ($COMMIT)"
+  echo "production url  : $PROD_URL"
+  echo "serving asset  : $EXPECTED_ASSET (matches this release build)"
+  echo "NOT deployed — verification only."
   exit 0
 fi
 
@@ -151,26 +189,8 @@ echo "deployment branch : $DEPLOY_BRANCH"
 node "$LIB" assert-branch "$DEPLOY_BRANCH" \
   || fail "deployment is on branch '$DEPLOY_BRANCH', not production '$PROD_BRANCH' — this is a PREVIEW, not a production release"
 
-# --- 11. verify the canonical production alias serves the EXACT expected asset ---
-log "verify canonical production alias ($PROD_URL)"
-MATCHED=0
-PROD_HTML="$(mktemp)"
-for i in $(seq 1 "$POLL_ATTEMPTS"); do
-  curl -s "$PROD_URL/" >"$PROD_HTML" || true
-  PROD_ASSET="$(node "$LIB" extract-asset "$PROD_HTML" 2>/dev/null || echo '')"
-  echo "attempt $i/$POLL_ATTEMPTS: production serves ${PROD_ASSET:-<none>} (want $EXPECTED_ASSET)"
-  if [ "$PROD_ASSET" = "$EXPECTED_ASSET" ]; then MATCHED=1; break; fi
-  [ "$i" -lt "$POLL_ATTEMPTS" ] && sleep "$POLL_INTERVAL" || true
-done
-rm -f "$PROD_HTML"
-[ "$MATCHED" = "1" ] || fail "production alias never served $EXPECTED_ASSET after $POLL_ATTEMPTS attempts (edge cache still stale, or the deploy did not update production)"
-
-# --- 12. verify COOP/COEP on the live production alias ---
-log "verify production headers"
-HDRS="$(mktemp)"
-curl -sI "$PROD_URL/" >"$HDRS"
-node "$LIB" verify-headers "$HDRS" || { rm -f "$HDRS"; fail "production alias missing/incorrect COOP/COEP"; }
-rm -f "$HDRS"
+# --- 11/12. verify the canonical alias serves the EXACT asset + COOP/COEP ---
+verify_production
 
 log "PRODUCTION DEPLOY VERIFIED"
 echo "release        : $RELEASE ($COMMIT)"

@@ -88,6 +88,9 @@ scripts/deploy-cloudflare-pages.sh v0.0.3-web-beta.3 --dry-run
 # real production publish (requires credentials in the environment):
 CLOUDFLARE_API_TOKEN=…  CLOUDFLARE_ACCOUNT_ID=…  \
   scripts/deploy-cloudflare-pages.sh v0.0.3-web-beta.3
+
+# verify what is ALREADY live matches a release (no deploy, no credentials):
+scripts/deploy-cloudflare-pages.sh v0.0.3-web-beta.4 --verify-only
 ```
 
 The script:
