@@ -22,7 +22,10 @@ import init, {
   deck_b_create,
   deck_b_unload,
   deck_b_load_preset,
+  deck_b_import_scene,
   deck_diagnostics_json,
+  preview_attach,
+  preview_detach,
   midi_handle,
   midi_import,
   midi_export,
@@ -92,6 +95,37 @@ let shaderConsole: ShaderConsole | null = null;
 let libraryBrowser: LibraryBrowser | null = null;
 let projection: ProjectionManager | null = null;
 
+// Phase 10B — deck status (what is LIVE on Deck A vs AUDITION on Deck B).
+type DeckSlot = { name: string; type: string } | null;
+const deckStatus: { live: DeckSlot; audition: DeckSlot } = { live: null, audition: null };
+
+function parseImport(s: string): { ok: boolean; error?: string } {
+  try {
+    const r = JSON.parse(s) as { ok?: boolean; error?: string };
+    return { ok: r.ok === true, error: r.error };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** Audition a library item into the INACTIVE Deck B (never touches Deck A /
+ *  master / recording / projection). Transactional per the engine exports. */
+async function auditionItem(item: import('./library').LibraryItem): Promise<{ ok: boolean; error?: string }> {
+  let res: { ok: boolean; error?: string };
+  if (item.type === 'scene') {
+    const full = await library.getFull(item.id);
+    res = full ? parseImport(deck_b_import_scene(JSON.stringify(full.payload))) : { ok: false, error: 'missing scene' };
+  } else if (item.type === 'shader') {
+    const sceneJson = await content.sceneJsonForShader(item.id);
+    res = sceneJson ? parseImport(deck_b_import_scene(sceneJson)) : { ok: false, error: 'missing shader' };
+  } else {
+    const text = await milkdrop.presetText(item.id);
+    res = text == null ? { ok: false, error: 'preset unavailable (pack unreachable?)' } : parseImport(deck_b_load_preset(text));
+  }
+  if (res.ok) deckStatus.audition = { name: item.name, type: item.type };
+  return res;
+}
+
 // Aggregated, lightweight query surface for the unified Library browser
 // (10A.4): built-in shaders + Milkdrop pack index (in-memory) + user/imported/
 // saved items (IndexedDB). Browse never loads a heavy payload.
@@ -104,17 +138,26 @@ const browserDeps: BrowserDeps = {
     return [...map.values()];
   },
   load: async (it) => {
-    if (it.type === 'scene') return content.loadScene(it.id);
-    if (it.type === 'shader') return content.loadShader(it.id);
-    const text = await milkdrop.presetText(it.id);
-    if (text == null) return { ok: false, error: 'preset text unavailable (pack unreachable?)' };
-    try {
-      const r = JSON.parse(load_preset(text)) as { ok?: boolean; error?: string };
-      return { ok: r.ok === true, error: r.error };
-    } catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    let res: { ok: boolean; error?: string };
+    if (it.type === 'scene') res = await content.loadScene(it.id);
+    else if (it.type === 'shader') res = await content.loadShader(it.id);
+    else {
+      const text = await milkdrop.presetText(it.id);
+      res = text == null ? { ok: false, error: 'preset text unavailable (pack unreachable?)' } : parseImport(load_preset(text));
     }
+    if (res.ok) deckStatus.live = { name: it.name, type: it.type }; // Deck A / master
+    return res;
   },
+  audition: (item) => auditionItem(item),
+  clearAudition: () => {
+    deck_b_unload();
+    deckStatus.audition = null;
+  },
+  deckStatus: () => ({ live: deckStatus.live, audition: deckStatus.audition }),
+  getBank: () => library.getPreviewBank().then((b) => b.itemIds).catch(() => []),
+  setBank: (ids) => library.setPreviewBank(ids).then(() => undefined),
+  attachPreview: (c) => preview_attach(c),
+  detachPreview: () => preview_detach(),
   setFavorite: (id, f) => content.setFavorite(id, f),
   rename: (id, n) => content.rename(id, n),
   duplicate: (id) => content.duplicate(id),
@@ -813,6 +856,17 @@ async function boot(): Promise<void> {
       unloadB: () => deck_b_unload(),
       loadPresetB: (text: string) => JSON.parse(deck_b_load_preset(text)),
       diag: () => JSON.parse(deck_diagnostics_json()),
+    };
+    // Preview/Audition driving for the harness (Phase 10B).
+    (window as unknown as Record<string, unknown>).__pmAudition = {
+      audition: (item: import('./library').LibraryItem) => browserDeps.audition(item),
+      clear: () => browserDeps.clearAudition(),
+      status: () => browserDeps.deckStatus(),
+      loadLive: (item: import('./library').LibraryItem) => browserDeps.load(item),
+      getBank: () => browserDeps.getBank(),
+      setBank: (ids: string[]) => browserDeps.setBank(ids),
+      attachPreview: (c: HTMLCanvasElement) => browserDeps.attachPreview(c),
+      detachPreview: () => browserDeps.detachPreview(),
     };
   }
 

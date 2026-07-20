@@ -533,6 +533,104 @@ source switching (shader/scene, failed-switch-preserves), Deck B
 create/load/unload isolation, both-output compatibility, resize resilience with
 Deck B, mobile-graceful, 0 uploads.
 
+## Phase 10B — Preview / Audition
+
+Lets a performer prepare the next visual on the **inactive** deck without
+disturbing the live master (`crates/pm-web-vj/src/lib.rs`, `web/src/
+library-browser.ts`). **Master output stays Deck A throughout 10B.**
+
+### Preview vs Audition
+
+- **Preview** — a lightweight visual inspection: the audition **monitor** (a
+  small on-screen canvas showing Deck B) and type placeholders in the browser.
+  Not the authoritative live state.
+- **Audition** — load + run the selected item in **Deck B** (the inactive/
+  audition deck), which renders independently while Deck A stays live. For
+  Milkdrop, audition on Deck B is the authoritative prep path (no third engine
+  for a thumbnail).
+
+### Live (Deck A) vs Audition (Deck B)
+
+`Load` → live Deck A (master); `Audition` → Deck B (offscreen). The distinction is
+explicit in the UI: a **LIVE / AUDITION** status bar names what's loaded in each
+deck, using the words *Live* and *Audition* (not just A/B). Deck B is never shown
+to the audience during 10B.
+
+### Audition routing (transactional)
+
+- Milkdrop → lazy `presetText` → `deck_b_load_preset` (Deck B's PresetPlayer).
+- Shader → wrap the full `ShaderProject` in a one-layer scene → `deck_b_import_scene`
+  (full multipass preserved).
+- Scene → `deck_b_import_scene(SceneData)`.
+
+Each is transactional: a failure keeps Deck B's previous content (and never
+touches Deck A / master / recording / projection). Deck B is created on first
+audition.
+
+### Preview monitor architecture
+
+`preview_attach(canvas)` creates a **second on-screen surface** and, each frame,
+**blits Deck B's already-produced output texture** to it (`render_preview`) — no
+extra deck execution, no GPU→CPU readback. It is **not** the master surface.
+Deck B renders at **master resolution** (for seamless future crossfading); only
+the monitor *display* is small. `preview_detach()` releases it; a device that
+can't create a second surface returns `false` and the app is unaffected.
+
+### Warm inactive deck
+
+Deck B keeps advancing every frame while auditioning (Milkdrop/shader/scene
+feedback stays warm), so a future crossfade starts from an already-active visual
+rather than cold.
+
+### Preview Bank
+
+An ordered performance queue of **LibraryItem id references only** (persisted in
+the 10A.1 `previewBank` store; survives reload). Actions: Add / Remove / Move
+Up/Down / Clear / Audition / Prev-Next-audition. Missing referenced items are
+**skipped gracefully** (never crash init); reorder/remove operate by id. One
+entry per id. Reachable by button (not drag-only) for touch.
+
+### Library actions
+
+Rows gain **Audition** (quick, → Deck B) alongside **Load** (→ live Deck A) and
+Favorite; the details panel adds **Audition** + **Add to Bank**. Keyboard (when
+the list is focused, never in a text input/editor): `P` audition, `B` add-to-bank,
+`[`/`]` prev/next-audition.
+
+### Recording / projection isolation
+
+Recording and projection **mirror the surface = master = Deck A**. Deck B /
+audition never leak into the recording or the projector during 10B (the future
+crossfade output records/projects naturally in 10C.2). Verified: audition changes
+never alter Deck A's diagnostics/output.
+
+### Shared audio analysis
+
+Both decks react to the **same** canonical pm-audio analysis (computed once,
+passed to each deck) — no pm-audio duplication. Per-deck audio is Phase 11.
+
+### Failure / mobile guardrails
+
+Deck B create/audition failures, missing packs/shards, and second-surface
+allocation failures all keep **Deck A live, master visible, recording/projection
+active, renderer alive** (tested at 390px). A constrained device that can't
+sustain Deck B fails cleanly with a message; Deck A is never destroyed to make
+room. Dual-Milkdrop on mobile remains 10D.
+
+### Performance (early measurement)
+
+CPU-in-render (stress-adjacent): Deck A only **2.45 ms**; Milkdrop live + Shader
+audition + monitor **3.06 ms**; Milkdrop + Milkdrop audition + monitor **3.48
+ms** — all far under a 16 ms budget; fps holds at display rate. This is an early
+10B measurement, **not** 10D's full dual-Milkdrop production benchmark.
+
+### Tests
+
+`web/verify-audition.mjs` (15 checks): audition Milkdrop/Shader/Scene with Deck A
+unchanged, failed-audition-preserves, master isolation, warm state, clear
+audition, Preview Bank add/reorder/missing-skip/clear/persist-reload, preview
+monitor attach, mobile no-overflow, 0 uploads.
+
 ## Phase 10 implementation ordering (current)
 
 ```
@@ -540,8 +638,8 @@ Deck B, mobile-graceful, 0 uploads.
 10A.2 Milkdrop library         ✓ merged
 10A.3 Shader/Scene library     ✓ merged
 10A.4 Library browser          ✓ merged
-10C.1 Deck abstraction         ← this PR
-10B   Preview/Audition         (depends on the deck abstraction)
+10C.1 Deck abstraction         ✓ merged
+10B   Preview/Audition         ← this PR
 10C.2 Master crossfader
 10C.3 MIDI/keyboard performance controls
 10D   Dual-Milkdrop productionization
