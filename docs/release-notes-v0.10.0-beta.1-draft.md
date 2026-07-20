@@ -35,8 +35,11 @@ deck, and crossfade it live.
 
 ## Capability & honesty
 
-- **Desktop dual-Milkdrop: supported** on qualified hardware (leak-free, stable
-  under a four-engine worst case; ~3–5 ms CPU-in-render through 1440p).
+- **Desktop dual-Milkdrop: supported on qualified hardware** (leak-free, stable
+  under a four-engine worst case). **Performance varies** with GPU capability,
+  resolution, preset complexity, and simultaneous preset transitions — we don't
+  promise a specific frame rate (the heavy dual-Milkdrop RC workload averaged
+  ~31 FPS on the tested discrete-NVIDIA desktop).
 - **Mobile dual-Milkdrop: may be restricted** by an adaptive capability policy
   (adapter limits, no user-agent sniffing); on constrained devices a second
   Milkdrop is cleanly refused with a message and the live deck stays alive —
@@ -51,5 +54,6 @@ uploaded; share URLs encode the scene in the URL fragment.
 
 ## Version
 
-`0.10.0-beta.1` · commit shown in About. The historical `v0.0.3-web-beta.x` line
-remains as-is; this begins the new `v0.10.0` product line.
+`0.10.0-beta.1` · commit `9cbbf91` (shown in About). The historical
+`v0.0.3-web-beta.x` line remains as-is; this begins the new `v0.10.0` product
+line.
