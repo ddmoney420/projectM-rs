@@ -51,7 +51,11 @@ export interface ShaderPayload {
   mode: number;
   controls: number[][];
   mods: unknown[];
-  attribution: Attribution;
+  /** Engine-shaped attribution (SourceState::Shader.attribution). Optional — the
+   *  engine defaults it, so built-in payloads omit it and carry display
+   *  attribution on the LibraryItem instead. User-saved payloads round-trip the
+   *  engine's own attribution object verbatim. */
+  attribution?: Record<string, unknown>;
   passes: unknown[];
 }
 

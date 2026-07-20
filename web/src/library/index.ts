@@ -9,6 +9,10 @@ export { ShardClient } from './shard-client';
 export { MilkdropLibrary } from './milkdrop';
 export type { PackLoadResult } from './milkdrop';
 export { parseMilkFilename, detectTextureRefs, readMilkFiles } from './import-milk';
+// Phase 10A.3 — built-in shaders + shader/scene content library.
+export { builtinShaderItems, isValidShaderPayload, shaderTags } from './builtins';
+export { ContentLibrary } from './content';
+export type { EngineAdapter, ImportResult } from './content';
 
 import {
   ContentType,

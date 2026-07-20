@@ -39,11 +39,13 @@ import { ProjectionManager } from './projection';
 // neither is downloaded before the first rendered frame.
 import type { ShaderConsole } from './shader-console';
 import type { MidiPanel } from './midi-ui';
+import type { LibraryPanel } from './library-panel';
 import { parseMessage, PROTOCOL_VERSION } from './projection-protocol';
 import { showAbout, maybeShowOnboarding } from './help';
 import {
   LibraryStore,
   MilkdropLibrary,
+  ContentLibrary,
   ShardClient,
   makeItem,
   StableId,
@@ -57,17 +59,30 @@ import {
 
 const MIDI_KEY = 'pm-web-midi-v1';
 
-// Phase 10A.1/10A.2 — the content library + Milkdrop pack/import service.
-// Initialized non-blocking after the renderer is up; a storage failure never
-// affects rendering, and no preset pack is configured/bundled by default.
+// Phase 10A.1/10A.2/10A.3 — content library + Milkdrop pack/import + shader/scene
+// content. Initialized non-blocking after the renderer is up; a storage failure
+// never affects rendering, and no preset pack is configured/bundled by default.
 const library = new LibraryStore();
 const milkdrop = new MilkdropLibrary(library);
+// Shader/scene loads reuse the engine's transactional scene import.
+const content = new ContentLibrary(library, {
+  exportScene: () => export_scene(),
+  importScene: (json) => {
+    try {
+      const r = JSON.parse(import_scene(json)) as { ok?: boolean; error?: string };
+      return { ok: r.ok === true, error: r.error };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+});
 
 let controlsPanel: ControlsPanel | null = null;
 let layerPanel: LayerPanel | null = null;
 let effectRack: EffectRack | null = null;
 let midiPanel: MidiPanel | null = null;
 let shaderConsole: ShaderConsole | null = null;
+let libraryPanel: LibraryPanel | null = null;
 let projection: ProjectionManager | null = null;
 const recorder = new Recorder();
 
@@ -296,10 +311,24 @@ function wireUI(): void {
     if (willOpen) await ensureConsole();
     $('console').classList.toggle('open', willOpen);
     $('layers').classList.remove('open');
+    $('library').classList.remove('open');
   });
   $('layers-btn').addEventListener('click', () => {
     $('layers').classList.toggle('open');
     $('console').classList.remove('open');
+    $('library').classList.remove('open');
+  });
+  // Library panel (lazy — the panel bundle loads on first open).
+  $('library-btn').addEventListener('click', async () => {
+    const willOpen = !$('library').classList.contains('open');
+    if (willOpen && !libraryPanel) {
+      const { LibraryPanel } = await import('./library-panel');
+      libraryPanel = new LibraryPanel($('library-host'), content, setStatus);
+    }
+    $('library').classList.toggle('open', willOpen);
+    $('console').classList.remove('open');
+    $('layers').classList.remove('open');
+    if (willOpen) void libraryPanel?.refresh();
   });
   // Controls, Effects, MIDI, Output all dock on the right — mutually exclusive.
   const rightPanels = ['controls', 'effects', 'midi', 'output'];
@@ -686,6 +715,27 @@ async function boot(): Promise<void> {
       nextId: (id?: string) => milkdrop.nextId(id),
       prevId: (id?: string) => milkdrop.prevId(id),
       setFavorite: (id: string, f: boolean) => milkdrop.setFavorite(id, f),
+    };
+    // Shader/scene content-library driving for the harness.
+    (window as unknown as Record<string, unknown>).__pmContent = {
+      service: content,
+      listBuiltinShaders: () => content.listBuiltinShaders(),
+      saveCurrentShader: (n: string) => content.saveCurrentShader(n),
+      loadShader: (id: string) => content.loadShader(id),
+      saveCurrentScene: (n: string) => content.saveCurrentScene(n),
+      loadScene: (id: string) => content.loadScene(id),
+      rename: (id: string, n: string) => content.rename(id, n),
+      duplicate: (id: string, n?: string) => content.duplicate(id, n),
+      delete: (id: string) => content.delete(id),
+      setFavorite: (id: string, f: boolean) => content.setFavorite(id, f),
+      addToCollection: (id: string, c: string) => content.addToCollection(id, c),
+      removeFromCollection: (id: string, c: string) => content.removeFromCollection(id, c),
+      listByCollection: (c: string) => content.listByCollection(c),
+      createCollection: (n: string) => content.createCollection(n),
+      listByType: (t: string) => content.listByType(t as 'shader' | 'scene'),
+      listRecent: (n?: number) => content.listRecent(n),
+      listFavorites: () => content.listFavorites(),
+      getFull: (id: string) => content.getFull(id),
     };
   }
 
