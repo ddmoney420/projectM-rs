@@ -1,0 +1,10 @@
+{
+  "packId": "projectm-rs-badshard",
+  "name": "Missing-shard fixture",
+  "version": "1.0.0",
+  "license": "CC0-1.0",
+  "requiresTextures": false,
+  "items": [
+    { "path": "projectm-rs-starter/Starter Sine.milk", "name": "Starter Sine", "shard": "missing.ndjson.gz" }
+  ]
+}

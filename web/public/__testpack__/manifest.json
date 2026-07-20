@@ -1,0 +1,15 @@
+{
+  "packId": "projectm-rs-test-fixtures",
+  "name": "projectM-rs Test Fixtures",
+  "version": "1.0.0",
+  "license": "CC0-1.0",
+  "licenseUrl": "https://creativecommons.org/publicdomain/zero/1.0/",
+  "source": "web/public/__testpack__ (project-owned, original)",
+  "attribution": "projectM-rs original test fixtures",
+  "requiresTextures": false,
+  "items": [
+    { "path": "projectm-rs-starter/Starter Sine.milk", "name": "Starter Sine", "shard": "basic.ndjson.pack", "author": "projectM-rs", "category": "Geometric" },
+    { "path": "projectm-rs-starter/Starter Pulse.milk", "name": "Starter Pulse", "shard": "basic.ndjson.pack", "license": "LGPL-2.1", "category": "Energy" },
+    { "path": "projectm-rs-starter/Starter Grid.milk", "name": "Starter Grid", "shard": "basic.ndjson.pack", "category": "Geometric" }
+  ]
+}

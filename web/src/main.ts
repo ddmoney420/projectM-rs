@@ -43,19 +43,25 @@ import { parseMessage, PROTOCOL_VERSION } from './projection-protocol';
 import { showAbout, maybeShowOnboarding } from './help';
 import {
   LibraryStore,
+  MilkdropLibrary,
+  ShardClient,
   makeItem,
   StableId,
   openLibraryDB,
   deleteLibraryDB,
   applyMigrations,
+  validatePackManifest,
+  parseMilkFilename,
   LIBRARY_DB_VERSION,
 } from './library';
 
 const MIDI_KEY = 'pm-web-midi-v1';
 
-// Phase 10A.1 — the content library. Initialized non-blocking after the
-// renderer is up; a storage failure never affects rendering.
+// Phase 10A.1/10A.2 — the content library + Milkdrop pack/import service.
+// Initialized non-blocking after the renderer is up; a storage failure never
+// affects rendering, and no preset pack is configured/bundled by default.
 const library = new LibraryStore();
+const milkdrop = new MilkdropLibrary(library);
 
 let controlsPanel: ControlsPanel | null = null;
 let layerPanel: LayerPanel | null = null;
@@ -663,6 +669,23 @@ async function boot(): Promise<void> {
       deleteLibraryDB,
       applyMigrations,
       DB_VERSION: LIBRARY_DB_VERSION,
+    };
+    // Milkdrop pack/import driving for the harness.
+    (window as unknown as Record<string, unknown>).__pmMilkdrop = {
+      service: milkdrop,
+      MilkdropLibrary,
+      ShardClient,
+      validateManifest: (m: unknown) => validatePackManifest(m),
+      parseMilkFilename,
+      loadPack: (url: string) => milkdrop.loadPack(url),
+      importTexts: (files: { name: string; text: string }[]) => milkdrop.importTexts(files),
+      presetText: (id: string) => milkdrop.presetText(id),
+      indexCount: () => milkdrop.indexCount(),
+      listIndex: () => milkdrop.listIndex(),
+      randomId: (ex?: string) => milkdrop.randomId(ex),
+      nextId: (id?: string) => milkdrop.nextId(id),
+      prevId: (id?: string) => milkdrop.prevId(id),
+      setFavorite: (id: string, f: boolean) => milkdrop.setFavorite(id, f),
     };
   }
 

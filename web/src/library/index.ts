@@ -1,8 +1,14 @@
-// Phase 10A.1 — public entry point for the content library.
+// Public entry point for the content library.
 export * from './types';
 export * from './db';
 export { LibraryStore } from './store';
 export type { LibraryStatus } from './store';
+// Phase 10A.2 — Milkdrop packs, shards, import.
+export * from './pack';
+export { ShardClient } from './shard-client';
+export { MilkdropLibrary } from './milkdrop';
+export type { PackLoadResult } from './milkdrop';
+export { parseMilkFilename, detectTextureRefs, readMilkFiles } from './import-milk';
 
 import {
   ContentType,
