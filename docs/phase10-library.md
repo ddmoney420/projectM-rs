@@ -238,6 +238,120 @@ blocks or crashes the library.
   single/multiple `.milk` import + reload persistence, zero-pack operation, and a
   **privacy check that imported content generates 0 upload requests**.
 
+## Phase 10A.3 — Shader + Scene content library
+
+Adds real Shader and Scene content to the unified library (`web/src/library/
+{builtins,content}.ts`, `web/src/library-panel.ts`). No third-party shader
+content is added.
+
+### Built-in shader library
+
+The project-owned examples (`examples.ts` single-pass, `multipass-examples.ts`
+multipass) become complete `LibraryItem<ShaderPayload>` entries via
+`builtinShaderItems()`. **13 built-ins** currently (10 single-pass + 3 multipass).
+Stable ids `builtin:shader:<slug>` (never an array index); `origin:'builtin'`,
+`license:'LGPL-2.1'`, structure-derived tags (`single-pass`/`multipass`/
+`audio-reactive`/`feedback` — no fabricated/subjective metadata). Built-ins live
+in memory; only ones the user touches (favorite/use/duplicate) are upserted to
+IndexedDB.
+
+### Built-in shader licensing/provenance
+
+All built-in examples are **original, project-owned** content (LGPL-2.1 per their
+file headers) — **not** Shadertoy/third-party-derived. No example has unclear
+provenance; none were deleted. No third-party shader with unclear redistribution
+rights is added.
+
+### ShaderProject preservation
+
+A shader payload mirrors the engine's `SourceState::Shader`
+(`{source, mode, controls, mods, attribution?, passes}`) — full multipass state
+(Image + Buffer A–D, per-pass source/mode/channels). **No second shader schema.**
+Built-in payloads omit `attribution` (the engine's `Attribution` has a serde
+default and required fields our library metadata doesn't carry); display
+attribution lives on the LibraryItem. User-saved payloads round-trip the engine's
+own attribution verbatim.
+
+### Transactional shader/scene loading
+
+Both shader and scene loads reuse the engine's **transactional** `import_scene`
+(validates + applies atomically; retains the current scene on failure):
+
+- **Load scene** → `import_scene(payload)` directly.
+- **Load shader** → replace the current scene's shader-layer source with the
+  payload (or append a shader layer), then `import_scene` the result. A
+  structurally-invalid payload is rejected *before* touching the engine
+  (`isValidShaderPayload`); a valid-but-bad-GLSL payload keeps each pass's
+  last-known-good. Either way the master output is never blacked out or corrupted.
+
+Save actions (`saveCurrentShader`/`saveCurrentScene`) never modify the running
+shader/scene. `recordUsage` (metadata-only) updates `lastUsed`/`usageCount` on
+load. Favorites/collections work through the 10A.1 metadata path (no payload
+rewrite). Built-in entries are read-only (rename/delete refused; duplicate copies
+them into a user entry).
+
+### Scene/library schema distinction
+
+Two independent versions, kept separate: the **library** DB/item schema
+(`LIBRARY_DB_VERSION` / `LIBRARY_ITEM_SCHEMA_VERSION`) versions the envelope +
+IndexedDB stores; the **scene** payload carries its **own** `SceneData
+schema_version` and is stored **verbatim**. The library never reinterprets scene
+internals.
+
+### Attribution behavior
+
+Shader items carry `author`/`license`/`attribution` metadata; scenes are stored
+verbatim (existing per-layer shader `Attribution` is preserved inside the
+SceneData). A scene that references library content currently embeds the source
+state (as the engine's export does) rather than a lightweight reference — so an
+exported scene keeps its legally-relevant per-layer attribution. **Limitation:**
+until pack-reference-in-scene lands (a later deck-aware schema change), a scene
+built from a large pack preset would embed that preset's text; 10A.3 does not
+change the deck-aware scene schema.
+
+### Search-ready + thumbnails
+
+Shader/scene entries expose lightweight metadata (name/author/description/tags/
+license/attribution) for 10A.4 search — no full-payload search. `thumbnailRef` is
+supported but **no thumbnail generation** happens in 10A.3 (placeholder/none);
+generation is deferred to 10A.4. No offscreen compositors are spun up for
+browsing.
+
+### Minimal UI
+
+`web/src/library-panel.ts` — a small, lazily-loaded left-docked **Library** panel
+(built-in shader list + Save Shader/Save Scene + a user list with Load/Favorite/
+Rename/Duplicate/Delete). Reuses the existing panel patterns; intentionally
+minimal so the full 10A.4 virtualized browser can supersede it cleanly.
+
+### Zero-Milkdrop
+
+The shader+scene library is fully functional with 0 Milkdrop packs and 0 imported
+presets (built-in shaders + user shaders + saved scenes). Tested.
+
+### Tests
+
+`web/verify-content.mjs` (Playwright, real engine + IndexedDB) — 26 checks:
+built-in enumeration/stable-ids/metadata, single-pass + multipass load,
+save/load user shader, rename/duplicate/delete (built-ins protected), favorites,
+**invalid shader → rejected, active visual retained**, scene save/load,
+**invalid scene → rejected, current scene intact**, collections (shader+scene),
+recent/usage, zero-Milkdrop, reload persistence, and **0 upload requests**.
+
+## Phase 10 implementation ordering (current)
+
+```
+10A.1 Library foundation      ✓ merged
+10A.2 Milkdrop library         ✓ merged
+10A.3 Shader/Scene library     ← this PR
+10A.4 Library browser
+10C.1 Deck abstraction         (before Preview)
+10B   Preview/Audition
+10C.2 Crossfader
+10C.3 MIDI/keyboard
+10D   Dual Milkdrop
+```
+
 ## Tests (10A.1)
 
 - `web/verify-library.mjs` (Playwright, real IndexedDB): CRUD, type round-trip

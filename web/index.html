@@ -119,6 +119,23 @@
         transition: transform .18s ease; z-index: 6; padding: .5rem .55rem; }
       #layers.open { transform: none; }
       .lp-add, .lp-scene { display: flex; gap: .3rem; flex-wrap: wrap; margin-bottom: .5rem; }
+      /* Library panel (left-docked; Phase 10A.3) */
+      #library { position: fixed; top: 0; bottom: var(--bar-h, 44px); left: 0; width: min(340px, 94vw);
+        overflow-y: auto; background: rgba(16,18,23,.97);
+        border-right: 1px solid rgba(255,255,255,.12); transform: translateX(-101%);
+        transition: transform .18s ease; z-index: 6; padding: .5rem .55rem; }
+      #library.open { transform: none; }
+      #library .lib-actions { display: flex; gap: .3rem; flex-wrap: wrap; margin-bottom: .4rem; }
+      #library button { background: #222833; color: #eee; border: 1px solid #39424f;
+        border-radius: 5px; padding: .22rem .45rem; cursor: pointer; font-size: 12px; }
+      #library .lib-h { font-weight: 600; opacity: .8; margin: .5rem 0 .25rem; font-size: 12px; }
+      #library .lib-note { min-height: 1em; font-size: 11px; color: #9fe0c0; margin-bottom: .3rem; }
+      #library .lib-empty { opacity: .5; font-size: 12px; padding: .3rem 0; }
+      #library .lib-row { display: flex; gap: .25rem; align-items: center; padding: .18rem 0;
+        border-bottom: 1px solid rgba(255,255,255,.06); }
+      #library .lib-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+      #library .lib-badge { font-size: 10px; opacity: .55; text-transform: uppercase; }
+      #library .lib-row button { padding: .1rem .35rem; font-size: 11px; }
       .lp-note { display: none; margin: 0 0 .45rem; padding: .35rem .5rem; border-radius: 5px;
         background: rgba(255,176,138,.14); border: 1px solid rgba(255,176,138,.4);
         color: #ffcbb0; font-size: 12px; line-height: 1.35; }
@@ -219,7 +236,7 @@
 
       /* Clean Output mode on the control window: only the canvas is shown. */
       body.clean #ui, body.clean #diag, body.clean #console, body.clean #controls,
-      body.clean #layers, body.clean #effects, body.clean #midi, body.clean #output { display: none !important; }
+      body.clean #layers, body.clean #effects, body.clean #midi, body.clean #output, body.clean #library { display: none !important; }
       body.clean.hide-cursor { cursor: none; }
 
       /* About / Help + onboarding overlay */
@@ -287,6 +304,7 @@
       <span class="sep"></span>
       <button id="layers-btn">Layers</button>
       <button id="console-btn">Console</button>
+      <button id="library-btn">Library</button>
       <button id="controls-btn">Controls</button>
       <button id="effects-btn">Effects</button>
       <button id="midi-btn">MIDI</button>
@@ -304,6 +322,7 @@
     <div id="console"><div id="console-host"></div></div>
     <div id="controls"><div id="controls-host"></div></div>
     <div id="layers"><div id="layers-host"></div></div>
+    <div id="library"><div id="library-host"></div></div>
     <div id="effects"><div id="effects-host"></div></div>
     <div id="midi"><div id="midi-host"></div></div>
     <div id="output"><div id="output-host"></div></div>
