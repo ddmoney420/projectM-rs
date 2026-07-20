@@ -47,6 +47,16 @@ export class AudioEngine {
   /** Callback fired when a source ends/errors externally, so the UI can update. */
   onSourcesChanged: (() => void) | null = null;
 
+  // iOS mutes (and sometimes ends) the getUserMedia track on interruptions —
+  // orientation change, backgrounding, audio-session changes — and does not
+  // reliably auto-restore it, leaving a "live" but silent mic (AudioContext
+  // still running, ring fill ~0%). We re-acquire on demand; these hold the
+  // constraints + a re-entrancy guard for that path.
+  private readonly micConstraints: MediaStreamConstraints = {
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+  };
+  private reacquiringMic = false;
+
   /** Lazily create the AudioContext + worklet + ring on a user gesture. */
   private async ensureContext(): Promise<void> {
     if (this.ctx) {
@@ -162,18 +172,58 @@ export class AudioEngine {
     }
     await this.ensureContext();
     this.removeSource('mic');
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-    });
+    const stream = await navigator.mediaDevices.getUserMedia(this.micConstraints);
     const node = this.ctx!.createMediaStreamSource(stream);
     const gain = this.ctx!.createGain();
     node.connect(gain);
     gain.connect(this.captureBus!); // analysis only — no destination
-    stream.getAudioTracks().forEach((t) =>
-      t.addEventListener('ended', () => this.removeSource('mic')),
-    );
     this.sources.set('mic', { kind: 'mic', node, gain, baseGain: 1, muted: false, stream });
+    this.attachMicTrackHandlers(stream);
     this.notify();
+  }
+
+  /** iOS fires 'mute' on the mic track when interrupted (and sometimes 'ended');
+   *  both leave the source silent, so try to recover a fresh stream rather than
+   *  silently dying. A short settle delay lets the interruption (e.g. rotation)
+   *  finish, otherwise iOS may hand back another already-muted track. */
+  private attachMicTrackHandlers(stream: MediaStream): void {
+    stream.getAudioTracks().forEach((t) => {
+      t.addEventListener('mute', () => setTimeout(() => void this.recoverMicIfStalled(), 400));
+      t.addEventListener('ended', () => void this.recoverMicIfStalled());
+    });
+  }
+
+  /** Re-acquire the microphone if its track has gone muted/ended (iOS after an
+   *  orientation change / interruption), swapping a fresh stream into the graph
+   *  while preserving the source's gain/mute and its captureBus wiring. No-op
+   *  when the mic is healthy, absent, or a re-acquire is already in flight — so
+   *  it is safe to call liberally (gestures, orientation, visibility). */
+  async recoverMicIfStalled(): Promise<void> {
+    const ctx = this.ctx;
+    const s = this.sources.get('mic');
+    if (!ctx || !s || this.reacquiringMic) return;
+    const track = s.stream?.getAudioTracks()[0];
+    if (track && track.readyState === 'live' && !track.muted) return; // healthy
+    this.reacquiringMic = true;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(this.micConstraints);
+      try {
+        s.node.disconnect();
+      } catch {
+        /* already disconnected */
+      }
+      s.stream?.getTracks().forEach((t) => t.stop());
+      const node = ctx.createMediaStreamSource(stream);
+      node.connect(s.gain); // reuse the existing gain → captureBus wiring
+      s.node = node;
+      s.stream = stream;
+      this.attachMicTrackHandlers(stream);
+      this.notify();
+    } catch {
+      /* couldn't re-acquire (permission/interruption still active) — leave as-is */
+    } finally {
+      this.reacquiringMic = false;
+    }
   }
 
   /** Capture tab/system audio (analysis only, to avoid echo). Video is dropped. */

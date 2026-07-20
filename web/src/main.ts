@@ -219,18 +219,25 @@ function wireAudioUI(): void {
 
   $('diag-toggle').addEventListener('click', () => $('diag').classList.toggle('collapsed'));
 
-  // iOS Safari suspends the AudioContext on tab hide, orientation change, focus
-  // loss, and audio-session interruptions — the visualization keeps rendering
-  // but stops reacting to sound. Resume on every plausible re-entry / gesture
-  // (engine.resume() is a no-op when already running).
-  const resumeAudio = () => void engine.resume();
+  // iOS Safari breaks audio in two ways on tab hide / orientation change / focus
+  // loss / audio-session interruptions: it can suspend the AudioContext, and it
+  // can mute the mic MediaStreamTrack (leaving it "live" but silent). Rendering
+  // keeps going but reactivity dies. On every plausible re-entry / gesture we
+  // both resume the context (no-op if running) and re-acquire the mic if its
+  // track went silent (no-op if healthy).
+  const wake = () => {
+    void engine.resume();
+    void engine.recoverMicIfStalled();
+  };
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) resumeAudio();
+    if (!document.hidden) wake();
   });
-  window.addEventListener('orientationchange', resumeAudio);
-  window.addEventListener('focus', resumeAudio);
+  // Rotation interrupts the mic; wait for the orientation to settle before
+  // re-acquiring so iOS doesn't hand back another muted track.
+  window.addEventListener('orientationchange', () => setTimeout(wake, 400));
+  window.addEventListener('focus', wake);
   (['pointerdown', 'touchend', 'keydown'] as const).forEach((ev) =>
-    document.addEventListener(ev, resumeAudio, { passive: true }),
+    document.addEventListener(ev, wake, { passive: true }),
   );
 }
 
