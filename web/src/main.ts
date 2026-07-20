@@ -219,9 +219,26 @@ function wireAudioUI(): void {
 
   $('diag-toggle').addEventListener('click', () => $('diag').classList.toggle('collapsed'));
 
+  // iOS Safari breaks audio in two ways on tab hide / orientation change / focus
+  // loss / audio-session interruptions: it can suspend the AudioContext, and it
+  // can mute the mic MediaStreamTrack (leaving it "live" but silent). Rendering
+  // keeps going but reactivity dies. On every plausible re-entry / gesture we
+  // both resume the context (no-op if running) and re-acquire the mic if its
+  // track went silent (no-op if healthy).
+  const wake = () => {
+    void engine.resume();
+    void engine.recoverMicIfStalled();
+  };
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) void engine.resume();
+    if (!document.hidden) wake();
   });
+  // Rotation interrupts the mic; wait for the orientation to settle before
+  // re-acquiring so iOS doesn't hand back another muted track.
+  window.addEventListener('orientationchange', () => setTimeout(wake, 400));
+  window.addEventListener('focus', wake);
+  (['pointerdown', 'touchend', 'keydown'] as const).forEach((ev) =>
+    document.addEventListener(ev, wake, { passive: true }),
+  );
 }
 
 function errMsg(e: unknown): string {
@@ -484,6 +501,7 @@ function updateDiagnostics(): void {
     ['BPM', `${((d.bpm as number) ?? 0).toFixed(0)} ${d.tempoManual ? '(man)' : '(auto)'}`],
     ['beat', `${bar(d.beatPulse as number)} phase ${((d.beatPhase as number) ?? 0).toFixed(2)}`],
     ['crossOriginIsolated', String(self.crossOriginIsolated === true)],
+    ['GPU error', (d.lastError as unknown as string) || 'none'],
     ['transport', s.shared ? 'SharedArrayBuffer' : 'postMessage (fallback)'],
     ['AudioContext', s.contextState],
     ['sampleRate', `${d.sampleRate || s.sampleRate || 0} Hz`],
