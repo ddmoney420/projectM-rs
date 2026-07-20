@@ -153,6 +153,10 @@ struct Diagnostics {
     beat_pulse: f32,
     tempo_confidence: f32,
     tempo_manual: bool,
+    /// Last uncaptured WebGPU error (empty = none). Surfaced in the diagnostics
+    /// panel so device-specific GPU failures (e.g. iOS Safari) are visible
+    /// on-device without a remote Web Inspector.
+    last_error: String,
 }
 
 thread_local! {
@@ -192,8 +196,15 @@ pub fn clear_audio() {
 pub fn get_diagnostics() -> String {
     DIAG.with(|d| {
         let d = d.borrow();
+        // Minimal JSON-string escaping for the (usually ASCII) GPU error text.
+        let last_error = d
+            .last_error
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace(['\n', '\r', '\t'], " ");
         format!(
-            "{{\"hasAudio\":{},\"channels\":{},\"sampleRate\":{},\"ringFill\":{:.3},\
+            "{{\"lastError\":\"{last_error}\",\
+             \"hasAudio\":{},\"channels\":{},\"sampleRate\":{},\"ringFill\":{:.3},\
              \"overruns\":{},\"underruns\":{},\"consumed\":{},\
              \"bass\":{:.4},\"mid\":{:.4},\"treb\":{:.4},\"vol\":{:.4},\
              \"time\":{:.2},\"delta\":{:.4},\"scale\":{:.2},\"paused\":{},\
@@ -300,6 +311,15 @@ pub async fn run(canvas_id: String) -> Result<(), JsValue> {
         .await
         .map_err(|e| JsValue::from_str(&format!("request_device failed: {e}")))?;
 
+    // Surface uncaptured WebGPU errors (validation/OOM/device-lost) into the
+    // diagnostics panel + console instead of letting them fail silently. This is
+    // how iOS-specific GPU issues become visible on-device.
+    device.on_uncaptured_error(std::sync::Arc::new(|e| {
+        let msg = format!("{e}");
+        log::error!("pm-web GPU error: {msg}");
+        DIAG.with(|d| d.borrow_mut().last_error = msg);
+    }));
+
     let caps = surface.get_capabilities(&adapter);
     let format = caps.formats[0];
     let width = canvas.width().max(1);
@@ -389,8 +409,12 @@ struct State {
 impl State {
     fn render(&mut self) {
         // Resize: reconfigure the surface + rebuild the size-bound engine.
-        let w = self.canvas.width().max(1);
-        let h = self.canvas.height().max(1);
+        // Clamp to the device's max 2D texture dimension — an orientation change
+        // can momentarily report a canvas size that, once scaled, exceeds iOS
+        // Safari's lower texture limit and would trap the whole render loop.
+        let max = self.ctx.device.limits().max_texture_dimension_2d;
+        let w = self.canvas.width().clamp(1, max);
+        let h = self.canvas.height().clamp(1, max);
         if w != self.config.width || h != self.config.height {
             self.config.width = w;
             self.config.height = h;

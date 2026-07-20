@@ -54,6 +54,17 @@ export interface SelectedShader {
 export class LayerPanel {
   private host: HTMLElement;
   private list!: HTMLElement;
+  private noteTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** Show a transient message in the panel (e.g. why an add was rejected). */
+  private note(msg: string): void {
+    const el = this.host.querySelector('#lp-note') as HTMLElement | null;
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.add('show');
+    clearTimeout(this.noteTimer);
+    this.noteTimer = setTimeout(() => el.classList.remove('show'), 3200);
+  }
 
   /** Fired when the selected layer changes (kind + its shader state + id). */
   onSelect: ((kind: string, shader: SelectedShader, layerId: number) => void) | null = null;
@@ -67,6 +78,7 @@ export class LayerPanel {
         <button data-k="2">+ Waveform</button>
         <button data-k="3">+ Spectrum</button>
       </div>
+      <div id="lp-note" class="lp-note"></div>
       <div id="lp-list"></div>
       <div id="lp-transform"></div>
       <div class="lp-scene">
@@ -79,7 +91,18 @@ export class LayerPanel {
 
     host.querySelectorAll<HTMLButtonElement>('.lp-add button').forEach((b) =>
       b.addEventListener('click', () => {
-        add_layer(Number(b.dataset.k));
+        const kind = Number(b.dataset.k);
+        // add_layer returns the new id, or -1 when rejected (a second Milkdrop
+        // is not supported, or a layer limit was hit). Without feedback this
+        // reads as "the button is broken" — surface why.
+        if (add_layer(kind) < 0) {
+          this.note(
+            kind === 0
+              ? 'Only one Milkdrop layer is supported.'
+              : 'Layer limit reached — remove a layer first.',
+          );
+          return;
+        }
         this.refresh();
         this.save();
       }),

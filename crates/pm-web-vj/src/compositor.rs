@@ -25,6 +25,22 @@ use crate::effects::{EffectChain, EffectKind, Effects};
 use crate::overlay::OverlayRenderer;
 use crate::shader_project::ShaderProject;
 
+/// Starter shader for a freshly-added Shader layer — a self-contained, no-audio
+/// animated plasma (LGPL-2.1, authored for this project; mirrors `EXAMPLES[0]`
+/// in the web console). A new layer's Image pass is otherwise empty, which
+/// compiles but renders opaque black, hiding every layer below it and reading
+/// as "the shader is broken".
+const DEFAULT_SHADER_SOURCE: &str = "\
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n\
+    vec2 p = (fragCoord / iResolution.xy) * 8.0;\n\
+    float v = sin(p.x + iTime)\n\
+            + sin(p.y + iTime * 0.7)\n\
+            + sin((p.x + p.y) * 0.5 + iTime)\n\
+            + sin(length(p - 4.0) - iTime);\n\
+    vec3 col = 0.5 + 0.5 * cos(vec3(0.0, 2.0, 4.0) + v);\n\
+    fragColor = vec4(col, 1.0);\n\
+}";
+
 const USER_SLOTS: usize = 16;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -383,13 +399,20 @@ impl Compositor {
     fn make_runtime(&self, ctx: &GpuContext, kind: LayerKind) -> Runtime {
         match kind {
             LayerKind::Milkdrop => Runtime::Milkdrop,
-            LayerKind::Shader => Runtime::Shader(ShaderState {
-                project: ShaderProject::new(ctx, self.width, self.height),
-                user_slots: [[0.0; 4]; USER_SLOTS],
-                user_mods: std::array::from_fn(|_| None),
-                user_range: [[0.0, 1.0]; USER_SLOTS],
-                attribution: Attribution::default(),
-            }),
+            LayerKind::Shader => {
+                let mut project = ShaderProject::new(ctx, self.width, self.height);
+                // Seed a visible starter so "+ Shader" renders immediately rather
+                // than the opaque black of an empty Image pass. (Pass 4 = Image;
+                // see set_shader_source.) A scene import recompiles over this.
+                project.set_pass_source(ctx, 4, ShaderMode::Shadertoy, DEFAULT_SHADER_SOURCE);
+                Runtime::Shader(ShaderState {
+                    project,
+                    user_slots: [[0.0; 4]; USER_SLOTS],
+                    user_mods: std::array::from_fn(|_| None),
+                    user_range: [[0.0, 1.0]; USER_SLOTS],
+                    attribution: Attribution::default(),
+                })
+            }
             LayerKind::Waveform => Runtime::Waveform(OverlayRenderer::new(ctx, self.width, self.height)),
             LayerKind::Spectrum => {
                 let mut o = OverlayRenderer::new(ctx, self.width, self.height);

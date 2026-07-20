@@ -799,6 +799,35 @@ const run = async () => {
   });
   await iosPage.close();
 
+  // --- Beta.4: single-instance Milkdrop feedback + GPU-error diagnostics ---
+  await openLayers();
+  await page.click('#lp-reset'); // default scene contains exactly one Milkdrop
+  await sleep(250);
+  await page.click('.lp-add button[data-k="0"]'); // a second Milkdrop → rejected
+  await sleep(200);
+  results.betaMilkdropRejectedNote =
+    (await page.locator('#lp-note.show').count()) === 1 &&
+    /Milkdrop/i.test((await page.locator('#lp-note').innerText().catch(() => '')) || '');
+  // Adding a supported layer still works and clears the note path.
+  const rowsBeforeWave = await page.locator('#lp-list .lp-row').count();
+  await page.click('.lp-add button[data-k="2"]'); // waveform → accepted
+  await sleep(200);
+  results.betaWaveformStillAdds = (await page.locator('#lp-list .lp-row').count()) > rowsBeforeWave;
+  // A freshly-added Shader layer seeds a visible starter (non-empty Image pass)
+  // instead of the opaque black of an empty pass — it must compile (>=1 pass,
+  // shaderCount>=1) with no GPU error, without opening the console.
+  await page.click('.lp-add button[data-k="1"]'); // + Shader
+  await sleep(400);
+  results.betaShaderLayerSeeded = await page.evaluate(() => {
+    const d = window.__pmDiag();
+    return d.shaderCount >= 1 && d.shaderPasses >= 1 && (d.lastError || '') === '';
+  });
+  // The GPU-error diagnostic is exposed and clean during a healthy run.
+  results.betaDiagExposesLastError =
+    (await page.evaluate(() => typeof window.__pmDiag().lastError)) === 'string';
+  results.betaNoGpuErrorsDuringRun =
+    (await page.evaluate(() => window.__pmDiag().lastError || '')) === '';
+
   results.consolePanics = logs.filter((l) => /panicked|RuntimeError|unreachable/.test(l)).length;
   results.consoleErrors = logs.filter((l) => l.startsWith('[error]') || l.startsWith('[pageerror]')).length;
 
