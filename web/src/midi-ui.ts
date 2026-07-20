@@ -183,7 +183,10 @@ export class MidiPanel {
       for (const t of items) {
         const o = document.createElement('option');
         o.value = t.path;
-        o.textContent = `${t.label} [${t.kind[0]}]`;
+        // Distinguish continuously-variable PARAMETERS (knob/fader) from one-shot
+        // ACTIONS (button/trigger) so users don't map an action as a knob.
+        const isAction = t.kind === 'trigger' || t.kind === 'momentary';
+        o.textContent = `${t.label} · ${isAction ? 'action' : 'param'}`;
         og.appendChild(o);
       }
       this.targetSel.appendChild(og);

@@ -846,6 +846,12 @@ impl State {
                 self.clock.set_scale(v.max(0.0));
                 true
             }
+            // Master crossfader (10C.3) — the SAME runtime state as set_crossfader;
+            // continuous, so it inherits soft-takeover via midi_current below.
+            ["global", "crossfader"] => {
+                self.crossfader = v.clamp(0.0, 1.0);
+                true
+            }
             ["global", "tempo", "bpm"] => {
                 self.tempo.set_manual(true);
                 self.tempo.set_manual_bpm(v);
@@ -883,6 +889,7 @@ impl State {
         let p: Vec<&str> = path.split('.').collect();
         match p.as_slice() {
             ["global", "speed"] => Some(self.clock.scale()),
+            ["global", "crossfader"] => Some(self.crossfader),
             ["global", "tempo", "bpm"] => Some(self.tempo.bpm()),
             ["layer", id, "opacity"] => self.deck_a.compositor.opacity(pid(id)?),
             ["layer", id, "transform", f] => self.deck_a.compositor.transform_field(pid(id)?, f),
@@ -996,6 +1003,7 @@ impl State {
         let p: Vec<&str> = path.split('.').collect();
         Some(match p.as_slice() {
             ["global", "speed"] => ("continuous", 0.0, 4.0),
+            ["global", "crossfader"] => ("continuous", 0.0, 1.0),
             ["global", "tempo", "bpm"] => ("continuous", 40.0, 240.0),
             ["global", "pause"] => ("toggle", 0.0, 1.0),
             ["global", "tempo", "tap"] => ("trigger", 0.0, 1.0),
@@ -1050,6 +1058,20 @@ impl State {
         out.push(mk_target("global.tempo.tap", "Tap tempo", "Tempo", "trigger", 0.0, 1.0));
         out.push(mk_target("global.tempo.beatPhaseReset", "Beat phase reset", "Tempo", "trigger", 0.0, 1.0));
         out.push(mk_target("app.record.toggle", "Recording start/stop", "Transport", "trigger", 0.0, 1.0));
+        // Phase 10C.3 — performance controls. The master crossfader is a
+        // continuous target (soft-takeover); the rest are trigger ACTIONS routed
+        // to the JS PerformanceActions layer via the `app.` action queue.
+        out.push(mk_target("global.crossfader", "Master crossfader (A↔B)", "Performance", "continuous", 0.0, 1.0));
+        out.push(mk_target("app.performance.audition_selected", "Audition selected item", "Performance", "trigger", 0.0, 1.0));
+        out.push(mk_target("app.performance.bank_next", "Preview Bank: next", "Performance", "trigger", 0.0, 1.0));
+        out.push(mk_target("app.performance.bank_previous", "Preview Bank: previous", "Performance", "trigger", 0.0, 1.0));
+        out.push(mk_target("app.performance.bank_audition_next", "Audition next bank item", "Performance", "trigger", 0.0, 1.0));
+        out.push(mk_target("app.performance.clear_audition", "Clear audition (Deck B)", "Performance", "trigger", 0.0, 1.0));
+        out.push(mk_target("app.performance.random_milkdrop", "Random Milkdrop", "Performance", "trigger", 0.0, 1.0));
+        out.push(mk_target("app.performance.favorite_selected", "Favorite selected item", "Performance", "trigger", 0.0, 1.0));
+        out.push(mk_target("app.performance.mix_to_a", "Mix fully to Deck A", "Performance", "trigger", 0.0, 1.0));
+        out.push(mk_target("app.performance.mix_to_b", "Mix fully to Deck B", "Performance", "trigger", 0.0, 1.0));
+        out.push(mk_target("app.performance.mix_center", "Mix center (50/50)", "Performance", "trigger", 0.0, 1.0));
         self.deck_a.compositor.append_midi_targets(&mut out);
         format!("[{}]", out.join(","))
     }

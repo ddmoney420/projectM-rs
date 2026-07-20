@@ -52,6 +52,8 @@ import type { ShaderConsole } from './shader-console';
 import type { MidiPanel } from './midi-ui';
 import type { LibraryBrowser, BrowserDeps } from './library-browser';
 import { readMilkFiles } from './library';
+import type { LibraryItem } from './library';
+import { PerformanceActions, shouldHandlePerformanceShortcut, type PerformanceContext } from './performance';
 import { parseMessage, PROTOCOL_VERSION } from './projection-protocol';
 import { showAbout, maybeShowOnboarding } from './help';
 import {
@@ -175,6 +177,28 @@ const browserDeps: BrowserDeps = {
   importMilk: async (files) => milkdrop.importTexts(await readMilkFiles(files)),
   status: (m) => setStatus(m),
 };
+
+// Phase 10C.3 — canonical performance command layer shared by UI buttons, the
+// document keyboard handler, and MIDI actions. Selection/bank come from the
+// (lazily-created) library browser; audition/crossfader from browserDeps + the
+// engine. Actions are safe no-ops when the browser isn't open yet.
+const perfCtx: PerformanceContext = {
+  selectedItem: () => libraryBrowser?.selectedItem() ?? null,
+  bankItems: () => libraryBrowser?.bankResolvedItems() ?? [],
+  randomMilkdropItem: () => libraryBrowser?.randomMilkdropItem() ?? null,
+  audition: (item: LibraryItem) => browserDeps.audition(item),
+  clearAudition: () => browserDeps.clearAudition(),
+  getCrossfader: () => browserDeps.getCrossfader(),
+  setCrossfader: (t: number) => browserDeps.setCrossfader(t),
+  favorite: (item: LibraryItem, fav: boolean) => browserDeps.setFavorite(item.id, fav),
+  status: (m: string) => setStatus(m),
+  onChange: () => {
+    libraryBrowser?.syncCrossfaderExternal();
+    void libraryBrowser?.refresh();
+  },
+};
+const perf = new PerformanceActions(perfCtx);
+
 const recorder = new Recorder();
 
 // Lazy-load state for the code-split heavy panels.
@@ -415,6 +439,7 @@ function wireUI(): void {
     if (willOpen && !libraryBrowser) {
       const { LibraryBrowser } = await import('./library-browser');
       libraryBrowser = new LibraryBrowser($('library-host'), browserDeps);
+      libraryBrowser.setPerf(perf);
     }
     $('library').classList.toggle('open', willOpen);
     $('console').classList.remove('open');
@@ -478,6 +503,12 @@ function wireProjection(): void {
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && document.body.classList.contains('clean')) setClean(false);
   });
+  // Phase 10C.3 — document-level performance shortcuts ([ ] P R 1 2 3,
+  // Shift+←/→ nudge). Centralized focus guard so typing is never intercepted.
+  window.addEventListener('keydown', (e) => {
+    if (!shouldHandlePerformanceShortcut(e)) return;
+    if (perf.handleKey(e)) e.preventDefault();
+  });
   update();
   setInterval(update, 1000);
 }
@@ -530,16 +561,21 @@ function midiTick(): void {
     const actions: string[] = JSON.parse(midi_take_actions());
     for (const a of actions) {
       if (a === 'record.toggle') toggleRecord();
+      // Phase 10C.3 — performance.* actions run the SAME command layer as the
+      // UI/keyboard (no duplicate behaviour).
+      else if (a.startsWith('performance.')) perf.dispatchAction(a);
       // future: scene.next / scene.prev / fullscreen …
     }
   } catch {
     /* ignore */
   }
   try {
-    const u = JSON.parse(midi_take_updates()) as { values: unknown[]; bools: unknown[] };
+    const u = JSON.parse(midi_take_updates()) as { values: { path?: string }[]; bools: unknown[] };
     if (u.values.length || u.bools.length) {
       if ($('layers').classList.contains('open')) layerPanel?.syncValues();
       if ($('effects').classList.contains('open')) effectRack?.syncValues();
+      // A MIDI-driven crossfader change must move the UI slider immediately.
+      if (u.values.some((v) => v.path === 'global.crossfader')) libraryBrowser?.syncCrossfaderExternal();
     }
   } catch {
     /* ignore */
@@ -834,6 +870,7 @@ async function boot(): Promise<void> {
         if (!libraryBrowser) {
           const { LibraryBrowser } = await import('./library-browser');
           libraryBrowser = new LibraryBrowser($('library-host'), browserDeps);
+          libraryBrowser.setPerf(perf);
         }
         $('library').classList.add('open');
         $('console').classList.remove('open');
@@ -877,6 +914,19 @@ async function boot(): Promise<void> {
       get: () => crossfader(),
       set: (t: number) => set_crossfader(t),
       deck: () => JSON.parse(deck_diagnostics_json()),
+    };
+    // Performance command layer + MIDI-action driving for the harness (10C.3).
+    (window as unknown as Record<string, unknown>).__pmPerf = {
+      actions: perf,
+      dispatch: (id: string) => perf.dispatchAction(id),
+      handleKey: (init: KeyboardEventInit) => {
+        const e = new KeyboardEvent('keydown', init);
+        if (shouldHandlePerformanceShortcut(e)) return perf.handleKey(e);
+        return false;
+      },
+      registry: () => JSON.parse(midi_registry_json()),
+      targetValue: (path: string) => JSON.parse(midi_target_value(path)),
+      // low-level MIDI injection is via __pmMidi.inject (existing hook).
     };
   }
 

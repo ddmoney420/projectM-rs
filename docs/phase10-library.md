@@ -715,6 +715,124 @@ rapid 0↔1 + random values, resize during blend. Combinations exercised across 
 suite: Shader↔Shader, Shader↔Scene, Milkdrop↔Shader, Milkdrop↔Milkdrop
 (+ Scene↔Scene via scene decks).
 
+## Phase 10C.3 — MIDI + keyboard performance controls
+
+Makes the deck/audition/crossfader workflow performable without constant
+browser-UI clicks (`crates/pm-web-vj/src/lib.rs`, `web/src/performance.ts`).
+**Extends** the existing MIDI system — no parallel mapping database, no schema
+change (existing mappings keep working; the 88/88 regression, which includes the
+MIDI learn/pickup/momentary tests, is unchanged).
+
+### Continuous targets vs actions
+
+- **Continuous target** — a value across a range with soft-takeover; e.g. the
+  master crossfader. Dispatched through `midi_set_value` / read via
+  `midi_current` (the existing continuous path).
+- **Trigger action** — a one-shot command. Implemented via the existing `app.*`
+  target convention: `midi_fire` strips the `app.` prefix and queues the action
+  string, which `midi_take_actions()` drains and JS routes to the command layer.
+  **No action pretends to be a knob** — actions are `trigger` kind and the MIDI
+  panel labels them `· action` vs `· param`.
+
+### Master crossfader target
+
+Stable id **`global.crossfader`** (group *Performance*, continuous, 0→1, 0=Deck
+A / 1=Deck B). It maps to the **same** runtime `self.crossfader` as
+`set_crossfader` — one source of truth, no second state. Participates in MIDI
+Learn and the versioned mapping store like any continuous target.
+
+### Soft takeover
+
+Because `global.crossfader` is continuous, it inherits the existing pickup logic
+for free (`midi_current` returns the live value; `pickup_engage` gates the
+mapping). A physical fader far from the software value does **not** jump the
+master — it engages only after catching/crossing the software position. Tested
+both directions (physical below and above software) and value endpoints
+(0→0.0, 127→1.0). Pickup state re-arms on mapping edit/import (reconnect).
+
+### Performance actions (stable ids)
+
+Trigger targets (id = `app.performance.*`, action = `performance.*`):
+`audition_selected`, `bank_next`, `bank_previous`, `bank_audition_next`,
+`clear_audition`, `random_milkdrop`, `favorite_selected`, `mix_to_a`,
+`mix_to_b`, `mix_center`. Ids are stable strings (never display labels).
+
+### Trigger/edge semantics
+
+Reuses the router's edge detection: a Note-On (velocity>0) fires once; a CC fires
+on the **0→127 rising edge** only — a held 127 does **not** retrigger, and
+returning to 0 re-arms. Tested (fire-once / held-no-retrigger / re-arm).
+
+### Canonical command layer
+
+`PerformanceActions` (`web/src/performance.ts`) is the **single** implementation
+of every performance behaviour; UI buttons, the document keyboard handler, and
+MIDI actions all call it. It owns the Preview-Bank cursor so "next/previous bank
+item" means the same everywhere. Audition always flows through the transactional
+audition path; the crossfader always flows through the one `setCrossfader`.
+
+### Keyboard layer + focus safety
+
+Document-level shortcuts: `[`/`]` previous/next bank item, `P` audition selected,
+`R` random Milkdrop (auditions — never disrupts live), `1`/`2`/`3` mix to A /
+center / B, `Shift+←/→` nudge the crossfader ±0.05 (clamped). A centralized
+`shouldHandlePerformanceShortcut(e)` suppresses **all** of them while focus is in
+an input/textarea/select/contenteditable/CodeMirror — typing is never
+intercepted. The list-local keys (arrows/Enter/F/B) are kept disjoint from these
+to avoid double-firing.
+
+### Selected-item state
+
+Three distinct notions, documented: **Library selection** (browser highlight →
+Library actions), **Preview-Bank cursor** (owned by `PerformanceActions` → bank
+actions), **Auditioned item** (Deck B loaded content). They never conflict.
+
+### Audition never auto-crossfades
+
+A MIDI/keyboard **Audition** loads Deck B **without** moving the crossfader —
+preparing and bringing-live stay separate performance moves. `mix_to_a/b/center`
+and the fader are the only things that move the master.
+
+### UI / MIDI / keyboard synchronization
+
+One setter (`set_crossfader`) is the source of truth. A MIDI-driven crossfader
+change is reflected into the UI slider immediately (midiTick detects
+`global.crossfader` in the update stream → re-syncs the slider + `A/%/B`
+readout). Keyboard/UI changes go through the same setter, so soft-takeover sees
+the new software position. No DOM state is mutated independently of engine state.
+
+### Persistence / migration / multi-device / reconnect
+
+Mappings persist in the existing `pm-web-midi-v1` store (`MappingSet` v1);
+**no schema change** was needed (actions are ordinary `Trigger` mappings), so all
+existing mappings are preserved with no destructive reset. Mappings remain keyed
+by **device name + channel + selector** (empty device = any) — unchanged
+multi-device policy. On reconnect the mapping set is retained and pickup re-arms.
+
+### Web MIDI availability / mobile
+
+Web MIDI is feature-detected (`'requestMIDIAccess' in navigator`); the panel
+shows a clear unsupported state and never throws. Decks / crossfader / library /
+audition all keep working without MIDI. Keyboard shortcuts are naturally absent
+on touch-only devices; the touch crossfader + Library/Audition controls remain
+fully usable. **MIDI/keyboard are enhancements — every action stays available via
+accessible buttons.**
+
+### Future extension points
+
+The `path`-based registry + `app.*` action convention accommodate future Phase 11
+ids (`deckA.audio.volume`, `audio.crossfader`, `stem.vocals.mute`,
+`action.stem.vocals.toggle_mute`) and future deck actions (Load→Deck A/B, swap)
+without a redesign — none implemented now; stable A/B identity remains the rule.
+
+### Tests
+
+`web/verify-perf-controls.mjs` (22 checks): crossfader target/actions in the
+registry, continuous CC map + range + UI-follows, soft-takeover (below/above/
+engage), action learn + fire-once + held-no-retrigger + re-arm, `mix_center`
+action, keyboard 1/2/3 + nudge + input-suppression, bank MIDI audition + empty
+no-op, backward-compat targets, mapping persistence, reconnect retention.
+
 ## Phase 10 implementation ordering (current)
 
 ```
@@ -724,8 +842,8 @@ suite: Shader↔Shader, Shader↔Scene, Milkdrop↔Shader, Milkdrop↔Milkdrop
 10A.4 Library browser          ✓ merged
 10C.1 Deck abstraction         ✓ merged
 10B   Preview/Audition         ✓ merged
-10C.2 Master crossfader         ← this PR
-10C.3 MIDI/keyboard performance controls
+10C.2 Master crossfader         ✓ merged
+10C.3 MIDI/keyboard controls    ← this PR
 10D   Dual-Milkdrop productionization
 ```
 
