@@ -24,6 +24,8 @@ import init, {
   deck_b_load_preset,
   deck_b_import_scene,
   deck_diagnostics_json,
+  deck_capability_json,
+  perf_telemetry_json,
   set_crossfader,
   crossfader,
   preview_attach,
@@ -112,9 +114,40 @@ function parseImport(s: string): { ok: boolean; error?: string } {
   }
 }
 
+// Phase 10D — adaptive dual-Milkdrop policy (NO user-agent sniffing). Combines
+// the engine's capability tier (adapter limits) with a test/runtime override.
+// Only the true dual-Milkdrop case is gated; Milkdrop+Shader/Scene is always ok.
+let dualMilkdropForceDisabled = false; // set by the qualification harness
+function deckCapability(): { tier: number; dualMilkdrop: string } {
+  try {
+    return JSON.parse(deck_capability_json());
+  } catch {
+    return { tier: 3, dualMilkdrop: 'experimental' };
+  }
+}
+function dualMilkdropAllowed(): boolean {
+  if (dualMilkdropForceDisabled) return false;
+  return deckCapability().tier <= 1; // tier 1 = supported (measured pacing refines this later)
+}
+function deckASourceIsMilkdrop(): boolean {
+  try {
+    return /milkdrop/.test((JSON.parse(deck_diagnostics_json()) as { deckA?: { sourceType?: string } }).deckA?.sourceType ?? '');
+  } catch {
+    return false;
+  }
+}
+
 /** Audition a library item into the INACTIVE Deck B (never touches Deck A /
- *  master / recording / projection). Transactional per the engine exports. */
+ *  master / recording / projection). Transactional per the engine exports.
+ *  Dual-Milkdrop is degraded (with a message) on constrained devices. */
 async function auditionItem(item: import('./library').LibraryItem): Promise<{ ok: boolean; error?: string }> {
+  // Graceful degradation: refuse a SECOND Milkdrop deck when the device can't
+  // sustain it — keep Deck A live, tell the user, suggest a shader/scene.
+  if (item.type === 'milkdrop' && deckASourceIsMilkdrop() && !dualMilkdropAllowed()) {
+    const msg = 'Dual Milkdrop is unavailable at the current device capability. Try a Shader or Scene on the audition deck.';
+    setStatus(msg);
+    return { ok: false, error: msg };
+  }
   let res: { ok: boolean; error?: string };
   if (item.type === 'scene') {
     const full = await library.getFull(item.id);
@@ -554,6 +587,22 @@ function toggleRecord(): void {
   recorder.toggle(canvas, engine.captureAudioStream());
 }
 
+/** Compact dual-deck telemetry for the diagnostics panel (Phase 10D): live deck
+ *  count + sources, crossfader, and MEASURED live render-target count/MB. */
+function deckTelemetryRow(): string {
+  try {
+    const t = JSON.parse(perf_telemetry_json()) as {
+      deckCount: number; crossfader: number; deckASource: string; deckBSource: string | null;
+      liveTextureCount: number; liveTextureBytes: number;
+    };
+    const mb = (t.liveTextureBytes / (1024 * 1024)).toFixed(0);
+    const b = t.deckBSource ? ` · B:${t.deckBSource}` : '';
+    return `${t.deckCount} (A:${t.deckASource}${b}) · xf ${t.crossfader.toFixed(2)} · ${t.liveTextureCount} tex ~${mb}MB`;
+  } catch {
+    return '—';
+  }
+}
+
 /** Dispatch app-side MIDI actions (queued in Rust, decoupled from buttons) and
  *  reflect MIDI-driven values into whichever side panels are open. */
 function midiTick(): void {
@@ -676,6 +725,7 @@ function updateDiagnostics(): void {
     ['BPM', `${((d.bpm as number) ?? 0).toFixed(0)} ${d.tempoManual ? '(man)' : '(auto)'}`],
     ['beat', `${bar(d.beatPulse as number)} phase ${((d.beatPhase as number) ?? 0).toFixed(2)}`],
     ['crossOriginIsolated', String(self.crossOriginIsolated === true)],
+    ['decks', deckTelemetryRow()],
     ['GPU error', (d.lastError as unknown as string) || 'none'],
     ['transport', s.shared ? 'SharedArrayBuffer' : 'postMessage (fallback)'],
     ['AudioContext', s.contextState],
@@ -896,7 +946,15 @@ async function boot(): Promise<void> {
       createB: () => deck_b_create(),
       unloadB: () => deck_b_unload(),
       loadPresetB: (text: string) => JSON.parse(deck_b_load_preset(text)),
+      importSceneB: (json: string) => JSON.parse(deck_b_import_scene(json)),
       diag: () => JSON.parse(deck_diagnostics_json()),
+    };
+    // Phase 10D qualification/soak harness hooks.
+    (window as unknown as Record<string, unknown>).__pmQual = {
+      telemetry: () => JSON.parse(perf_telemetry_json()),
+      capability: () => JSON.parse(deck_capability_json()),
+      setDualMilkdropDisabled: (v: boolean) => { dualMilkdropForceDisabled = v; },
+      dualMilkdropAllowed: () => dualMilkdropAllowed(),
     };
     // Preview/Audition driving for the harness (Phase 10B).
     (window as unknown as Record<string, unknown>).__pmAudition = {

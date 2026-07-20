@@ -833,6 +833,139 @@ engage), action learn + fire-once + held-no-retrigger + re-arm, `mix_center`
 action, keyboard 1/2/3 + nudge + input-suppression, bank MIDI audition + empty
 no-op, backward-compat targets, mapping persistence, reconnect retention.
 
+## Phase 10D — dual-Milkdrop / dual-deck productionization
+
+Hardening + capability validation of the dual-deck architecture. **Measured on a
+single desktop environment** (see matrix); mobile + physical-device validation is
+explicitly pending.
+
+### Dual-deck resource model + worst-case engine count
+
+Render targets are now **measured** live, not hand-estimated: every
+`pm-render::Texture` registers on construction and unregisters on `Drop`
+(`live_texture_count` / `live_texture_bytes`), surfaced via `perf_telemetry_json`
+and the diagnostics **decks** row. A leak shows up as a count that never returns
+to baseline.
+
+Worst case for Milkdrop↔Milkdrop is **not** two engines — each deck's
+`PresetPlayer` runs a *second* `WarpEngine` during its own preset transition, so
+with both decks mid-transition **plus** the master crossfade the pipeline holds
+**up to four `WarpEngine`s + two intra-deck crossfades + one master crossfade**.
+This is benchmarked directly (below), not just steady-state two-engine.
+
+### CPU vs GPU timing (do not conflate)
+
+`cpuMs` is **CPU submission / render-loop EMA** — flagged `cpuMsIsGpuTime:false`.
+It stays **3–5 ms** even at 1440p dual-Milkdrop, which shows the app is
+**GPU-bound, not CPU-bound** (cheap submission; the GPU does the work). **GPU
+execution time is NOT inferred from it.** WebGPU `timestamp-query` **is available**
+on the tested adapter (reported by `deck_capability_json`), but pass-level GPU
+instrumentation was intentionally **not** wired into the hot loop (to avoid
+destabilizing normal runtime per the brief); sustained FPS + frame-progress are
+the honest GPU proxies used here.
+
+### Measured resource estimates (dual Milkdrop, 51 live textures)
+
+| Resolution | Live textures | Est. texture bytes (measured) | CPU-in-render |
+|---|---|---|---|
+| ~1100×620 | 51 | ~79 MB | 3–5 ms |
+| 1280×720 | 51 | 101.5 MB | ~5.3 ms |
+| 1920×1080 | 51 | 226 MB | ~3.2 ms |
+| 2560×1440 | 51 | 400 MB | ~4.7 ms |
+
+Bytes are `Σ w·h·depth·bpp` (base level, no mips) over all live textures — an
+**estimate from measured live allocations**, not GPU-driver residency. It scales
+~linearly with pixel count; 4K (~3840×2160) extrapolates to **~0.9 GB** and was
+**not** tested. Single-deck baseline is **26 live textures**.
+
+### Soak / leak findings (short CI run)
+
+The bounded harness (`verify-qualification.mjs`, default 40 iterations of
+create→load→crossfade→unload) returns to the **exact 26-texture baseline** (no
+leak), keeps the render loop advancing, and logs **0 WebGPU errors / 0 WASM
+panics / 0 console errors**. The harness accepts `SOAK_ITERS=…` for **long manual
+soak** runs (15/30/60-minute continuous sessions) — those long runs were **not**
+performed in this session and are left as a manual step.
+
+### Dual-Milkdrop state isolation + concurrent transitions
+
+Verified: loading a preset on Deck B leaves Deck A's source/layer state
+unchanged, and vice-versa (independent presets, feedback buffers, render targets;
+no shared-feedback contamination) at t=0/0.5/1. The worst-case four-engine run
+(both decks transitioning + master mid-blend) was **stable** (max 67 live
+textures, ~4.7 ms CPU, 0 errors). **Concurrent preset-transition policy:** given
+the measured headroom, **fully-concurrent (Policy A)** intra-deck transitions are
+retained on desktop — no constraint was needed; the capability tier + degradation
+message (below) are the guard for weaker devices.
+
+### Adaptive capability policy (no UA sniffing)
+
+`deck_capability_json` reports the adapter's real `max_texture_dimension_2d`,
+`max_buffer_size`, `timestamp-query` availability, and a **tier from limits**
+(≥8192 → tier 1 *supported*, ≥4096 → tier 2 *limited*, else tier 3
+*experimental*). The JS layer (`dualMilkdropAllowed`) combines the tier with a
+runtime override — **never** a user-agent string. Only the true **Milkdrop↔
+Milkdrop** case is gated; Milkdrop↔Shader/Scene and everything else is always
+allowed. Physical render size is bounded by `max_texture_dimension_2d` (the
+existing DPR-aware clamp), so `devicePixelRatio` cannot multiply allocation past
+safe limits.
+
+### Graceful degradation / allocation failure / device loss
+
+When dual-Milkdrop is disallowed (constrained tier / allocation failure), an
+audition of a second Milkdrop is **refused with a message** — *"Dual Milkdrop is
+unavailable at the current device capability. Try a Shader or Scene on the
+audition deck."* — **Deck A stays live, master stays valid, no black frame, no
+panic**; a Shader/Scene audition still works (verified). `deck_b_create` /
+`deck_b_load_preset` return status rather than throwing, so an allocation failure
+degrades cleanly. Full WebGPU **device loss** surfaces via the `on_uncaptured_error`
+"GPU error" diagnostics row; recovering from a true device-loss generally requires
+a page reload (WebGPU does not offer transparent recovery) — documented, not
+faked.
+
+### Crossfade / recording / projection / MIDI under load
+
+Rapid 0↔1 crossfading with both decks running + intra-deck preset swaps: **no
+validation errors, no black frames, renderer keeps advancing**. Recording remains
+the **post-crossfade master** and stays stable during dual-deck fading; projection
+mirrors the **post-crossfade master** while the preview stays **raw Deck B**; a
+sustained synthetic-MIDI audition/crossfade/bank loop keeps the renderer alive
+with 0 errors. All measured on the desktop environment below.
+
+### Tested hardware matrix
+
+| | |
+|---|---|
+| OS | Windows 11 |
+| Browser | Chrome (headed, real GPU via `--enable-unsafe-webgpu`), Playwright-driven |
+| GPU | discrete NVIDIA (per the project's verified runtime env); `max_texture_dimension_2d` = 16384; `timestamp-query` available |
+| Resolutions | ~1100×620 → 2560×1440 (dual-Milkdrop measured); 4K not tested |
+| DPR | 1 (physical size clamped to max texture dim) |
+
+**Only one desktop environment was available** — integrated-GPU, Apple-Silicon,
+and multi-adapter results are **not** claimed.
+
+### Support recommendation
+
+- **Desktop dual-Milkdrop: SUPPORTED** (tier 1) on the tested adapter — no leak,
+  stable four-engine worst case, 3–5 ms CPU through 1440p, comfortable GPU
+  headroom. Extended long-soak (60-min) confirmation remains a manual step.
+- **Mobile dual-Milkdrop: EXPERIMENTAL / pending** — only viewport-simulated
+  mobile was run (390px); no physical device this session. The capability tier +
+  degradation path already restrict/deny dual-Milkdrop and keep Deck A alive on
+  weaker devices. **Physical iPhone/Android and physical-MIDI validation are
+  PENDING** and must not be claimed as passed until actually performed.
+
+### Tests
+
+- `web/verify-qualification.mjs` (13 checks): capability report, dual-Milkdrop
+  isolation, worst-case four-engine stability, allocation-failure degradation,
+  resource-growth soak + **no-texture-leak** (baseline↔final), crossfade/resize/
+  recording/MIDI under load, no console errors / no WASM panics. Short CI mode by
+  default; `SOAK_ITERS` for long manual soak.
+- `pm-render` unit tests: byte-per-pixel + estimated-bytes accounting (workspace
+  now **277** = 275 baseline + 2).
+
 ## Phase 10 implementation ordering (current)
 
 ```
@@ -843,9 +976,13 @@ no-op, backward-compat targets, mapping persistence, reconnect retention.
 10C.1 Deck abstraction         ✓ merged
 10B   Preview/Audition         ✓ merged
 10C.2 Master crossfader         ✓ merged
-10C.3 MIDI/keyboard controls    ← this PR
-10D   Dual-Milkdrop productionization
+10C.3 MIDI/keyboard controls    ✓ merged
+10D   Dual-Milkdrop production   ← this PR (final Phase 10 engineering step)
 ```
+
+Next decision (not part of 10D): whether the accumulated Phase 10 work ships as
+`v0.0.3-web-beta.5`, or whether the version-alignment policy (git `v0.0.3-web-beta.x`
+vs VJ `APP_VERSION 0.9.x`) is resolved first.
 
 ## Tests (10A.1)
 

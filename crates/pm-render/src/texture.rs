@@ -51,7 +51,7 @@ impl Texture {
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        Texture { texture, view, format, width: width.max(1), height: height.max(1), depth: 1, name }
+        register(Texture { texture, view, format, width: width.max(1), height: height.max(1), depth: 1, name })
     }
 
     /// Create a sampled texture from tightly-packed RGBA8 pixel data
@@ -101,7 +101,7 @@ impl Texture {
         );
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        Texture { texture, view, format, width, height, depth: 1, name }
+        register(Texture { texture, view, format, width, height, depth: 1, name })
     }
 
     /// Create a sampled 3D (volume) texture from tightly-packed RGBA8 data
@@ -153,7 +153,7 @@ impl Texture {
         );
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        Texture { texture, view, format, width, height, depth, name }
+        register(Texture { texture, view, format, width, height, depth, name })
     }
 
     /// True if this is a 3D (volume) texture.
@@ -164,5 +164,78 @@ impl Texture {
     /// True if the texture has no allocated size.
     pub fn is_empty(&self) -> bool {
         self.width == 0 || self.height == 0
+    }
+
+    /// Estimated base-level byte size (no mips): w × h × depth × bpp.
+    pub fn estimated_bytes(&self) -> u64 {
+        u64::from(self.width) * u64::from(self.height) * u64::from(self.depth) * u64::from(bytes_per_pixel(self.format))
+    }
+}
+
+// --- Phase 10D: live render-target accounting -------------------------------
+//
+// A MEASURED (not hand-estimated) count of live `pm-render::Texture`s and their
+// total base-level byte size. Every constructor registers; `Drop` unregisters —
+// so a leak (retained WarpEngine / Compositor / deck) shows up as a count that
+// never returns to baseline. Exposed to the diagnostics/telemetry layer.
+
+use std::sync::atomic::{AtomicI64, Ordering};
+
+static LIVE_TEXTURES: AtomicI64 = AtomicI64::new(0);
+static LIVE_TEXTURE_BYTES: AtomicI64 = AtomicI64::new(0);
+
+pub(crate) fn bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
+    match format {
+        wgpu::TextureFormat::R8Unorm => 1,
+        wgpu::TextureFormat::Rgba16Float => 8,
+        wgpu::TextureFormat::Rgba32Float => 16,
+        // Rgba8/Bgra8 (unorm/srgb), R32Float, and other 32-bit targets.
+        _ => 4,
+    }
+}
+
+/// Number of live `Texture`s (render targets + sampled sources) right now.
+pub fn live_texture_count() -> i64 {
+    LIVE_TEXTURES.load(Ordering::Relaxed)
+}
+
+/// Total estimated base-level bytes across all live `Texture`s.
+pub fn live_texture_bytes() -> i64 {
+    LIVE_TEXTURE_BYTES.load(Ordering::Relaxed)
+}
+
+/// Register a freshly-built texture in the live accounting. All constructors
+/// route their return value through this.
+fn register(t: Texture) -> Texture {
+    LIVE_TEXTURES.fetch_add(1, Ordering::Relaxed);
+    LIVE_TEXTURE_BYTES.fetch_add(t.estimated_bytes() as i64, Ordering::Relaxed);
+    t
+}
+
+impl Drop for Texture {
+    fn drop(&mut self) {
+        LIVE_TEXTURES.fetch_sub(1, Ordering::Relaxed);
+        LIVE_TEXTURE_BYTES.fetch_sub(self.estimated_bytes() as i64, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bpp_matches_known_formats() {
+        assert_eq!(bytes_per_pixel(wgpu::TextureFormat::Rgba8Unorm), 4);
+        assert_eq!(bytes_per_pixel(wgpu::TextureFormat::Bgra8UnormSrgb), 4);
+        assert_eq!(bytes_per_pixel(wgpu::TextureFormat::R8Unorm), 1);
+        assert_eq!(bytes_per_pixel(wgpu::TextureFormat::Rgba16Float), 8);
+        assert_eq!(bytes_per_pixel(wgpu::TextureFormat::Rgba32Float), 16);
+    }
+
+    #[test]
+    fn estimated_bytes_is_w_h_depth_bpp() {
+        // 1920×1080 Rgba8 = ~8.29 MB; a 3-layer volume triples it.
+        assert_eq!(1920u64 * 1080 * 1 * 4, 8_294_400);
+        assert_eq!(256u64 * 256 * 4 * 4, 1_048_576); // 4-layer noisevol
     }
 }
