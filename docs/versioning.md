@@ -128,11 +128,20 @@ next public beta uses the new line `v0.10.0-beta.1`. There is no renumbering of
 past releases; the two lines coexist, distinguished by the tag parser's
 `legacy` flag.
 
-## Pending validations (not closed by version alignment)
+## RC qualification status (v0.10.0-beta.1 @ c6ca3cd)
 
 ```
-Short automated stress (40 cycles):  PASS
-60-minute desktop soak:              NOT YET RUN
-Physical iPhone:                     NOT YET RUN
-Physical MIDI:                       NOT YET RUN (simulated only)
+RC build provenance:                 PASS (About shows 0.10.0-beta.1 · c6ca3cd)
+Workspace tests:                     277 passed / 0 failed
+All Phase 10 suites:                 green (see qualification report)
+Full WebGPU regression:              88/88 boolean, 0 errors/panics/console
+Short qualification stress:          PASS (leak-free 26→26)
+Extended desktop soak:               PASS at 5.03 min (301,955 ms, 385 iters,
+                                       9283 frames; leak-free; FPS 25.7–33.1
+                                       avg 31.3; CPU 4.8→5.3 ms flat; 0 errors)
+60-minute desktop soak:              NOT YET RUN (only 5.03 min completed)
+Physical iPhone:                     NOT YET RUN (checklist: docs/rc-iphone-checklist.md)
+Physical MIDI:                       NOT YET RUN (simulated harness only)
 ```
+Desktop env: Windows 11 · Chrome (headed, real GPU) · discrete NVIDIA
+(`max_texture_dimension_2d` 16384, `timestamp-query` available) · 1280×800 · DPR 1.
