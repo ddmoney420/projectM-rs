@@ -743,7 +743,11 @@ const run = async () => {
   await page.evaluate(() => window.__pmHelp.about());
   await sleep(250);
   results.p9AboutShown = await page.evaluate(() => window.__pmHelp.overlayShown());
-  results.p9AboutHasVersion = (await page.locator('#pm-overlay .ver').innerText()).includes('v0.9');
+  // Convention-agnostic: About shows a SemVer-ish product version + a short
+  // commit (dev build = "<base>-dev · <sha>"), not a hard-coded release string.
+  results.p9AboutHasVersion = /\d+\.\d+\.\d+(-(beta\.\d+|dev|web-beta\.\d+))?\s·\s[0-9a-f]{7}/.test(
+    await page.locator('#pm-overlay .ver').innerText(),
+  );
   results.p9CapabilityMatrix = (await page.locator('#pm-overlay .pm-cap').count()) >= 8;
   results.p9WebgpuCapability = (await page.locator('#pm-overlay .pm-cap').first().locator('.ok').count()) === 1;
   await page.locator('#pm-overlay .pm-ov-x').click();

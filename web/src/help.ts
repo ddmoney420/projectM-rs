@@ -2,7 +2,7 @@
 // centered card; the same overlay serves the welcome flow and the About panel.
 // Everything is local — no account, no server, no telemetry.
 
-import { APP_VERSION, BUILD_MODE } from './version';
+import { APP_VERSION, BUILD_MODE, GIT_COMMIT, RELEASE_TAG } from './version';
 import { detectCapabilities } from './capabilities';
 
 const ONBOARD_KEY = 'pm-web-onboarded-v1';
@@ -43,7 +43,7 @@ export function showAbout(): void {
   const { card } = overlay();
   card.innerHTML = `
     <button class="pm-ov-x" title="Close">×</button>
-    <h1>projectM-rs <span class="ver">v${APP_VERSION} · ${BUILD_MODE}</span></h1>
+    <h1>projectM-rs <span class="ver">${esc(APP_VERSION)} · ${esc(GIT_COMMIT)}${RELEASE_TAG ? '' : ' · ' + BUILD_MODE}</span></h1>
     <p>A browser music visualizer: Milkdrop presets, Shadertoy-style GLSL, a layer
        compositor, effects, tempo/beat reactivity, MIDI control, scene sharing,
        recording, and second-screen projection — rendered on WebGPU.</p>
