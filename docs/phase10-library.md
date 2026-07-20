@@ -338,13 +338,103 @@ save/load user shader, rename/duplicate/delete (built-ins protected), favorites,
 **invalid scene → rejected, current scene intact**, collections (shader+scene),
 recent/usage, zero-Milkdrop, reload persistence, and **0 upload requests**.
 
+## Phase 10A.4 — unified library browser
+
+A fast, performance-oriented content browser over the 10A.1–10A.3 foundation
+(`web/src/library-browser.ts`, opened from the **Library** toolbar button).
+
+### UX / views
+
+One left-docked panel with a search box, **view tabs** (`All`, `Milkdrop`,
+`Shaders`, `Scenes`, `Favorites`, `Recent`, `Collections`), a Milkdrop
+`Prev/Random/Next` bar (shown for All/Milkdrop/Favorites/Recent), an
+`Import .milk` button, a virtualized result list, and a details/actions panel.
+
+### One query pipeline
+
+`applyFilter()` is the single predictable pipeline: **view filter → search →
+sort**. It runs over a **lightweight in-memory aggregate** (`deps.collect()` =
+built-in shaders ⊕ Milkdrop pack index ⊕ user/imported/saved items, deduped by
+id with store state overriding). **Browse never loads a heavy payload** —
+ShaderProject/SceneData/`.milk` text are fetched only on Load.
+
+### Search / filters
+
+Substring search over `name`/`author`/`tags`/`license`/`attribution`/
+`description` (name/author/tags weighted by inclusion), combined cleanly with the
+active view. Responsive over a synthetic **10,000-item** set (tested).
+
+### Virtualization
+
+Fixed row height + a windowed render: a spacer sized to `results·rowHeight`, and
+only the visible range (± buffer) is in the DOM. Verified **bounded DOM (< 60
+rows)** at 10k results, on initial render and after scrolling to the end.
+
+### Favorites / Recent / Collections
+
+Favorite toggles inline (metadata-only, persists, no payload rewrite). Recent =
+items with `lastUsed`, sorted desc, updated on Load. Collections: create/rename/
+delete (deleting a collection **keeps** its items) + add/remove membership; a
+collection bar filters the view.
+
+### Item rows + details + context actions
+
+Each row: type-colored placeholder thumbnail + name + type badge + favorite +
+Load. The details panel shows name/type/author/description/tags/license/
+attribution/source/origin/texture-requirement (only known fields; nothing
+invented). Actions are **context-sensitive**: built-ins get Load/Favorite/
+Duplicate (no destructive rename/delete); user Shader/Scene get Rename/Duplicate/
+Delete; pack/imported Milkdrop get Load/Favorite/Add-to-Collection (+ Delete for
+imported).
+
+### Load semantics (no preview yet)
+
+Load applies to the **active** visual — it is **not** a preview. Routing:
+Milkdrop → lazy `presetText` → the new transactional `load_preset` wasm export
+(crossfades via `PresetPlayer::switch_to`; a parse failure keeps the current
+preset); Shader → `content.loadShader` (transactional); Scene →
+`content.loadScene`/`import_scene` (transactional). **A failed load preserves the
+current master visual** (tested). True non-destructive preview is deferred to
+10B (after the 10C.1 deck abstraction).
+
+### Milkdrop navigation
+
+`Random/Next/Previous` operate over the **current filtered Milkdrop result set**
+(e.g. within a search or the Favorites view); deterministic no-op on zero
+results.
+
+### Thumbnails / empty states / mobile / a11y
+
+Thumbnails are **type-specific placeholders** only (no generation, no per-card
+renderers — deferred to a focused follow-up). Empty states are helpful per view
+("Import .milk files…", "Save the current scene…", "No favorites yet…"). Mobile:
+responsive width, touch-tappable rows/actions, no horizontal overflow (tested at
+390px). Accessibility: focusable listbox with roles, `aria-selected`,
+`aria-pressed` favorite buttons, labelled actions, type conveyed by text badge
+(not color alone); keyboard `↑/↓` select, `Enter` load, `F` favorite — suppressed
+while a text input/editor is focused.
+
+### Pack-unavailable
+
+If a pack shard can't be fetched, browse metadata stays visible, Load reports the
+preset is unreachable, the renderer stays alive, and shaders/scenes/imports keep
+working (tested).
+
+### Tests
+
+`web/verify-browser.mjs` — 16 checks: views, empty states, search
+(name/author/tag/zero), real Milkdrop load, **10k virtualization + bounded DOM**,
+large-set search, pack-unavailable graceful, favorites, recent, collections
+(add/remove/delete-keeps-items), shader+scene load routing, mobile no-overflow,
+favorite persistence across reload, 0 uploads.
+
 ## Phase 10 implementation ordering (current)
 
 ```
 10A.1 Library foundation      ✓ merged
 10A.2 Milkdrop library         ✓ merged
-10A.3 Shader/Scene library     ← this PR
-10A.4 Library browser
+10A.3 Shader/Scene library     ✓ merged
+10A.4 Library browser          ← this PR
 10C.1 Deck abstraction         (before Preview)
 10B   Preview/Audition
 10C.2 Crossfader

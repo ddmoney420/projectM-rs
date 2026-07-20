@@ -17,6 +17,7 @@ import init, {
   project_json,
   export_scene,
   import_scene,
+  load_preset,
   midi_handle,
   midi_import,
   midi_export,
@@ -39,7 +40,8 @@ import { ProjectionManager } from './projection';
 // neither is downloaded before the first rendered frame.
 import type { ShaderConsole } from './shader-console';
 import type { MidiPanel } from './midi-ui';
-import type { LibraryPanel } from './library-panel';
+import type { LibraryBrowser, BrowserDeps } from './library-browser';
+import { readMilkFiles } from './library';
 import { parseMessage, PROTOCOL_VERSION } from './projection-protocol';
 import { showAbout, maybeShowOnboarding } from './help';
 import {
@@ -82,8 +84,45 @@ let layerPanel: LayerPanel | null = null;
 let effectRack: EffectRack | null = null;
 let midiPanel: MidiPanel | null = null;
 let shaderConsole: ShaderConsole | null = null;
-let libraryPanel: LibraryPanel | null = null;
+let libraryBrowser: LibraryBrowser | null = null;
 let projection: ProjectionManager | null = null;
+
+// Aggregated, lightweight query surface for the unified Library browser
+// (10A.4): built-in shaders + Milkdrop pack index (in-memory) + user/imported/
+// saved items (IndexedDB). Browse never loads a heavy payload.
+const browserDeps: BrowserDeps = {
+  collect: async () => {
+    const map = new Map<string, import('./library').LibraryItem>();
+    for (const it of content.listBuiltinShaders()) map.set(it.id, it);
+    for (const it of milkdrop.listIndex()) map.set(it.id, it);
+    for (const it of await library.getAll().catch(() => [])) map.set(it.id, it);
+    return [...map.values()];
+  },
+  load: async (it) => {
+    if (it.type === 'scene') return content.loadScene(it.id);
+    if (it.type === 'shader') return content.loadShader(it.id);
+    const text = await milkdrop.presetText(it.id);
+    if (text == null) return { ok: false, error: 'preset text unavailable (pack unreachable?)' };
+    try {
+      const r = JSON.parse(load_preset(text)) as { ok?: boolean; error?: string };
+      return { ok: r.ok === true, error: r.error };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+  setFavorite: (id, f) => content.setFavorite(id, f),
+  rename: (id, n) => content.rename(id, n),
+  duplicate: (id) => content.duplicate(id),
+  remove: (id) => content.delete(id),
+  collections: () => library.listCollections().catch(() => []),
+  createCollection: (n) => library.createCollection(n),
+  renameCollection: (id, n) => library.createCollection(n, id).then(() => undefined),
+  deleteCollection: (id) => library.deleteCollection(id),
+  addToCollection: (id, c) => content.addToCollection(id, c),
+  removeFromCollection: (id, c) => content.removeFromCollection(id, c),
+  importMilk: async (files) => milkdrop.importTexts(await readMilkFiles(files)),
+  status: (m) => setStatus(m),
+};
 const recorder = new Recorder();
 
 // Lazy-load state for the code-split heavy panels.
@@ -318,17 +357,17 @@ function wireUI(): void {
     $('console').classList.remove('open');
     $('library').classList.remove('open');
   });
-  // Library panel (lazy — the panel bundle loads on first open).
+  // Unified Library browser (lazy — the browser bundle loads on first open).
   $('library-btn').addEventListener('click', async () => {
     const willOpen = !$('library').classList.contains('open');
-    if (willOpen && !libraryPanel) {
-      const { LibraryPanel } = await import('./library-panel');
-      libraryPanel = new LibraryPanel($('library-host'), content, setStatus);
+    if (willOpen && !libraryBrowser) {
+      const { LibraryBrowser } = await import('./library-browser');
+      libraryBrowser = new LibraryBrowser($('library-host'), browserDeps);
     }
     $('library').classList.toggle('open', willOpen);
     $('console').classList.remove('open');
     $('layers').classList.remove('open');
-    if (willOpen) void libraryPanel?.refresh();
+    if (willOpen) void libraryBrowser?.refresh();
   });
   // Controls, Effects, MIDI, Output all dock on the right — mutually exclusive.
   const rightPanels = ['controls', 'effects', 'midi', 'output'];
@@ -736,6 +775,31 @@ async function boot(): Promise<void> {
       listRecent: (n?: number) => content.listRecent(n),
       listFavorites: () => content.listFavorites(),
       getFull: (id: string) => content.getFull(id),
+    };
+    // Library-browser driving for the harness.
+    (window as unknown as Record<string, unknown>).__pmBrowser = {
+      open: async () => {
+        if (!libraryBrowser) {
+          const { LibraryBrowser } = await import('./library-browser');
+          libraryBrowser = new LibraryBrowser($('library-host'), browserDeps);
+        }
+        $('library').classList.add('open');
+        $('console').classList.remove('open');
+        $('layers').classList.remove('open');
+        await libraryBrowser.refresh();
+        return true;
+      },
+      refresh: () => libraryBrowser?.refresh(),
+      setView: (v: string) => libraryBrowser?.setView(v as never),
+      setSearch: (s: string) => libraryBrowser?.setSearch(s),
+      resultCount: () => libraryBrowser?.resultCount() ?? -1,
+      renderedRowCount: () => libraryBrowser?.renderedRowCount() ?? -1,
+      scrollTo: (px: number) => libraryBrowser?.scrollTo(px),
+      scrollHeight: () => libraryBrowser?.scrollHeight() ?? -1,
+      selectIndex: (i: number) => libraryBrowser?.selectIndex(i),
+      currentView: () => libraryBrowser?.currentView(),
+      loadItem: (item: import('./library').LibraryItem) => browserDeps.load(item),
+      collect: () => browserDeps.collect(),
     };
   }
 

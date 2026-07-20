@@ -119,23 +119,48 @@
         transition: transform .18s ease; z-index: 6; padding: .5rem .55rem; }
       #layers.open { transform: none; }
       .lp-add, .lp-scene { display: flex; gap: .3rem; flex-wrap: wrap; margin-bottom: .5rem; }
-      /* Library panel (left-docked; Phase 10A.3) */
-      #library { position: fixed; top: 0; bottom: var(--bar-h, 44px); left: 0; width: min(340px, 94vw);
-        overflow-y: auto; background: rgba(16,18,23,.97);
+      /* Unified Library browser (left-docked, virtualized; Phase 10A.4) */
+      #library { position: fixed; top: 0; bottom: var(--bar-h, 44px); left: 0; width: min(380px, 96vw);
+        display: flex; flex-direction: column; background: rgba(16,18,23,.98);
         border-right: 1px solid rgba(255,255,255,.12); transform: translateX(-101%);
-        transition: transform .18s ease; z-index: 6; padding: .5rem .55rem; }
+        transition: transform .18s ease; z-index: 6; }
       #library.open { transform: none; }
-      #library .lib-actions { display: flex; gap: .3rem; flex-wrap: wrap; margin-bottom: .4rem; }
+      #library-host { display: flex; flex-direction: column; height: 100%; min-height: 0; padding: .45rem .5rem; box-sizing: border-box; }
       #library button { background: #222833; color: #eee; border: 1px solid #39424f;
-        border-radius: 5px; padding: .22rem .45rem; cursor: pointer; font-size: 12px; }
-      #library .lib-h { font-weight: 600; opacity: .8; margin: .5rem 0 .25rem; font-size: 12px; }
-      #library .lib-note { min-height: 1em; font-size: 11px; color: #9fe0c0; margin-bottom: .3rem; }
-      #library .lib-empty { opacity: .5; font-size: 12px; padding: .3rem 0; }
-      #library .lib-row { display: flex; gap: .25rem; align-items: center; padding: .18rem 0;
-        border-bottom: 1px solid rgba(255,255,255,.06); }
-      #library .lib-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-      #library .lib-badge { font-size: 10px; opacity: .55; text-transform: uppercase; }
-      #library .lib-row button { padding: .1rem .35rem; font-size: 11px; }
+        border-radius: 5px; padding: .2rem .4rem; cursor: pointer; font-size: 12px; }
+      #library .br-top { display: flex; gap: .3rem; margin-bottom: .35rem; }
+      #library .br-search { flex: 1; background: #1a1f27; color: #eee; border: 1px solid #39424f;
+        border-radius: 5px; padding: .28rem .5rem; font-size: 13px; }
+      #library .br-tabs { display: flex; gap: .2rem; flex-wrap: wrap; margin-bottom: .35rem; }
+      #library .br-tab { font-size: 11px; padding: .18rem .4rem; opacity: .8; }
+      #library .br-tab.on { background: #1f6feb; border-color: #1f6feb; opacity: 1; }
+      #library .br-collbar, #library .br-nav { display: flex; gap: .25rem; flex-wrap: wrap; margin-bottom: .35rem; align-items: center; }
+      #library .br-navlabel { font-size: 11px; opacity: .6; }
+      #library .br-chip { font-size: 11px; padding: .16rem .4rem; }
+      #library .br-chip.on { background: #2b3a4d; border-color: #5a7fb0; }
+      #library .br-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; position: relative; outline: none; }
+      #library .br-scroll:focus-visible { box-shadow: inset 0 0 0 2px rgba(31,111,235,.6); }
+      #library .br-spacer { position: relative; width: 100%; }
+      #library .br-window { position: absolute; top: 0; left: 0; right: 0; will-change: transform; }
+      #library .br-row { display: flex; gap: .4rem; align-items: center; padding: 0 .1rem;
+        border-bottom: 1px solid rgba(255,255,255,.06); box-sizing: border-box; }
+      #library .br-row.sel { background: rgba(31,111,235,.18); }
+      #library .br-thumb { flex: none; width: 30px; height: 26px; display: grid; place-items: center;
+        border-radius: 4px; font-size: 11px; font-weight: 700; color: #cdd6e2; }
+      #library .br-thumb[data-type="milkdrop"] { background: linear-gradient(135deg,#4b2d6b,#7a3f8f); }
+      #library .br-thumb[data-type="shader"] { background: linear-gradient(135deg,#12405a,#1f6f6f); }
+      #library .br-thumb[data-type="scene"] { background: linear-gradient(135deg,#3a3f12,#6f6a1f); }
+      #library .br-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+      #library .br-badge { flex: none; font-size: 9px; opacity: .5; text-transform: uppercase; }
+      #library .br-fav { flex: none; padding: .1rem .3rem; border-color: transparent; background: transparent; font-size: 14px; }
+      #library .br-load { flex: none; padding: .12rem .4rem; font-size: 11px; }
+      #library .br-empty { padding: 1rem .3rem; opacity: .55; font-size: 12.5px; line-height: 1.4; }
+      #library .br-details { border-top: 1px solid rgba(255,255,255,.12); margin-top: .35rem; padding-top: .35rem; max-height: 40%; overflow-y: auto; }
+      #library .br-d-row { display: flex; gap: .5rem; font-size: 11.5px; padding: .06rem 0; }
+      #library .br-d-row b { flex: none; width: 74px; opacity: .6; font-weight: 600; }
+      #library .br-d-row span { flex: 1; overflow-wrap: anywhere; }
+      #library .br-d-actions { display: flex; gap: .25rem; flex-wrap: wrap; margin-top: .35rem; }
+      #library .br-d-actions button { font-size: 11px; }
       .lp-note { display: none; margin: 0 0 .45rem; padding: .35rem .5rem; border-radius: 5px;
         background: rgba(255,176,138,.14); border: 1px solid rgba(255,176,138,.4);
         color: #ffcbb0; font-size: 12px; line-height: 1.35; }
