@@ -169,6 +169,14 @@
       #library .br-aud { flex: none; padding: .12rem .35rem; font-size: 11px; background: #2a3a52; border-color: #3d5578; }
       #library .br-mv, #library .br-rm { flex: none; padding: .1rem .28rem; font-size: 10px; }
       @media (max-width: 460px) { #library .br-preview { width: 96px; height: 54px; } }
+      /* Phase 10C.2: master crossfader */
+      #library .br-xf { display: flex; gap: .4rem; align-items: center; margin-bottom: .4rem;
+        padding-bottom: .35rem; border-bottom: 1px solid rgba(255,255,255,.1); }
+      #library .br-xf-a, #library .br-xf-b { font-weight: 700; font-size: 11px; opacity: .7; }
+      #library .br-xf-a { color: #d98a91; } #library .br-xf-b { color: #8fb0e0; }
+      #library .br-xf-slider { flex: 1; accent-color: #7a5cc0; height: 22px; }
+      #library .br-xf-val { flex: none; width: 34px; text-align: right; font-size: 11px;
+        font-variant-numeric: tabular-nums; opacity: .8; }
       #library .br-empty { padding: 1rem .3rem; opacity: .55; font-size: 12.5px; line-height: 1.4; }
       #library .br-details { border-top: 1px solid rgba(255,255,255,.12); margin-top: .35rem; padding-top: .35rem; max-height: 40%; overflow-y: auto; }
       #library .br-d-row { display: flex; gap: .5rem; font-size: 11.5px; padding: .06rem 0; }

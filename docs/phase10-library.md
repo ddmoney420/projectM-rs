@@ -631,6 +631,90 @@ unchanged, failed-audition-preserves, master isolation, warm state, clear
 audition, Preview Bank add/reorder/missing-skip/clear/persist-reload, preview
 monitor attach, mobile no-overflow, 0 uploads.
 
+## Phase 10C.2 — master A/B crossfader
+
+Blends the two decks into the master (`crates/pm-web-vj/src/lib.rs`,
+`web/src/library-browser.ts`). **Linear mode only** (luma/wipe/glitch/radial/
+additive are future).
+
+### Architecture
+
+```
+Deck A ─┐
+        ├→ MasterCrossfade (mix) → master → Surface / Recording / Projection
+Deck B ─┘
+Deck B ───────────────────────────────────→ Preview monitor (raw, unchanged)
+```
+Reuses the existing `pm_core::Crossfade` primitive (`draw(from, to, t, output)` =
+`mix(a.rgb, b.rgb, t)`, alpha 1.0) — no duplicate blend path. The blend renders
+into a `master` texture (`TARGET_FORMAT` = `Rgba8Unorm`, linear), which
+`master_blit` copies to the surface. **Endpoint bypass:** at `t == 0` (or Deck B
+absent) the surface blits **Deck A directly** — byte-identical to the pre-10C.2
+single-deck path (the 88/88 regression is unchanged); at `t == 1` it blits Deck B
+directly; only the middle runs the blend. Blending happens in linear space
+(sample → mix → write), so it is **gamma-correct** — no darkening/premultiplication
+(measured luma A 103 / mid 61 / B 27, a clean midpoint; no value below the darker
+endpoint or above the brighter one).
+
+### Semantics + deck identity
+
+`crossfader ∈ [0,1]` (clamped): **0.0 = 100% Deck A, 0.5 = linear A/B, 1.0 = 100%
+Deck B**; default **0.0**. Deck identities are **permanently stable** — reaching
+an endpoint never swaps A and B, and never changes what is loaded in either deck.
+Runtime performance state only: **never serialized into SceneData** (belongs to
+the future `PerformanceSession`). Exports: `set_crossfader`/`crossfader`;
+reported in `deck_diagnostics_json`.
+
+### Required behaviors
+
+- **Empty/absent Deck B** → master shows Deck A at any `t` (never fades to black).
+- **Clear Deck B** → the fader is reset to **0 (100% A)** *before* Deck B unloads,
+  so the master is never left mixing toward an absent deck.
+- **Audition** loads Deck B **without** moving the fader (prep stays hidden until
+  you fade).
+- **Direct Library Load** always targets **Deck A** (the live deck). If the fader
+  is currently toward B, a Load still replaces Deck A — which is only partially or
+  not visible until you fade back toward A; this is intentional and documented.
+- **Warm decks:** both decks render every frame at `t=0` and `t=1` (Milkdrop /
+  shader / scene feedback stays warm for an instant blend).
+- **Transactional:** a failed Deck A replacement keeps the previous Deck A; a
+  failed Deck B audition keeps the previous Deck B.
+- **Recording + projection** mirror the surface = **post-crossfade master**.
+- **Preview monitor** stays **raw Deck B** output (independent of the fader).
+
+### UI / accessibility
+
+An A◀▶B `<input type="range">` (min 0, max 1, step .01, default 0) in the library
+panel — mouse, touch, and native keyboard (arrows/Home/End) with an
+`aria-label`; a live `A / 42% / B` text readout (not color-only). The slider
+re-syncs to the engine value after a Clear (which resets to A). Mobile-safe (no
+horizontal overflow at 390px).
+
+### Performance (CPU-in-render EMA, ms — GPU time not directly instrumented)
+
+Deck A only `t=0` **2.67 ms**; Shader+Shader blend `t=0.5` **3.38 ms**;
+Milkdrop+Milkdrop blend `t=0.5` **4.16 ms** — all far under the 16.67 ms/60 fps
+budget; FPS holds at the display rate (the GPU-present-bound proxy — WebGPU
+timestamp queries are not wired in this harness, so only CPU-in-render is a
+measured number). This distinguishes **CPU frame timing** (measured) from **GPU
+timing** (proxied by sustained FPS).
+
+### Dual-Milkdrop status
+
+Milkdrop↔Milkdrop crossfading is **functionally working** (two independent
+`PresetPlayer`s blended, ~4.16 ms CPU) but **not declared production-ready** —
+extended GPU-memory headroom and mobile validation remain **Phase 10D**.
+
+### Tests
+
+`web/verify-crossfader.mjs` (18 checks): set/clamp (0/0.5/1/over/under), deck
+identity stable across endpoints, master isolation, warm decks at endpoints,
+**color** (endpoints differ, middle is a between-endpoints blend, never black —
+via real master-canvas PNG luma), empty-Deck-B-not-black, clear-resets-fader,
+rapid 0↔1 + random values, resize during blend. Combinations exercised across the
+suite: Shader↔Shader, Shader↔Scene, Milkdrop↔Shader, Milkdrop↔Milkdrop
+(+ Scene↔Scene via scene decks).
+
 ## Phase 10 implementation ordering (current)
 
 ```
@@ -639,8 +723,8 @@ monitor attach, mobile no-overflow, 0 uploads.
 10A.3 Shader/Scene library     ✓ merged
 10A.4 Library browser          ✓ merged
 10C.1 Deck abstraction         ✓ merged
-10B   Preview/Audition         ← this PR
-10C.2 Master crossfader
+10B   Preview/Audition         ✓ merged
+10C.2 Master crossfader         ← this PR
 10C.3 MIDI/keyboard performance controls
 10D   Dual-Milkdrop productionization
 ```
