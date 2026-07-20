@@ -9,6 +9,7 @@
 // later phase and is deliberately NOT built here).
 
 import type { Collection, ContentType, LibraryItem } from './library';
+import type { PerformanceActions } from './performance';
 
 export interface ImportResult {
   ok: boolean;
@@ -66,6 +67,7 @@ export class LibraryBrowser {
   private collectionsList: Collection[] = [];
   private bankIds: string[] = [];
   private bankCursor = -1;
+  private perf: PerformanceActions | null = null;
   private view: View = 'all';
   private search = '';
   private activeCollection: string | null = null;
@@ -190,6 +192,35 @@ export class LibraryBrowser {
 
   // --- data ---------------------------------------------------------------
 
+  /** Inject the shared performance command layer so the bank bar / keyboard /
+   *  MIDI all drive the same commands (single source of truth). */
+  setPerf(perf: PerformanceActions): void {
+    this.perf = perf;
+  }
+
+  // --- accessors for the performance command layer -----------------------
+
+  selectedItem(): LibraryItem | null {
+    return this.selected >= 0 ? this.results[this.selected] ?? null : null;
+  }
+
+  /** Resolved Preview-Bank items in order (missing refs skipped). */
+  bankResolvedItems(): LibraryItem[] {
+    const byId = new Map(this.all.map((i) => [i.id, i]));
+    return this.bankIds.map((id) => byId.get(id)).filter((x): x is LibraryItem => !!x);
+  }
+
+  randomMilkdropItem(): LibraryItem | null {
+    const milk = this.all.filter((i) => i.type === 'milkdrop');
+    return milk.length ? milk[Math.floor(Math.random() * milk.length)] : null;
+  }
+
+  /** Re-sync the crossfader slider to the engine value (after a MIDI/keyboard
+   *  change) without mutating engine state. */
+  syncCrossfaderExternal(): void {
+    this.syncCrossfader();
+  }
+
   async refresh(): Promise<void> {
     [this.all, this.collectionsList, this.bankIds] = await Promise.all([
       this.deps.collect(),
@@ -246,14 +277,20 @@ export class LibraryBrowser {
     clear.className = 'br-chip';
     clear.textContent = 'Clear bank';
     clear.addEventListener('click', () => void this.bankClear());
+    // Route bank navigation through the shared performance command layer so the
+    // cursor matches keyboard/MIDI. The bar prev/next AUDITION as they move
+    // (performance-friendly). Falls back to local nav if perf is unset.
     const prev = document.createElement('button');
     prev.className = 'br-chip';
     prev.textContent = '◀ Prev';
-    prev.addEventListener('click', () => void this.bankNav('prev'));
+    prev.addEventListener('click', () => {
+      if (this.perf) { this.perf.selectPreviousBankItem(); void this.perf.auditionCurrentBankItem(); }
+      else void this.bankNav('prev');
+    });
     const next = document.createElement('button');
     next.className = 'br-chip';
     next.textContent = 'Next ▶';
-    next.addEventListener('click', () => void this.bankNav('next'));
+    next.addEventListener('click', () => (this.perf ? void this.perf.auditionNextBankItem() : void this.bankNav('next')));
     const label = document.createElement('span');
     label.className = 'br-navlabel';
     label.textContent = `Audition queue (${this.bankIds.length}):`;
@@ -447,27 +484,19 @@ export class LibraryBrowser {
     if (top < this.scroll.scrollTop || top + ROW > this.scroll.scrollTop + this.scroll.clientHeight) this.scroll.scrollTop = top;
   }
 
+  // List-local keys: only selection/load/favorite/add-to-bank (fired when the
+  // list is focused). Performance shortcuts (P/[/]/R/1/2/3/Shift-arrows) live in
+  // the DOCUMENT-level performance handler so they work while performing without
+  // focusing the list — kept disjoint here to avoid double-firing.
   private onKey(e: KeyboardEvent): void {
     const t = e.target as HTMLElement;
     if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return;
     if (e.key === 'ArrowDown') { e.preventDefault(); this.selectIndex(Math.min(this.selected + 1, this.results.length - 1)); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); this.selectIndex(Math.max(this.selected - 1, 0)); }
     else if (e.key === 'Enter') { if (this.selected >= 0) void this.doLoad(this.results[this.selected]); }
-    else if (e.key === 'f' || e.key === 'F') {
-      const it = this.results[this.selected];
-      if (it) void this.deps.setFavorite(it.id, !it.favorite).then(() => this.refresh());
-    } else if (e.key === 'p' || e.key === 'P') {
-      const it = this.results[this.selected];
-      if (it) void this.doAudition(it);
-    } else if (e.key === 'b' || e.key === 'B') {
+    else if (e.key === 'b' || e.key === 'B') {
       const it = this.results[this.selected];
       if (it) void this.bankAdd(it.id);
-    } else if (e.key === '[') {
-      e.preventDefault();
-      void this.bankNav('prev');
-    } else if (e.key === ']') {
-      e.preventDefault();
-      void this.bankNav('next');
     }
   }
 
