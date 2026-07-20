@@ -1,0 +1,3 @@
+{"name":"Starter Sine","path":"projectm-rs-starter/Starter Sine.milk","text":"[preset00]\nnWaveMode=0\nfWaveScale=1.0\nper_frame_1=zoom = 1.0 + 0.02*sin(time);\n"}
+{"name":"Starter Pulse","path":"projectm-rs-starter/Starter Pulse.milk","text":"[preset00]\nnWaveMode=2\nper_frame_1=rot = rot + 0.01;\n"}
+{"name":"Starter Grid","path":"projectm-rs-starter/Starter Grid.milk","text":"[preset00]\nnWaveMode=3\nper_pixel_1=zoom = 1.0;\n"}

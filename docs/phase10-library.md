@@ -127,7 +127,118 @@ minimal fallback. The library works fully with **zero** Milkdrop pack entries
 corpus is a Phase 10A.2 release-content decision** — unknown license ≠
 redistributable; nothing third-party is bundled in 10A.1.
 
-## Tests
+## Phase 10A.2 — Milkdrop pack loader, shard worker, local import
+
+Content-agnostic: the library works with **zero** configured packs; shaders,
+scenes, and user-imported `.milk` presets function regardless. No third-party
+corpus is loaded by default.
+
+### Pack manifest format (`web/src/library/pack.ts`)
+
+```
+PackManifest { packId, name, version, license, licenseUrl?, source?,
+               attribution?, takedownContact?, requiresTextures?, items[] }
+PackItem     { path, name, shard, author?, license?, attribution?, category? }
+```
+The manifest is the **index** — listing thousands of presets needs no shard
+download. `validatePackManifest()` isolates a bad manifest. Per-item fields
+**override** pack-level defaults (a pack is not always one uniform license).
+
+### License classification
+
+`classifyLicense(license, origin)` →
+`project-owned | explicitly-licensed | assumed-public-domain | user-imported | unknown-license`.
+**`assumed-public-domain` is kept DISTINCT from an explicit CC0 dedication** so
+the UI can never imply a stronger license than a manifest actually provides.
+
+### Lazy shard architecture (`shard-decode.ts` / `shard-worker.ts` / `shard-client.ts`)
+
+```
+LibraryItem selected → resolve shard URL (relative to manifest)
+  → ShardClient.getPresetText → Worker: fetch shard → decompress → parse NDJSON
+  → return one preset's .milk text → (audition/Preset::load)
+```
+- **Worker**: gzip/NDJSON decompression runs off the render thread (native
+  `DecompressionStream` — pure JS, **not wasm**, so no `block_on` concern).
+- **Robust decode**: detects the gzip magic (`1f 8b`) and handles both raw-gzip
+  and already-decoded (`Content-Encoding: gzip`) responses.
+- **Fallback**: if the worker can't start/crashes, decompression falls back to
+  the main thread (graceful degradation).
+- **Bounded cache**: a small LRU of decompressed shards lives in the worker/client
+  only — **never** persisted to IndexedDB (no duplicating pack text into the db).
+
+### Milkdrop indexing + navigation (`milkdrop.ts`)
+
+`MilkdropLibrary` holds an **in-memory index** built from the manifest (no bulk
+IndexedDB writes for a 10k pack). Only items the user **touches** (favorite / use
+/ import) are upserted into the store, so favorites/recent persist while the db
+stays small. `randomId/nextId/prevId` operate over the index and are
+deterministic for **0** (→ null) and **1** items. Loading a preset records usage
+(metadata-only).
+
+### Local `.milk` import (`import-milk.ts`)
+
+User-gesture file selection → `readMilkFiles` → `importTexts` → `origin:'imported'`
++ `{kind:'inline', text}` in IndexedDB. **Stays local — nothing is uploaded.**
+Author is parsed from the `Author - Title.milk` convention *only when it clearly
+matches* (never fabricated). `detectTextureRefs` best-effort flags likely
+external-texture needs (reported, not downloaded).
+
+### Texture behavior
+
+The unlicensed Milkdrop texture pack is **not** bundled. Presets referencing
+external textures are preserved and flagged (`requires-textures` tag / detected
+refs); missing textures never crash rendering (the engine already renders without
+external samplers). No third-party texture assets are downloaded.
+
+### Pack licensing / provenance policy
+
+> **No third-party Milkdrop preset corpus is bundled or mirrored by default
+> without explicit redistribution rights.** Hosting an "optional" pack from
+> project infrastructure is still redistribution and is therefore not done until
+> explicit permission/licensing is recorded.
+
+- **Cream of the Crop / Classic / Milkdrop-original / Community / Base texture
+  pack:** `USER IMPORT ONLY` (or EXCLUDE for the texture pack). No explicit
+  license — `assumed-public-domain` or none.
+- **En D:** first candidate for explicit-permission outreach (small,
+  single-author). USER IMPORT ONLY pending a written license. *(No one is
+  contacted without authorization.)*
+- **Cream of the Crop:** large multi-author aggregation — curator permission may
+  not resolve every author's rights; USER IMPORT ONLY pending stronger provenance.
+
+### External-pack permission workflow (future)
+
+```
+pack candidate → verify explicit license/permission → author a license manifest
+  → review → approve distribution → host/version off-repo
+```
+A public repository alone never enables project distribution.
+
+### Original starter-pack plan
+
+The only content shippable by default is an **original, project-owned starter
+pack** (created under an explicit license, e.g. CC0/LGPL). That content effort is
+separate from this library engine and is **not** created here. The engine already
+supports it — a starter pack is just another manifest + shard.
+
+### Zero-pack operation
+
+With 0 configured packs the Milkdrop index is empty, navigation returns null, and
+the app keeps full shader/scene/user-import functionality. No empty-pack state
+blocks or crashes the library.
+
+### Tests
+
+- `web/verify-pack.mjs` (Playwright, real Worker + `DecompressionStream`, against
+  project-owned CC0 fixtures in `web/public/__testpack__/`): valid/invalid
+  manifest, per-item license override, lazy shard fetch+decompress+parse+lookup
+  (worker), main-thread fallback, missing-preset/missing-shard/missing-manifest
+  graceful degradation, navigation (incl. zero/one), favorites+recent, local
+  single/multiple `.milk` import + reload persistence, zero-pack operation, and a
+  **privacy check that imported content generates 0 upload requests**.
+
+## Tests (10A.1)
 
 - `web/verify-library.mjs` (Playwright, real IndexedDB): CRUD, type round-trip
   (milkdrop ref / shader / scene), favorites-persist-across-reopen, recent
