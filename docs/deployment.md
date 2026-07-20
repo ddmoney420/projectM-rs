@@ -118,6 +118,11 @@ accepted as CLI args, echoed, or written to the repo; if either is missing the
 script stops before deploying. The reusable operational notes live in the
 project memory `cloudflare-pages-prod-deploy.md`.
 
+**Release identity:** the deploy build embeds the exact `APP_RELEASE_TAG` +
+`APP_GIT_COMMIT` (the resolved tag + dereferenced commit, never current `main`),
+so the artifact's About panel shows the release it actually is. See the
+[versioning policy](versioning.md).
+
 ### Release identity metadata (proposal — not implemented)
 
 Diagnostics currently can't show which git commit/tag produced a build (the

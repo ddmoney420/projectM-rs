@@ -111,9 +111,21 @@ WT_HEAD="$(git -C "$WORKTREE" rev-parse HEAD)"
 echo "worktree HEAD   : $WT_HEAD"
 [ "$WT_HEAD" = "$COMMIT" ] || fail "worktree HEAD ($WT_HEAD) != release commit ($COMMIT)"
 
-# --- 4a. clean production build ---
-log "clean build (npm ci + npm run build)"
-( cd "$WORKTREE/web" && npm ci && npm run build ) || fail "production build failed"
+# --- 4a. clean production build (embed the EXACT release identity) ---
+# The build receives the requested release tag + its dereferenced commit — NOT
+# current main — so the artifact's About panel shows the release it actually is.
+# For a bare commit ref (no tag), APP_RELEASE_TAG stays empty → the app honestly
+# shows "<base>-dev". Legacy tags (v0.0.3-web-beta.N) are passed verbatim and the
+# app parses them on their legacy path.
+export APP_GIT_COMMIT="$COMMIT"
+if [ "$REF_OBJ" != "$COMMIT" ] || printf '%s' "$RELEASE" | grep -qE '^v[0-9]'; then
+  export APP_RELEASE_TAG="$RELEASE"
+else
+  export APP_RELEASE_TAG=""
+fi
+log "clean build (npm ci + npm run build) — release '${APP_RELEASE_TAG:-<none/dev>}' @ $COMMIT"
+( cd "$WORKTREE/web" && APP_RELEASE_TAG="$APP_RELEASE_TAG" APP_GIT_COMMIT="$APP_GIT_COMMIT" npm ci && \
+    APP_RELEASE_TAG="$APP_RELEASE_TAG" APP_GIT_COMMIT="$APP_GIT_COMMIT" npm run build ) || fail "production build failed"
 DIST="$WORKTREE/web/dist"
 [ -f "$DIST/index.html" ] || fail "no dist/index.html produced"
 

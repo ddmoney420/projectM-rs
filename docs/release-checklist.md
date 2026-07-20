@@ -27,7 +27,10 @@ This runs, in order (failing fast):
 ## Manual gate
 
 - [ ] Tracked working tree clean (`git status`).
-- [ ] `web/src/version.ts` `APP_VERSION` bumped.
+- [ ] Release identity is **injected at build time** — do NOT hand-edit a beta
+      number. Bump `PRODUCT_BASE_VERSION` in `web/src/version.ts` only when the
+      product **minor line** changes; tag + commit come from the deploy tooling.
+      See [versioning policy](versioning.md).
 - [ ] Rust: `cargo build --workspace` + `cargo test --workspace` pass.
 - [ ] wasm32 builds pass (`cargo build --target wasm32-unknown-unknown -p pm-web-vj` and `-p pm-web-player`).
 - [ ] TypeScript: `npx tsc --noEmit` clean.
