@@ -54,6 +54,14 @@ export class AudioEngine {
       return;
     }
     const ctx = new AudioContext();
+    // iOS Safari suspends the AudioContext on tab hide, orientation change, and
+    // audio-session interruptions, which silently freezes audio reactivity while
+    // rendering continues. Auto-resume whenever it flips to suspended (a no-op
+    // without a recent gesture; harmless otherwise). Gesture-driven resumes are
+    // wired in main.ts.
+    ctx.addEventListener('statechange', () => {
+      if (ctx.state === 'suspended') void ctx.resume().catch(() => {});
+    });
     await ctx.audioWorklet.addModule(new URL('./audio-worklet.js', import.meta.url).href);
 
     this.shared = self.crossOriginIsolated === true;

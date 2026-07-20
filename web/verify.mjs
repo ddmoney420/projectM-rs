@@ -799,6 +799,26 @@ const run = async () => {
   });
   await iosPage.close();
 
+  // --- Beta.4: single-instance Milkdrop feedback + GPU-error diagnostics ---
+  await openLayers();
+  await page.click('#lp-reset'); // default scene contains exactly one Milkdrop
+  await sleep(250);
+  await page.click('.lp-add button[data-k="0"]'); // a second Milkdrop → rejected
+  await sleep(200);
+  results.betaMilkdropRejectedNote =
+    (await page.locator('#lp-note.show').count()) === 1 &&
+    /Milkdrop/i.test((await page.locator('#lp-note').innerText().catch(() => '')) || '');
+  // Adding a supported layer still works and clears the note path.
+  const rowsBeforeWave = await page.locator('#lp-list .lp-row').count();
+  await page.click('.lp-add button[data-k="2"]'); // waveform → accepted
+  await sleep(200);
+  results.betaWaveformStillAdds = (await page.locator('#lp-list .lp-row').count()) > rowsBeforeWave;
+  // The GPU-error diagnostic is exposed and clean during a healthy run.
+  results.betaDiagExposesLastError =
+    (await page.evaluate(() => typeof window.__pmDiag().lastError)) === 'string';
+  results.betaNoGpuErrorsDuringRun =
+    (await page.evaluate(() => window.__pmDiag().lastError || '')) === '';
+
   results.consolePanics = logs.filter((l) => /panicked|RuntimeError|unreachable/.test(l)).length;
   results.consoleErrors = logs.filter((l) => l.startsWith('[error]') || l.startsWith('[pageerror]')).length;
 

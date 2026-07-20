@@ -219,9 +219,19 @@ function wireAudioUI(): void {
 
   $('diag-toggle').addEventListener('click', () => $('diag').classList.toggle('collapsed'));
 
+  // iOS Safari suspends the AudioContext on tab hide, orientation change, focus
+  // loss, and audio-session interruptions — the visualization keeps rendering
+  // but stops reacting to sound. Resume on every plausible re-entry / gesture
+  // (engine.resume() is a no-op when already running).
+  const resumeAudio = () => void engine.resume();
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) void engine.resume();
+    if (!document.hidden) resumeAudio();
   });
+  window.addEventListener('orientationchange', resumeAudio);
+  window.addEventListener('focus', resumeAudio);
+  (['pointerdown', 'touchend', 'keydown'] as const).forEach((ev) =>
+    document.addEventListener(ev, resumeAudio, { passive: true }),
+  );
 }
 
 function errMsg(e: unknown): string {
@@ -484,6 +494,7 @@ function updateDiagnostics(): void {
     ['BPM', `${((d.bpm as number) ?? 0).toFixed(0)} ${d.tempoManual ? '(man)' : '(auto)'}`],
     ['beat', `${bar(d.beatPulse as number)} phase ${((d.beatPhase as number) ?? 0).toFixed(2)}`],
     ['crossOriginIsolated', String(self.crossOriginIsolated === true)],
+    ['GPU error', (d.lastError as unknown as string) || 'none'],
     ['transport', s.shared ? 'SharedArrayBuffer' : 'postMessage (fallback)'],
     ['AudioContext', s.contextState],
     ['sampleRate', `${d.sampleRate || s.sampleRate || 0} Hz`],
