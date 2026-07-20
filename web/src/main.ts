@@ -18,6 +18,11 @@ import init, {
   export_scene,
   import_scene,
   load_preset,
+  deck_count,
+  deck_b_create,
+  deck_b_unload,
+  deck_b_load_preset,
+  deck_diagnostics_json,
   midi_handle,
   midi_import,
   midi_export,
@@ -800,6 +805,14 @@ async function boot(): Promise<void> {
       currentView: () => libraryBrowser?.currentView(),
       loadItem: (item: import('./library').LibraryItem) => browserDeps.load(item),
       collect: () => browserDeps.collect(),
+    };
+    // Performance-deck driving for the harness (Phase 10C.1).
+    (window as unknown as Record<string, unknown>).__pmDeck = {
+      count: () => deck_count(),
+      createB: () => deck_b_create(),
+      unloadB: () => deck_b_unload(),
+      loadPresetB: (text: string) => JSON.parse(deck_b_load_preset(text)),
+      diag: () => JSON.parse(deck_diagnostics_json()),
     };
   }
 

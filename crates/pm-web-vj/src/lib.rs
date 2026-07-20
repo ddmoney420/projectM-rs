@@ -30,13 +30,13 @@ mod shader_project;
 
 use compositor::{Compositor, LayerKind};
 use midi::MidiRouter;
-use pm_audio::PCM;
+use pm_audio::{FrameAudioData, PCM};
 use pm_core::{PresetPlayer, WarpEngine, BUILTIN_PRESET, DEFAULT_TRANSITION_SECS};
 use pm_glsl::{ShaderMode, ShaderUniforms, AUDIO_TEX_HEIGHT, AUDIO_TEX_WIDTH};
 use pm_midi::{pickup_engage, smooth_step, MappingMode, MidiEvent};
 use pm_params::{AudioFeatures, Curve, Lfo, LfoWave, ModContext, ModSource, Parameter, Tempo, VisualClock};
 use pm_preset::Preset;
-use pm_render::GpuContext;
+use pm_render::{Blit, GpuContext, Texture};
 use pm_scene::OverlayConfig;
 
 // ---------------------------------------------------------------------------
@@ -341,8 +341,9 @@ pub async fn run(canvas_id: String) -> Result<(), JsValue> {
     log::info!("pm-web: engine initialized ({width}x{height}); starting render loop");
 
     let state = Rc::new(RefCell::new(State {
-        player: build_player(&ctx, width, height),
-        compositor: Compositor::new(&ctx, format, width, height),
+        deck_a: Deck::new(&ctx, 0, format, width, height),
+        deck_b: None,
+        master_blit: Blit::new(&ctx, format),
         ctx,
         surface,
         config,
@@ -385,14 +386,85 @@ fn build_player(ctx: &GpuContext, width: u32, height: u32) -> PresetPlayer {
     PresetPlayer::new(ctx, engine, width, height, DEFAULT_TRANSITION_SECS)
 }
 
+/// A performance deck (Phase 10C.1): one visual source — a Milkdrop preset
+/// player plus a layer compositor — rendered to its OWN output texture. Each
+/// deck owns its temporal state (Milkdrop feedback, shader/scene feedback
+/// buffers); only the wgpu Device/Queue and audio analysis are shared (held by
+/// `State`). The master output is currently Deck A's texture blitted to the
+/// surface; Deck B renders independently but is not yet blended (the crossfader
+/// lands in 10C.2). Every deck exposes a `format`/size-compatible output so a
+/// future `MasterCrossfade.draw(deck_a.output, deck_b.output, t)` needs no
+/// redesign. A deck can eventually own an independent `PresetPlayer` for
+/// simultaneous Milkdrop↔Milkdrop (validated/productionized in 10D).
+struct Deck {
+    id: u8,
+    player: PresetPlayer,
+    compositor: Compositor,
+    /// Deck output, in the surface format so master can blit/crossfade it.
+    output: Texture,
+    format: wgpu::TextureFormat,
+    /// Short label of what was last loaded (diagnostics only).
+    loaded: Option<String>,
+}
+
+impl Deck {
+    fn new(ctx: &GpuContext, id: u8, format: wgpu::TextureFormat, width: u32, height: u32) -> Self {
+        Deck {
+            id,
+            player: build_player(ctx, width, height),
+            compositor: Compositor::new(ctx, format, width, height),
+            output: Texture::new_render_target(&ctx.device, format!("deck-{id}-output"), width, height, format),
+            format,
+            loaded: None,
+        }
+    }
+
+    /// Render this deck's source to its own output texture (never the surface).
+    fn render(&mut self, ctx: &GpuContext, time: f32, audio: &FrameAudioData, uniforms: &ShaderUniforms, modctx: &ModContext) {
+        if self.compositor.has_milkdrop() {
+            self.player.render(ctx, time, audio.clone());
+        }
+        let player_out = self.player.output_texture();
+        self.compositor.render(ctx, &self.output.view, player_out, audio, uniforms, modctx, time);
+    }
+
+    /// Resize the deck's engine + output. Rebuilds the Milkdrop engine at the new
+    /// size (matching prior behavior); the layer compositor keeps its shaders.
+    fn resize(&mut self, ctx: &GpuContext, width: u32, height: u32) {
+        self.player = build_player(ctx, width, height);
+        self.compositor.resize(ctx, width, height);
+        self.output = Texture::new_render_target(&ctx.device, format!("deck-{}-output", self.id), width, height, self.format);
+    }
+
+    fn output(&self) -> &Texture {
+        &self.output
+    }
+
+    fn source_type(&self) -> &'static str {
+        if self.compositor.has_milkdrop() {
+            if self.compositor.shader_count() > 0 { "milkdrop+shader" } else { "milkdrop" }
+        } else if self.compositor.shader_count() > 0 {
+            "shader"
+        } else {
+            "overlay"
+        }
+    }
+}
+
 /// Everything the render loop needs to draw, analyze audio, and recover.
 struct State {
     ctx: GpuContext,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
-    /// The single shared Milkdrop engine (one Milkdrop layer, by constraint).
-    player: PresetPlayer,
-    compositor: Compositor,
+    /// The primary (visible) deck. Master output = `deck_a.output` blitted to the
+    /// surface. All wasm exports (layers/shaders/scene/preset/MIDI) act on Deck A.
+    deck_a: Deck,
+    /// A second, independently-owned deck (Phase 10C.1). May be unloaded; renders
+    /// to its own texture and never affects Deck A. Not yet blended into master.
+    deck_b: Option<Deck>,
+    /// Copies the visible deck's output to the surface (crossfade replaces this
+    /// in 10C.2).
+    master_blit: Blit,
     canvas: HtmlCanvasElement,
     pcm: PCM,
     audio_scratch: Vec<f32>,
@@ -419,8 +491,10 @@ impl State {
             self.config.width = w;
             self.config.height = h;
             self.surface.configure(&self.ctx.device, &self.config);
-            self.player = build_player(&self.ctx, w, h);
-            self.compositor.resize(&self.ctx, w, h);
+            self.deck_a.resize(&self.ctx, w, h);
+            if let Some(b) = &mut self.deck_b {
+                b.resize(&self.ctx, w, h);
+            }
         }
 
         // Drain the audio ring (if attached) into the projectM PCM analyzer.
@@ -499,13 +573,13 @@ impl State {
             d.frame = self.frame;
             d.width = self.config.width;
             d.height = self.config.height;
-            d.layer_count = self.compositor.layer_count() as u32;
-            d.enabled_count = self.compositor.enabled_count() as u32;
-            d.shader_count = self.compositor.shader_count() as u32;
-            let (buffer_passes, shader_passes) = self.compositor.shader_pass_stats();
+            d.layer_count = self.deck_a.compositor.layer_count() as u32;
+            d.enabled_count = self.deck_a.compositor.enabled_count() as u32;
+            d.shader_count = self.deck_a.compositor.shader_count() as u32;
+            let (buffer_passes, shader_passes) = self.deck_a.compositor.shader_pass_stats();
             d.buffer_passes = buffer_passes;
             d.shader_passes = shader_passes;
-            d.effect_passes = self.compositor.effect_pass_count();
+            d.effect_passes = self.deck_a.compositor.effect_pass_count();
             d.bpm = self.tempo.bpm();
             d.beat_phase = self.tempo.beat_phase();
             d.beat_pulse = self.tempo.beat_pulse();
@@ -542,9 +616,11 @@ impl State {
             pm_pad2: 0.0,
         };
 
-        // Render the shared Milkdrop engine once if a Milkdrop layer exists.
-        if self.compositor.has_milkdrop() {
-            self.player.render(&self.ctx, time, audio.clone());
+        // Render each deck to its OWN output texture. Deck B (if present) renders
+        // independently — proving isolated temporal state — but is not blended.
+        self.deck_a.render(&self.ctx, time, &audio, &uniforms, &modctx);
+        if let Some(b) = &mut self.deck_b {
+            b.render(&self.ctx, time, &audio, &uniforms, &modctx);
         }
 
         let frame = match self.surface.get_current_texture() {
@@ -556,9 +632,10 @@ impl State {
             _ => return,
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let player_out = self.player.output_texture();
-        self.compositor
-            .render(&self.ctx, &view, player_out, &audio, &uniforms, &modctx, time);
+        // Master output = Deck A's texture (the crossfader replaces this blit in
+        // 10C.2, sampling both deck outputs). Recording/projection mirror the
+        // surface, so they follow master unchanged.
+        self.master_blit.draw(&self.ctx, self.deck_a.output(), &view);
         frame.present();
     }
 }
@@ -703,15 +780,15 @@ impl State {
                 true
             }
             ["layer", id, "opacity"] => match pid(id) {
-                Some(id) if self.compositor.has_layer(id) => {
-                    self.compositor.set_opacity(id, v);
+                Some(id) if self.deck_a.compositor.has_layer(id) => {
+                    self.deck_a.compositor.set_opacity(id, v);
                     true
                 }
                 _ => false,
             },
-            ["layer", id, "transform", f] => pid(id).map(|id| self.compositor.set_transform_field(id, f, v)).unwrap_or(false),
+            ["layer", id, "transform", f] => pid(id).map(|id| self.deck_a.compositor.set_transform_field(id, f, v)).unwrap_or(false),
             ["layer", id, "control", slot] => match (pid(id), slot.parse::<usize>()) {
-                (Some(id), Ok(slot)) => self.compositor.set_control_scalar(id, slot, v),
+                (Some(id), Ok(slot)) => self.deck_a.compositor.set_control_scalar(id, slot, v),
                 _ => false,
             },
             ["layer", id, "effect", eid, "param", idx] => self.set_effect_param_path(pid(id), eid, idx, v),
@@ -722,8 +799,8 @@ impl State {
 
     fn set_effect_param_path(&mut self, target: Option<u64>, eid: &str, idx: &str, v: f32) -> bool {
         match (target, pid(eid), idx.parse::<usize>()) {
-            (Some(t), Some(eid), Ok(idx)) if self.compositor.has_effect(t, eid) => {
-                self.compositor.set_effect_param(t, eid, idx, v);
+            (Some(t), Some(eid), Ok(idx)) if self.deck_a.compositor.has_effect(t, eid) => {
+                self.deck_a.compositor.set_effect_param(t, eid, idx, v);
                 true
             }
             _ => false,
@@ -735,11 +812,11 @@ impl State {
         match p.as_slice() {
             ["global", "speed"] => Some(self.clock.scale()),
             ["global", "tempo", "bpm"] => Some(self.tempo.bpm()),
-            ["layer", id, "opacity"] => self.compositor.opacity(pid(id)?),
-            ["layer", id, "transform", f] => self.compositor.transform_field(pid(id)?, f),
-            ["layer", id, "control", slot] => self.compositor.control_scalar(pid(id)?, slot.parse().ok()?),
-            ["layer", id, "effect", eid, "param", idx] => self.compositor.effect_param(pid(id)?, pid(eid)?, idx.parse().ok()?),
-            ["global", "effect", eid, "param", idx] => self.compositor.effect_param(0, pid(eid)?, idx.parse().ok()?),
+            ["layer", id, "opacity"] => self.deck_a.compositor.opacity(pid(id)?),
+            ["layer", id, "transform", f] => self.deck_a.compositor.transform_field(pid(id)?, f),
+            ["layer", id, "control", slot] => self.deck_a.compositor.control_scalar(pid(id)?, slot.parse().ok()?),
+            ["layer", id, "effect", eid, "param", idx] => self.deck_a.compositor.effect_param(pid(id)?, pid(eid)?, idx.parse().ok()?),
+            ["global", "effect", eid, "param", idx] => self.deck_a.compositor.effect_param(0, pid(eid)?, idx.parse().ok()?),
             _ => None,
         }
     }
@@ -748,11 +825,11 @@ impl State {
         let p: Vec<&str> = path.split('.').collect();
         match p.as_slice() {
             ["global", "pause"] => Some(self.clock.paused()),
-            ["layer", id, "enabled"] => self.compositor.layer_enabled(pid(id)?),
-            ["layer", id, "visible"] => self.compositor.layer_visible(pid(id)?),
-            ["layer", id, "control", slot] => self.compositor.control_scalar(pid(id)?, slot.parse().ok()?).map(|v| v > 0.5),
-            ["layer", id, "effect", eid, "enabled"] => self.compositor.effect_enabled(pid(id)?, pid(eid)?),
-            ["global", "effect", eid, "enabled"] => self.compositor.effect_enabled(0, pid(eid)?),
+            ["layer", id, "enabled"] => self.deck_a.compositor.layer_enabled(pid(id)?),
+            ["layer", id, "visible"] => self.deck_a.compositor.layer_visible(pid(id)?),
+            ["layer", id, "control", slot] => self.deck_a.compositor.control_scalar(pid(id)?, slot.parse().ok()?).map(|v| v > 0.5),
+            ["layer", id, "effect", eid, "enabled"] => self.deck_a.compositor.effect_enabled(pid(id)?, pid(eid)?),
+            ["global", "effect", eid, "enabled"] => self.deck_a.compositor.effect_enabled(0, pid(eid)?),
             _ => None,
         }
     }
@@ -765,21 +842,21 @@ impl State {
                 true
             }
             ["layer", id, "enabled"] => match pid(id) {
-                Some(id) if self.compositor.has_layer(id) => {
-                    self.compositor.set_enabled(id, on);
+                Some(id) if self.deck_a.compositor.has_layer(id) => {
+                    self.deck_a.compositor.set_enabled(id, on);
                     true
                 }
                 _ => false,
             },
             ["layer", id, "visible"] => match pid(id) {
-                Some(id) if self.compositor.has_layer(id) => {
-                    self.compositor.set_visible(id, on);
+                Some(id) if self.deck_a.compositor.has_layer(id) => {
+                    self.deck_a.compositor.set_visible(id, on);
                     true
                 }
                 _ => false,
             },
             ["layer", id, "control", slot] => match (pid(id), slot.parse::<usize>()) {
-                (Some(id), Ok(slot)) => self.compositor.set_control_scalar(id, slot, if on { 1.0 } else { 0.0 }),
+                (Some(id), Ok(slot)) => self.deck_a.compositor.set_control_scalar(id, slot, if on { 1.0 } else { 0.0 }),
                 _ => false,
             },
             ["layer", id, "effect", eid, "enabled"] => self.set_effect_enabled_path(pid(id), eid, on),
@@ -790,8 +867,8 @@ impl State {
 
     fn set_effect_enabled_path(&mut self, target: Option<u64>, eid: &str, on: bool) -> bool {
         match (target, pid(eid)) {
-            (Some(t), Some(eid)) if self.compositor.has_effect(t, eid) => {
-                self.compositor.set_effect_enabled(t, eid, on);
+            (Some(t), Some(eid)) if self.deck_a.compositor.has_effect(t, eid) => {
+                self.deck_a.compositor.set_effect_enabled(t, eid, on);
                 true
             }
             _ => false,
@@ -822,19 +899,19 @@ impl State {
                 true
             }
             ["global", "feedback", "reset"] => {
-                self.compositor.reset_feedback(0);
+                self.deck_a.compositor.reset_feedback(0);
                 true
             }
             ["layer", id, "feedback", "reset"] => match pid(id) {
                 Some(id) => {
-                    self.compositor.reset_feedback(id);
+                    self.deck_a.compositor.reset_feedback(id);
                     true
                 }
                 None => false,
             },
             // A shader trigger control: pulse its slot to max.
             ["layer", id, "control", slot] => match (pid(id), slot.parse::<usize>()) {
-                (Some(id), Ok(slot)) => self.compositor.set_control_scalar(id, slot, 1.0),
+                (Some(id), Ok(slot)) => self.deck_a.compositor.set_control_scalar(id, slot, 1.0),
                 _ => false,
             },
             _ => false,
@@ -854,9 +931,9 @@ impl State {
             ["global", "time", "reset"] => ("trigger", 0.0, 1.0),
             ["global", "feedback", "reset"] => ("trigger", 0.0, 1.0),
             ["app", ..] => ("trigger", 0.0, 1.0),
-            ["layer", id, "opacity"] if self.compositor.has_layer(pid(id)?) => ("continuous", 0.0, 1.0),
-            ["layer", id, "enabled"] | ["layer", id, "visible"] if self.compositor.has_layer(pid(id)?) => ("toggle", 0.0, 1.0),
-            ["layer", id, "transform", f] if self.compositor.has_layer(pid(id)?) => {
+            ["layer", id, "opacity"] if self.deck_a.compositor.has_layer(pid(id)?) => ("continuous", 0.0, 1.0),
+            ["layer", id, "enabled"] | ["layer", id, "visible"] if self.deck_a.compositor.has_layer(pid(id)?) => ("toggle", 0.0, 1.0),
+            ["layer", id, "transform", f] if self.deck_a.compositor.has_layer(pid(id)?) => {
                 let (min, max) = match *f {
                     "px" | "py" => (-1.0, 1.0),
                     "sx" | "sy" => (0.1, 4.0),
@@ -867,22 +944,22 @@ impl State {
             }
             ["layer", id, "control", slot] => {
                 let (id, slot) = (pid(id)?, slot.parse::<usize>().ok()?);
-                let kind = match self.compositor.control_kind(id, slot)? {
+                let kind = match self.deck_a.compositor.control_kind(id, slot)? {
                     "bool" => "toggle",
                     "trigger" => "trigger",
                     _ => "continuous",
                 };
-                let [min, max] = self.compositor.control_range(id, slot).unwrap_or([0.0, 1.0]);
+                let [min, max] = self.deck_a.compositor.control_range(id, slot).unwrap_or([0.0, 1.0]);
                 (kind, min, max)
             }
-            ["layer", id, "effect", eid, "enabled"] if self.compositor.has_effect(pid(id)?, pid(eid)?) => ("toggle", 0.0, 1.0),
-            ["global", "effect", eid, "enabled"] if self.compositor.has_effect(0, pid(eid)?) => ("toggle", 0.0, 1.0),
+            ["layer", id, "effect", eid, "enabled"] if self.deck_a.compositor.has_effect(pid(id)?, pid(eid)?) => ("toggle", 0.0, 1.0),
+            ["global", "effect", eid, "enabled"] if self.deck_a.compositor.has_effect(0, pid(eid)?) => ("toggle", 0.0, 1.0),
             ["layer", id, "effect", eid, "param", idx] => {
-                let [min, max] = self.compositor.effect_param_range(pid(id)?, pid(eid)?, idx.parse().ok()?)?;
+                let [min, max] = self.deck_a.compositor.effect_param_range(pid(id)?, pid(eid)?, idx.parse().ok()?)?;
                 ("continuous", min, max)
             }
             ["global", "effect", eid, "param", idx] => {
-                let [min, max] = self.compositor.effect_param_range(0, pid(eid)?, idx.parse().ok()?)?;
+                let [min, max] = self.deck_a.compositor.effect_param_range(0, pid(eid)?, idx.parse().ok()?)?;
                 ("continuous", min, max)
             }
             _ => return None,
@@ -901,7 +978,7 @@ impl State {
         out.push(mk_target("global.tempo.tap", "Tap tempo", "Tempo", "trigger", 0.0, 1.0));
         out.push(mk_target("global.tempo.beatPhaseReset", "Beat phase reset", "Tempo", "trigger", 0.0, 1.0));
         out.push(mk_target("app.record.toggle", "Recording start/stop", "Transport", "trigger", 0.0, 1.0));
-        self.compositor.append_midi_targets(&mut out);
+        self.deck_a.compositor.append_midi_targets(&mut out);
         format!("[{}]", out.join(","))
     }
 }
@@ -960,8 +1037,8 @@ pub fn set_pass_source(pass_index: u32, mode: u8, src: String) -> String {
     let m = if mode == 1 { ShaderMode::Raw } else { ShaderMode::Shadertoy };
     let t0 = js_sys::Date::now();
     let outcome = with_state(|s| {
-        let id = s.compositor.selected()?;
-        s.compositor.set_pass(&s.ctx, id, pass_index as usize, m, &src)
+        let id = s.deck_a.compositor.selected()?;
+        s.deck_a.compositor.set_pass(&s.ctx, id, pass_index as usize, m, &src)
     })
     .flatten();
     let ms = js_sys::Date::now() - t0;
@@ -989,8 +1066,8 @@ pub fn set_pass_source(pass_index: u32, mode: u8, src: String) -> String {
 #[wasm_bindgen]
 pub fn add_buffer_pass(index: u32) -> bool {
     with_state(|s| {
-        let id = s.compositor.selected()?;
-        Some(s.compositor.add_buffer_pass(&s.ctx, id, index as usize))
+        let id = s.deck_a.compositor.selected()?;
+        Some(s.deck_a.compositor.add_buffer_pass(&s.ctx, id, index as usize))
     })
     .flatten()
     .unwrap_or(false)
@@ -999,8 +1076,8 @@ pub fn add_buffer_pass(index: u32) -> bool {
 #[wasm_bindgen]
 pub fn remove_buffer_pass(index: u32) {
     with_state(|s| {
-        if let Some(id) = s.compositor.selected() {
-            s.compositor.remove_buffer_pass(&s.ctx, id, index as usize);
+        if let Some(id) = s.deck_a.compositor.selected() {
+            s.deck_a.compositor.remove_buffer_pass(&s.ctx, id, index as usize);
         }
     });
 }
@@ -1008,8 +1085,8 @@ pub fn remove_buffer_pass(index: u32) {
 #[wasm_bindgen]
 pub fn set_pass_channel(pass_index: u32, channel: u32, source: String) -> bool {
     with_state(|s| {
-        let id = s.compositor.selected()?;
-        Some(s.compositor.set_pass_channel(id, pass_index as usize, channel as usize, &source))
+        let id = s.deck_a.compositor.selected()?;
+        Some(s.deck_a.compositor.set_pass_channel(id, pass_index as usize, channel as usize, &source))
     })
     .flatten()
     .unwrap_or(false)
@@ -1017,8 +1094,8 @@ pub fn set_pass_channel(pass_index: u32, channel: u32, source: String) -> bool {
 #[wasm_bindgen]
 pub fn set_pass_enabled(pass_index: u32, enabled: bool) {
     with_state(|s| {
-        if let Some(id) = s.compositor.selected() {
-            s.compositor.set_pass_enabled(id, pass_index as usize, enabled);
+        if let Some(id) = s.deck_a.compositor.selected() {
+            s.deck_a.compositor.set_pass_enabled(id, pass_index as usize, enabled);
         }
     });
 }
@@ -1026,8 +1103,8 @@ pub fn set_pass_enabled(pass_index: u32, enabled: bool) {
 #[wasm_bindgen]
 pub fn reset_shader_buffers() {
     with_state(|s| {
-        if let Some(id) = s.compositor.selected() {
-            s.compositor.reset_shader_buffers(&s.ctx, id);
+        if let Some(id) = s.deck_a.compositor.selected() {
+            s.deck_a.compositor.reset_shader_buffers(&s.ctx, id);
         }
     });
 }
@@ -1040,7 +1117,7 @@ pub fn load_preset(text: String) -> String {
     with_state(|s| match Preset::load(&text) {
         Ok(preset) => {
             let engine = WarpEngine::new(&s.ctx, preset, s.config.width.max(1), s.config.height.max(1));
-            s.player.switch_to(engine);
+            s.deck_a.player.switch_to(engine);
             "{\"ok\":true}".to_string()
         }
         Err(e) => format!("{{\"ok\":false,\"error\":{}}}", json_string(&format!("{e}"))),
@@ -1048,12 +1125,96 @@ pub fn load_preset(text: String) -> String {
     .unwrap_or_else(|| "{\"ok\":false,\"error\":\"engine not ready\"}".to_string())
 }
 
+// --- Phase 10C.1: performance decks --------------------------------------
+
+/// Number of live decks (Deck A always; Deck B when created).
+#[wasm_bindgen]
+pub fn deck_count() -> u32 {
+    with_state(|s| 1 + s.deck_b.is_some() as u32).unwrap_or(0)
+}
+
+/// Create the second (logical) deck if absent. Returns true if a deck exists
+/// afterward. Deck B renders independently and never affects Deck A. A creation
+/// failure (e.g. GPU allocation on a constrained device) leaves Deck A intact.
+#[wasm_bindgen]
+pub fn deck_b_create() -> bool {
+    with_state(|s| {
+        if s.deck_b.is_none() {
+            s.deck_b = Some(Deck::new(&s.ctx, 1, s.config.format, s.config.width, s.config.height));
+        }
+        s.deck_b.is_some()
+    })
+    .unwrap_or(false)
+}
+
+/// Destroy Deck B (frees its engine + textures). Deck A is untouched.
+#[wasm_bindgen]
+pub fn deck_b_unload() {
+    with_state(|s| {
+        s.deck_b = None;
+    });
+}
+
+/// Load a Milkdrop preset into Deck B (creating it if needed). Transactional —
+/// a parse failure keeps Deck B's current preset and never touches Deck A.
+#[wasm_bindgen]
+pub fn deck_b_load_preset(text: String) -> String {
+    with_state(|s| {
+        let (fmt, w, h) = (s.config.format, s.config.width, s.config.height);
+        if s.deck_b.is_none() {
+            s.deck_b = Some(Deck::new(&s.ctx, 1, fmt, w, h));
+        }
+        match Preset::load(&text) {
+            Ok(preset) => {
+                let engine = WarpEngine::new(&s.ctx, preset, w, h);
+                let b = s.deck_b.as_mut().unwrap();
+                b.player.switch_to(engine);
+                b.loaded = Some("milkdrop".to_string());
+                "{\"ok\":true}".to_string()
+            }
+            Err(e) => format!("{{\"ok\":false,\"error\":{}}}", json_string(&format!("{e}"))),
+        }
+    })
+    .unwrap_or_else(|| "{\"ok\":false,\"error\":\"engine not ready\"}".to_string())
+}
+
+/// Per-deck diagnostics (output contract + source type + pass counts) for
+/// validating the deck refactor. All decks share the surface format/size.
+#[wasm_bindgen]
+pub fn deck_diagnostics_json() -> String {
+    with_state(|s| {
+        let fmt = format!("{:?}", s.config.format);
+        let (w, h) = (s.config.width, s.config.height);
+        let deck_json = |d: &Deck| {
+            let (bp, sp) = d.compositor.shader_pass_stats();
+            format!(
+                "{{\"id\":{},\"loaded\":{},\"sourceType\":\"{}\",\"width\":{},\"height\":{},\"format\":\"{}\",\
+                 \"layerCount\":{},\"shaderCount\":{},\"bufferPasses\":{},\"shaderPasses\":{}}}",
+                d.id,
+                d.loaded.as_deref().map(json_string).unwrap_or_else(|| "null".to_string()),
+                d.source_type(),
+                w,
+                h,
+                fmt,
+                d.compositor.layer_count(),
+                d.compositor.shader_count(),
+                bp,
+                sp,
+            )
+        };
+        let a = deck_json(&s.deck_a);
+        let b = s.deck_b.as_ref().map(|d| deck_json(d)).unwrap_or_else(|| "null".to_string());
+        format!("{{\"deckCount\":{},\"deckA\":{},\"deckB\":{}}}", 1 + s.deck_b.is_some() as u32, a, b)
+    })
+    .unwrap_or_else(|| "{\"deckCount\":0,\"deckA\":null,\"deckB\":null}".to_string())
+}
+
 /// The selected shader layer's multipass project (passes + channels + status).
 #[wasm_bindgen]
 pub fn project_json() -> String {
     with_state(|s| {
-        let id = s.compositor.selected()?;
-        s.compositor.project_json(id)
+        let id = s.deck_a.compositor.selected()?;
+        s.deck_a.compositor.project_json(id)
     })
     .flatten()
     .unwrap_or_else(|| "{\"passes\":[],\"conflicts\":[]}".into())
@@ -1081,8 +1242,8 @@ fn control_json(c: &pm_glsl::Control) -> String {
 #[wasm_bindgen]
 pub fn set_control(index: u32, x: f32, y: f32, z: f32, w: f32) {
     with_state(|s| {
-        if let Some(id) = s.compositor.selected() {
-            s.compositor.set_control(id, index as usize, [x, y, z, w]);
+        if let Some(id) = s.deck_a.compositor.selected() {
+            s.deck_a.compositor.set_control(id, index as usize, [x, y, z, w]);
         }
     });
 }
@@ -1092,21 +1253,21 @@ pub fn set_control(index: u32, x: f32, y: f32, z: f32, w: f32) {
 #[wasm_bindgen]
 pub fn set_control_mod(index: u32, source: String, amount: f32, smoothing: f32, curve: String, invert: bool) {
     with_state(|s| {
-        let Some(id) = s.compositor.selected() else { return };
+        let Some(id) = s.deck_a.compositor.selected() else { return };
         let i = index as usize;
         let src = ModSource::from_str(&source);
         if matches!(src, ModSource::None) && amount == 0.0 {
-            s.compositor.set_control_mod(id, i, None);
+            s.deck_a.compositor.set_control_mod(id, i, None);
             return;
         }
-        let [min, max] = s.compositor.user_range(id, i);
+        let [min, max] = s.deck_a.compositor.user_range(id, i);
         let mut p = Parameter::new(0.0, min, max); // base tracked from the slot each frame
         p.source = src;
         p.amount = amount;
         p.smoothing = smoothing.clamp(0.0, 0.999);
         p.invert = invert;
         p.curve = curve_from(&curve);
-        s.compositor.set_control_mod(id, i, Some(p));
+        s.deck_a.compositor.set_control_mod(id, i, Some(p));
     });
 }
 
@@ -1227,8 +1388,8 @@ fn json_string(s: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 pub fn set_overlay(mode: u8, channel: u8, r: f32, g: f32, b: f32, opacity: f32, scale: f32, thickness: f32, rotation: f32, points: f32, log_freq: bool) {
     with_state(|s| {
-        let Some(id) = s.compositor.selected() else { return };
-        s.compositor.set_overlay_cfg(
+        let Some(id) = s.deck_a.compositor.selected() else { return };
+        s.deck_a.compositor.set_overlay_cfg(
             id,
             OverlayConfig { mode, channel, color: [r, g, b, opacity], scale, thickness, rotation, points, log_freq },
         );
@@ -1248,70 +1409,70 @@ pub fn add_layer(kind: u8) -> f64 {
             3 => LayerKind::Spectrum,
             _ => LayerKind::Milkdrop,
         };
-        s.compositor.add_layer(&s.ctx, k).map(|id| id as f64).unwrap_or(-1.0)
+        s.deck_a.compositor.add_layer(&s.ctx, k).map(|id| id as f64).unwrap_or(-1.0)
     })
     .unwrap_or(-1.0)
 }
 
 #[wasm_bindgen]
 pub fn remove_layer(id: f64) {
-    with_state(|s| s.compositor.remove_layer(id as u64));
+    with_state(|s| s.deck_a.compositor.remove_layer(id as u64));
 }
 
 #[wasm_bindgen]
 pub fn duplicate_layer(id: f64) -> f64 {
-    with_state(|s| s.compositor.duplicate_layer(&s.ctx, id as u64).map(|i| i as f64).unwrap_or(-1.0)).unwrap_or(-1.0)
+    with_state(|s| s.deck_a.compositor.duplicate_layer(&s.ctx, id as u64).map(|i| i as f64).unwrap_or(-1.0)).unwrap_or(-1.0)
 }
 
 #[wasm_bindgen]
 pub fn move_layer(id: f64, up: bool) {
-    with_state(|s| s.compositor.move_layer(id as u64, up));
+    with_state(|s| s.deck_a.compositor.move_layer(id as u64, up));
 }
 
 #[wasm_bindgen]
 pub fn select_layer(id: f64) {
-    with_state(|s| s.compositor.set_selected(id as u64));
+    with_state(|s| s.deck_a.compositor.set_selected(id as u64));
 }
 
 #[wasm_bindgen]
 pub fn set_layer_enabled(id: f64, enabled: bool) {
-    with_state(|s| s.compositor.set_enabled(id as u64, enabled));
+    with_state(|s| s.deck_a.compositor.set_enabled(id as u64, enabled));
 }
 
 #[wasm_bindgen]
 pub fn set_layer_visible(id: f64, visible: bool) {
-    with_state(|s| s.compositor.set_visible(id as u64, visible));
+    with_state(|s| s.deck_a.compositor.set_visible(id as u64, visible));
 }
 
 #[wasm_bindgen]
 pub fn set_layer_opacity(id: f64, opacity: f32) {
-    with_state(|s| s.compositor.set_opacity(id as u64, opacity));
+    with_state(|s| s.deck_a.compositor.set_opacity(id as u64, opacity));
 }
 
 #[wasm_bindgen]
 pub fn set_layer_blend(id: f64, blend: u32) {
-    with_state(|s| s.compositor.set_blend(id as u64, blend));
+    with_state(|s| s.deck_a.compositor.set_blend(id as u64, blend));
 }
 
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn set_layer_transform(id: f64, px: f32, py: f32, sx: f32, sy: f32, rot: f32) {
-    with_state(|s| s.compositor.set_transform(id as u64, px, py, sx, sy, rot));
+    with_state(|s| s.deck_a.compositor.set_transform(id as u64, px, py, sx, sy, rot));
 }
 
 #[wasm_bindgen]
 pub fn rename_layer(id: f64, name: String) {
-    with_state(|s| s.compositor.rename_layer(id as u64, name));
+    with_state(|s| s.deck_a.compositor.rename_layer(id as u64, name));
 }
 
 #[wasm_bindgen]
 pub fn layers_json() -> String {
-    with_state(|s| s.compositor.layers_json()).unwrap_or_else(|| "[]".into())
+    with_state(|s| s.deck_a.compositor.layers_json()).unwrap_or_else(|| "[]".into())
 }
 
 #[wasm_bindgen]
 pub fn selected_controls_json() -> String {
-    with_state(|s| s.compositor.selected_controls_json()).unwrap_or_else(|| "{}".into())
+    with_state(|s| s.deck_a.compositor.selected_controls_json()).unwrap_or_else(|| "{}".into())
 }
 
 // --- Scenes ---------------------------------------------------------------
@@ -1319,7 +1480,7 @@ pub fn selected_controls_json() -> String {
 #[wasm_bindgen]
 pub fn export_scene() -> String {
     with_state(|s| {
-        let scene = s.compositor.export_scene(s.clock.scale(), s.clock.paused(), s.tempo.bpm(), s.tempo.manual(), 1.0);
+        let scene = s.deck_a.compositor.export_scene(s.clock.scale(), s.clock.paused(), s.tempo.bpm(), s.tempo.manual(), 1.0);
         pm_scene::to_json(&scene)
     })
     .unwrap_or_else(|| "{}".into())
@@ -1331,7 +1492,7 @@ pub fn export_scene() -> String {
 pub fn import_scene(json: String) -> String {
     with_state(|s| match pm_scene::parse_scene(&json) {
         Ok(scene) => {
-            s.compositor.import_scene(&s.ctx, &scene);
+            s.deck_a.compositor.import_scene(&s.ctx, &scene);
             s.clock.set_scale(scene.speed);
             s.clock.set_paused(scene.paused);
             if scene.tempo_manual {
@@ -1348,55 +1509,55 @@ pub fn import_scene(json: String) -> String {
 
 #[wasm_bindgen]
 pub fn reset_scene() {
-    with_state(|s| s.compositor.load_default(&s.ctx));
+    with_state(|s| s.deck_a.compositor.load_default(&s.ctx));
 }
 
 // --- Effects (target 0 = global scene effects, else a layer id) -----------
 
 #[wasm_bindgen]
 pub fn add_effect(target: f64, type_str: String) -> f64 {
-    with_state(|s| s.compositor.add_effect(target as u64, &type_str).map(|id| id as f64).unwrap_or(-1.0)).unwrap_or(-1.0)
+    with_state(|s| s.deck_a.compositor.add_effect(target as u64, &type_str).map(|id| id as f64).unwrap_or(-1.0)).unwrap_or(-1.0)
 }
 #[wasm_bindgen]
 pub fn remove_effect(target: f64, id: f64) {
-    with_state(|s| s.compositor.remove_effect(target as u64, id as u64));
+    with_state(|s| s.deck_a.compositor.remove_effect(target as u64, id as u64));
 }
 #[wasm_bindgen]
 pub fn duplicate_effect(target: f64, id: f64) -> f64 {
-    with_state(|s| s.compositor.duplicate_effect(target as u64, id as u64).map(|i| i as f64).unwrap_or(-1.0)).unwrap_or(-1.0)
+    with_state(|s| s.deck_a.compositor.duplicate_effect(target as u64, id as u64).map(|i| i as f64).unwrap_or(-1.0)).unwrap_or(-1.0)
 }
 #[wasm_bindgen]
 pub fn move_effect(target: f64, id: f64, up: bool) {
-    with_state(|s| s.compositor.move_effect(target as u64, id as u64, up));
+    with_state(|s| s.deck_a.compositor.move_effect(target as u64, id as u64, up));
 }
 #[wasm_bindgen]
 pub fn set_effect_enabled(target: f64, id: f64, enabled: bool) {
-    with_state(|s| s.compositor.set_effect_enabled(target as u64, id as u64, enabled));
+    with_state(|s| s.deck_a.compositor.set_effect_enabled(target as u64, id as u64, enabled));
 }
 #[wasm_bindgen]
 pub fn select_effect(target: f64, id: f64) {
-    with_state(|s| s.compositor.select_effect(target as u64, id as u64));
+    with_state(|s| s.deck_a.compositor.select_effect(target as u64, id as u64));
 }
 #[wasm_bindgen]
 pub fn set_effect_param(target: f64, id: f64, idx: u32, base: f32) {
-    with_state(|s| s.compositor.set_effect_param(target as u64, id as u64, idx as usize, base));
+    with_state(|s| s.deck_a.compositor.set_effect_param(target as u64, id as u64, idx as usize, base));
 }
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn set_effect_param_mod(target: f64, id: f64, idx: u32, source: String, amount: f32, smoothing: f32, curve: String, invert: bool) {
-    with_state(|s| s.compositor.set_effect_param_mod(target as u64, id as u64, idx as usize, &source, amount, smoothing, &curve, invert));
+    with_state(|s| s.deck_a.compositor.set_effect_param_mod(target as u64, id as u64, idx as usize, &source, amount, smoothing, &curve, invert));
 }
 #[wasm_bindgen]
 pub fn reset_feedback(target: f64) {
-    with_state(|s| s.compositor.reset_feedback(target as u64));
+    with_state(|s| s.deck_a.compositor.reset_feedback(target as u64));
 }
 #[wasm_bindgen]
 pub fn effects_json(target: f64) -> String {
-    with_state(|s| s.compositor.effects_json(target as u64)).unwrap_or_else(|| "{}".into())
+    with_state(|s| s.deck_a.compositor.effects_json(target as u64)).unwrap_or_else(|| "{}".into())
 }
 #[wasm_bindgen]
 pub fn add_effect_preset(target: f64, preset: String) {
-    with_state(|s| s.compositor.add_effect_preset(target as u64, &preset));
+    with_state(|s| s.deck_a.compositor.add_effect_preset(target as u64, &preset));
 }
 
 // --- MIDI (Phase 8b) ------------------------------------------------------

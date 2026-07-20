@@ -428,18 +428,123 @@ large-set search, pack-unavailable graceful, favorites, recent, collections
 (add/remove/delete-keeps-items), shader+scene load routing, mobile no-overflow,
 favorite persistence across reload, 0 uploads.
 
+## Phase 10C.1 — performance-deck abstraction
+
+Refactors the visual-output path behind a reusable `Deck` (crates/pm-web-vj/
+src/lib.rs). **Equivalence-first:** the full WebGPU regression (88/88) and all
+library suites pass unchanged; perf is flat (fps 32.3 / cpuMs 2.22 vs 32 / 2.26).
+
+### PerformanceDeck contract
+
+```
+Deck { id, player: PresetPlayer, compositor: Compositor, output: Texture,
+       format, loaded? }
+  → render(ctx, time, audio, uniforms, modctx)  writes to `output`
+```
+A deck is **one visual source** (a Milkdrop `PresetPlayer` + a layer
+`Compositor`) rendered to **its own output texture** — never the surface. The
+master output is currently `deck_a.output` blitted to the surface by a master
+`Blit`.
+
+### Visual source model
+
+A deck's compositor already unifies the three source types — the "source" is
+whatever the compositor holds:
+- **Milkdrop** → the deck's `PresetPlayer` feeds the compositor's Milkdrop layer.
+- **ShaderProject** → shader layer(s) with full multipass state (Image + Buffer
+  A–D + channels + controls + modulation; per-pass last-known-good intact).
+- **Scene** → the compositor's whole layer stack (via `import_scene`).
+
+`Deck::source_type()` reports `milkdrop | milkdrop+shader | shader | overlay` for
+diagnostics.
+
+### Shared vs deck-local state
+
+| Shared / Master (State) | Deck-local (Deck) |
+|---|---|
+| wgpu Device + Queue | loaded content + `PresetPlayer` (Milkdrop temporal state) |
+| pm-audio analysis (PCM/tempo/LFO) | `Compositor` (layers, effects, shader/scene feedback) |
+| recording + projection (mirror the surface) | deck output texture |
+| master diagnostics + `master_blit` | deck resize / temporal isolation |
+
+Device/Queue and audio analysis are **never** duplicated (audio uniforms/features
+are computed once and passed to every deck).
+
+### Output-texture contract
+
+Every deck exposes a `Texture` in the **surface format** at the surface size, so a
+future `MasterCrossfade.draw(deck_a.output, deck_b.output, t)` needs no redesign.
+`resize()` recreates the deck output (clamped to `max_texture_dimension_2d`),
+rebuilds the Milkdrop engine (matching prior resize behavior), and resizes the
+compositor (shaders retained). Ownership/lifetime: the deck owns its output; it is
+recreated on resize and dropped with the deck.
+
+### Lifecycle + isolation
+
+Deck B (`deck_b: Option<Deck>`) can be created / loaded / unloaded independently.
+Verified: **Deck B create/load/unload never changes Deck A** (layer/shader
+counts, temporal state), a Deck B load failure/oddity keeps the renderer alive
+and Deck A intact, and a canvas resize with Deck B present rebuilds both without
+crashing (0 GPU errors). Deck B renders every frame to its own texture (isolated
+feedback) but is **not blended** into the visible master yet.
+
+### Effects ownership (current + future)
+
+Effects currently live **inside the compositor** (per-layer + a global chain) —
+i.e. **deck-local**, applied to the deck output. This is unchanged (identical
+visible behavior). Future model: **deck effects → deck output; master effects →
+post-crossfade output**. No global effect was moved to a master stage in 10C.1.
+
+### Master output / recording / projection
+
+Master = Deck A's texture blitted to the surface (10C.2 replaces this blit with
+the crossfade). Recording and projection **mirror the surface**, so they follow
+master with no coupling to deck internals and will record/mirror the future
+crossfade output unchanged.
+
+### SceneData vs future PerformanceSession
+
+`SceneData` is unchanged — it still serializes **one** visual (a single deck's
+compositor). Deck A/B + master state are **not** forced into SceneData. A future
+`PerformanceSession { schemaVersion, deckA, deckB, crossfader, masterEffects }`
+(separate from SceneData) will persist a whole performance setup without
+corrupting existing scene semantics. **Not implemented in 10C.1.**
+
+### Dual-Milkdrop readiness
+
+Each deck already owns an independent `PresetPlayer` (Deck B loads its own preset
+via `deck_b_load_preset`, isolated from Deck A) — so simultaneous
+Milkdrop↔Milkdrop is structurally ready. Benchmarks, mobile policy, and GPU/memory
+validation/productionization remain **10D**.
+
+### Mobile / failure handling
+
+`deck_b_create` returns a boolean and never crashes the device; a constrained
+device that can't allocate a second deck keeps Deck A alive and the renderer
+running (tested at a 390px viewport). Max-texture-dimension safeguards apply to
+every deck.
+
+### Diagnostics + tests
+
+`deck_diagnostics_json` reports per-deck `{id, loaded, sourceType, width, height,
+format, layerCount, shaderCount, bufferPasses, shaderPasses}` and `deckCount`.
+`web/verify-deck.mjs` (16 checks): Deck A equivalence + output contract,
+source switching (shader/scene, failed-switch-preserves), Deck B
+create/load/unload isolation, both-output compatibility, resize resilience with
+Deck B, mobile-graceful, 0 uploads.
+
 ## Phase 10 implementation ordering (current)
 
 ```
 10A.1 Library foundation      ✓ merged
 10A.2 Milkdrop library         ✓ merged
 10A.3 Shader/Scene library     ✓ merged
-10A.4 Library browser          ← this PR
-10C.1 Deck abstraction         (before Preview)
-10B   Preview/Audition
-10C.2 Crossfader
-10C.3 MIDI/keyboard
-10D   Dual Milkdrop
+10A.4 Library browser          ✓ merged
+10C.1 Deck abstraction         ← this PR
+10B   Preview/Audition         (depends on the deck abstraction)
+10C.2 Master crossfader
+10C.3 MIDI/keyboard performance controls
+10D   Dual-Milkdrop productionization
 ```
 
 ## Tests (10A.1)
