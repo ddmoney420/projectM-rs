@@ -48,7 +48,7 @@ pub use mesh::{Color, ColoredPoint, Point};
 pub use pass::{clear, FullscreenShader, FULLSCREEN_VERTEX_WGSL};
 pub use readback::read_rgba8;
 pub use render_context::RenderContext;
-pub use texture::{Texture, TARGET_FORMAT};
+pub use texture::{live_texture_bytes, live_texture_count, Texture, TARGET_FORMAT};
 
 // Re-export wgpu so downstream crates use a matching version.
 pub use wgpu;

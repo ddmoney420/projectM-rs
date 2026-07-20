@@ -1328,6 +1328,68 @@ pub fn deck_diagnostics_json() -> String {
     .unwrap_or_else(|| "{\"deckCount\":0,\"deckA\":null,\"deckB\":null}".to_string())
 }
 
+/// Phase 10D — performance telemetry for qualification/soak harnesses. Includes
+/// MEASURED live render-target count + estimated bytes (from pm-render's
+/// accounting), so a leak shows up as a count that never returns to baseline.
+/// CPU-in-render (`cpuMs`) is CPU submission time — NOT GPU execution time.
+#[wasm_bindgen]
+pub fn perf_telemetry_json() -> String {
+    let cpu_ms = DIAG.with(|d| d.borrow().cpu_ms);
+    with_state(|s| {
+        format!(
+            "{{\"deckCount\":{},\"crossfader\":{:.4},\"deckASource\":\"{}\",\"deckBSource\":{},\
+             \"cpuMs\":{:.3},\"frame\":{},\"liveTextureCount\":{},\"liveTextureBytes\":{},\
+             \"cpuMsIsGpuTime\":false}}",
+            1 + s.deck_b.is_some() as u32,
+            s.crossfader,
+            s.deck_a.source_type(),
+            s.deck_b.as_ref().map(|d| format!("\"{}\"", d.source_type())).unwrap_or_else(|| "null".to_string()),
+            cpu_ms,
+            s.frame,
+            pm_render::live_texture_count(),
+            pm_render::live_texture_bytes(),
+        )
+    })
+    .unwrap_or_else(|| "{\"deckCount\":0}".to_string())
+}
+
+/// Phase 10D — adaptive capability probe (NO user-agent sniffing). Reports the
+/// adapter's real limits + whether GPU timestamp queries are available, and a
+/// recommended dual-Milkdrop tier derived from those limits (the JS layer
+/// combines this with measured frame pacing + allocation success for the final
+/// policy). `maxTextureDimension2d` bounds the safe render size (DPR-scaled).
+#[wasm_bindgen]
+pub fn deck_capability_json() -> String {
+    with_state(|s| {
+        let limits = s.ctx.adapter.limits();
+        let features = s.ctx.adapter.features();
+        let timestamp = features.contains(wgpu::Features::TIMESTAMP_QUERY);
+        let max_dim = limits.max_texture_dimension_2d;
+        // Static tier from limits only (the JS policy layers in runtime signals).
+        // Two full-res Milkdrop decks each need several full-screen targets, so a
+        // generous max dimension is the structural gate.
+        let (tier, label): (u32, &str) = if max_dim >= 8192 {
+            (1, "supported")
+        } else if max_dim >= 4096 {
+            (2, "limited")
+        } else {
+            (3, "experimental")
+        };
+        format!(
+            "{{\"maxTextureDimension2d\":{},\"maxBufferSize\":{},\"timestampQuery\":{},\
+             \"surfaceWidth\":{},\"surfaceHeight\":{},\"tier\":{},\"dualMilkdrop\":\"{}\"}}",
+            max_dim,
+            limits.max_buffer_size,
+            timestamp,
+            s.config.width,
+            s.config.height,
+            tier,
+            label,
+        )
+    })
+    .unwrap_or_else(|| "{\"tier\":3,\"dualMilkdrop\":\"experimental\"}".to_string())
+}
+
 /// Import a scene (shader/scene audition) into Deck B's compositor, creating
 /// Deck B if needed. Transactional — a parse failure keeps Deck B's current
 /// content and never touches Deck A or the shared clock/tempo (Deck B shares the
