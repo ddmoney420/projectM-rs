@@ -110,6 +110,29 @@ export class ContentLibrary {
     return full && full.type === 'shader' ? (full.payload as ShaderPayload) : null;
   }
 
+  /** Build a minimal single-shader-layer scene JSON for auditioning a shader in
+   *  a deck (e.g. Deck B) without disturbing the current scene. Null if
+   *  unresolved. */
+  async sceneJsonForShader(id: string): Promise<string | null> {
+    const payload = await this.resolveShaderPayload(id);
+    if (!payload) return null;
+    const scene = {
+      schema_version: 1,
+      scene_id: 'audition',
+      name: 'Audition',
+      layers: [
+        { id: 1, name: 'Shader', enabled: true, visible: true, opacity: 1, blend: 'normal', source: { kind: 'shader', ...payload }, effects: [] },
+      ],
+      speed: 1,
+      paused: false,
+      bpm: 120,
+      tempo_manual: false,
+      subdivision: 1,
+      global_effects: [],
+    };
+    return JSON.stringify(scene);
+  }
+
   /** Replace the current scene's first shader layer source with `payload` (or
    *  append a shader layer if none) and import the scene transactionally. */
   private applyShaderPayload(payload: ShaderPayload): ImportResult {

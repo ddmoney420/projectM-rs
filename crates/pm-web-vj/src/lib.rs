@@ -344,6 +344,7 @@ pub async fn run(canvas_id: String) -> Result<(), JsValue> {
         deck_a: Deck::new(&ctx, 0, format, width, height),
         deck_b: None,
         master_blit: Blit::new(&ctx, format),
+        preview: None,
         ctx,
         surface,
         config,
@@ -451,6 +452,17 @@ impl Deck {
     }
 }
 
+/// A Preview/Audition monitor (Phase 10B): a second on-screen surface (its own
+/// small `<canvas>`) that shows Deck B's already-produced output texture via a
+/// GPU blit — no extra deck execution, no GPU→CPU readback. It is NOT the master
+/// surface: recording/projection still mirror the main (Deck A) surface only.
+struct Preview {
+    canvas: HtmlCanvasElement,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    blit: Blit,
+}
+
 /// Everything the render loop needs to draw, analyze audio, and recover.
 struct State {
     ctx: GpuContext,
@@ -461,10 +473,13 @@ struct State {
     deck_a: Deck,
     /// A second, independently-owned deck (Phase 10C.1). May be unloaded; renders
     /// to its own texture and never affects Deck A. Not yet blended into master.
+    /// In Phase 10B it is the AUDITION deck.
     deck_b: Option<Deck>,
     /// Copies the visible deck's output to the surface (crossfade replaces this
     /// in 10C.2).
     master_blit: Blit,
+    /// Optional audition monitor showing Deck B (Phase 10B); never the master.
+    preview: Option<Preview>,
     canvas: HtmlCanvasElement,
     pcm: PCM,
     audio_scratch: Vec<f32>,
@@ -637,6 +652,40 @@ impl State {
         // surface, so they follow master unchanged.
         self.master_blit.draw(&self.ctx, self.deck_a.output(), &view);
         frame.present();
+
+        // Audition monitor (Phase 10B): show Deck B on its own surface via a GPU
+        // blit of its already-rendered texture. Never the master surface.
+        if self.preview.is_some() && self.deck_b.is_some() {
+            self.render_preview();
+        }
+    }
+
+    /// Blit Deck B's output to the audition-monitor surface (no extra deck run,
+    /// no GPU→CPU readback). Caller guarantees both `preview` and `deck_b` exist.
+    fn render_preview(&mut self) {
+        {
+            let preview = self.preview.as_mut().unwrap();
+            let pw = preview.canvas.width().max(1);
+            let ph = preview.canvas.height().max(1);
+            if pw != preview.config.width || ph != preview.config.height {
+                preview.config.width = pw;
+                preview.config.height = ph;
+                preview.surface.configure(&self.ctx.device, &preview.config);
+            }
+        }
+        let preview = self.preview.as_mut().unwrap();
+        let pframe = match preview.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                preview.surface.configure(&self.ctx.device, &preview.config);
+                return;
+            }
+            _ => return,
+        };
+        let pview = pframe.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let deck_b = self.deck_b.as_ref().unwrap();
+        preview.blit.draw(&self.ctx, deck_b.output(), &pview);
+        pframe.present();
     }
 }
 
@@ -1207,6 +1256,70 @@ pub fn deck_diagnostics_json() -> String {
         format!("{{\"deckCount\":{},\"deckA\":{},\"deckB\":{}}}", 1 + s.deck_b.is_some() as u32, a, b)
     })
     .unwrap_or_else(|| "{\"deckCount\":0,\"deckA\":null,\"deckB\":null}".to_string())
+}
+
+/// Import a scene (shader/scene audition) into Deck B's compositor, creating
+/// Deck B if needed. Transactional — a parse failure keeps Deck B's current
+/// content and never touches Deck A or the shared clock/tempo (Deck B shares the
+/// master audio/clock during audition).
+#[wasm_bindgen]
+pub fn deck_b_import_scene(json: String) -> String {
+    with_state(|s| {
+        let (fmt, w, h) = (s.config.format, s.config.width, s.config.height);
+        if s.deck_b.is_none() {
+            s.deck_b = Some(Deck::new(&s.ctx, 1, fmt, w, h));
+        }
+        match pm_scene::parse_scene(&json) {
+            Ok(scene) => {
+                let b = s.deck_b.as_mut().unwrap();
+                b.compositor.import_scene(&s.ctx, &scene);
+                b.loaded = Some("scene".to_string());
+                "{\"ok\":true}".to_string()
+            }
+            Err(e) => format!("{{\"ok\":false,\"error\":{}}}", json_string(&e)),
+        }
+    })
+    .unwrap_or_else(|| "{\"ok\":false,\"error\":\"engine not ready\"}".into())
+}
+
+/// Attach an audition monitor to `canvas` (its own on-screen surface showing
+/// Deck B). Returns false if a surface can't be created (leaves the app intact).
+#[wasm_bindgen]
+pub fn preview_attach(canvas: HtmlCanvasElement) -> bool {
+    with_state(|s| {
+        let surface = match s.ctx.instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone())) {
+            Ok(surf) => surf,
+            Err(_) => return false,
+        };
+        let caps = surface.get_capabilities(&s.ctx.adapter);
+        if caps.formats.is_empty() {
+            return false;
+        }
+        let format = caps.formats[0];
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: canvas.width().max(1),
+            height: canvas.height().max(1),
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: caps.alpha_modes[0],
+            view_formats: vec![],
+        };
+        surface.configure(&s.ctx.device, &config);
+        let blit = Blit::new(&s.ctx, format);
+        s.preview = Some(Preview { canvas, surface, config, blit });
+        true
+    })
+    .unwrap_or(false)
+}
+
+/// Detach + release the audition monitor.
+#[wasm_bindgen]
+pub fn preview_detach() {
+    with_state(|s| {
+        s.preview = None;
+    });
 }
 
 /// The selected shader layer's multipass project (passes + channels + status).
