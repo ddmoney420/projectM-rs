@@ -31,12 +31,12 @@ mod shader_project;
 use compositor::{Compositor, LayerKind};
 use midi::MidiRouter;
 use pm_audio::{FrameAudioData, PCM};
-use pm_core::{PresetPlayer, WarpEngine, BUILTIN_PRESET, DEFAULT_TRANSITION_SECS};
+use pm_core::{Crossfade, PresetPlayer, WarpEngine, BUILTIN_PRESET, DEFAULT_TRANSITION_SECS};
 use pm_glsl::{ShaderMode, ShaderUniforms, AUDIO_TEX_HEIGHT, AUDIO_TEX_WIDTH};
 use pm_midi::{pickup_engage, smooth_step, MappingMode, MidiEvent};
 use pm_params::{AudioFeatures, Curve, Lfo, LfoWave, ModContext, ModSource, Parameter, Tempo, VisualClock};
 use pm_preset::Preset;
-use pm_render::{Blit, GpuContext, Texture};
+use pm_render::{Blit, GpuContext, Texture, TARGET_FORMAT};
 use pm_scene::OverlayConfig;
 
 // ---------------------------------------------------------------------------
@@ -344,6 +344,9 @@ pub async fn run(canvas_id: String) -> Result<(), JsValue> {
         deck_a: Deck::new(&ctx, 0, format, width, height),
         deck_b: None,
         master_blit: Blit::new(&ctx, format),
+        crossfade: Crossfade::new(&ctx),
+        master: Texture::new_render_target(&ctx.device, "master", width, height, TARGET_FORMAT),
+        crossfader: 0.0,
         preview: None,
         ctx,
         surface,
@@ -475,10 +478,18 @@ struct State {
     /// to its own texture and never affects Deck A. Not yet blended into master.
     /// In Phase 10B it is the AUDITION deck.
     deck_b: Option<Deck>,
-    /// Copies the visible deck's output to the surface (crossfade replaces this
-    /// in 10C.2).
+    /// Copies the master texture (or a deck output directly at an endpoint) to
+    /// the surface.
     master_blit: Blit,
-    /// Optional audition monitor showing Deck B (Phase 10B); never the master.
+    /// Phase 10C.2 master A/B crossfader. `mix(deck_a, deck_b, t)` → `master`.
+    crossfade: Crossfade,
+    /// Blend target (TARGET_FORMAT) for the middle of the crossfade.
+    master: Texture,
+    /// Crossfader position: 0.0 = 100% Deck A, 1.0 = 100% Deck B (default 0.0).
+    /// Deck identities are permanently stable (no auto-swap at endpoints). This
+    /// is runtime performance state — never serialized into SceneData.
+    crossfader: f32,
+    /// Optional audition monitor showing raw Deck B (Phase 10B); never the master.
     preview: Option<Preview>,
     canvas: HtmlCanvasElement,
     pcm: PCM,
@@ -510,6 +521,7 @@ impl State {
             if let Some(b) = &mut self.deck_b {
                 b.resize(&self.ctx, w, h);
             }
+            self.master = Texture::new_render_target(&self.ctx.device, "master", w, h, TARGET_FORMAT);
         }
 
         // Drain the audio ring (if attached) into the projectM PCM analyzer.
@@ -631,8 +643,8 @@ impl State {
             pm_pad2: 0.0,
         };
 
-        // Render each deck to its OWN output texture. Deck B (if present) renders
-        // independently — proving isolated temporal state — but is not blended.
+        // Both decks render to their OWN output textures EVERY frame (warm state
+        // at t=0 and t=1). Deck B stays isolated from Deck A.
         self.deck_a.render(&self.ctx, time, &audio, &uniforms, &modctx);
         if let Some(b) = &mut self.deck_b {
             b.render(&self.ctx, time, &audio, &uniforms, &modctx);
@@ -647,10 +659,21 @@ impl State {
             _ => return,
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        // Master output = Deck A's texture (the crossfader replaces this blit in
-        // 10C.2, sampling both deck outputs). Recording/projection mirror the
-        // surface, so they follow master unchanged.
-        self.master_blit.draw(&self.ctx, self.deck_a.output(), &view);
+        // Master = crossfade(deck_a, deck_b, t) → surface. Endpoints (and no
+        // Deck B) blit a deck directly: preserves the exact single-deck path,
+        // guarantees master never fades to black when Deck B is absent, and does
+        // gamma-correct linear blending only in the middle. Recording/projection
+        // mirror the surface, so they capture the post-crossfade master.
+        let t = self.crossfader;
+        match &self.deck_b {
+            Some(b) if t >= 1.0 => self.master_blit.draw(&self.ctx, b.output(), &view),
+            Some(b) if t > 0.0 => {
+                self.crossfade.draw(&self.ctx, self.deck_a.output(), b.output(), t, &self.master);
+                self.master_blit.draw(&self.ctx, &self.master, &view);
+            }
+            // Deck B absent, or t == 0: 100% Deck A (identical to pre-10C.2).
+            _ => self.master_blit.draw(&self.ctx, self.deck_a.output(), &view),
+        }
         frame.present();
 
         // Audition monitor (Phase 10B): show Deck B on its own surface via a GPU
@@ -1196,12 +1219,31 @@ pub fn deck_b_create() -> bool {
     .unwrap_or(false)
 }
 
-/// Destroy Deck B (frees its engine + textures). Deck A is untouched.
+/// Destroy Deck B (frees its engine + textures). Deck A is untouched. The
+/// crossfader is reset to 0 (100% Deck A) BEFORE unloading so the master can
+/// never be left mixing toward a now-absent deck.
 #[wasm_bindgen]
 pub fn deck_b_unload() {
     with_state(|s| {
+        s.crossfader = 0.0;
         s.deck_b = None;
     });
+}
+
+/// Set the master crossfader (clamped to 0..1). 0 = 100% Deck A, 1 = 100% Deck
+/// B. Runtime performance state only (never serialized into SceneData). Does not
+/// change deck identities or what is loaded in either deck.
+#[wasm_bindgen]
+pub fn set_crossfader(t: f32) {
+    with_state(|s| {
+        s.crossfader = t.clamp(0.0, 1.0);
+    });
+}
+
+/// Current crossfader position (0..1).
+#[wasm_bindgen]
+pub fn crossfader() -> f32 {
+    with_state(|s| s.crossfader).unwrap_or(0.0)
 }
 
 /// Load a Milkdrop preset into Deck B (creating it if needed). Transactional —
@@ -1253,7 +1295,13 @@ pub fn deck_diagnostics_json() -> String {
         };
         let a = deck_json(&s.deck_a);
         let b = s.deck_b.as_ref().map(|d| deck_json(d)).unwrap_or_else(|| "null".to_string());
-        format!("{{\"deckCount\":{},\"deckA\":{},\"deckB\":{}}}", 1 + s.deck_b.is_some() as u32, a, b)
+        format!(
+            "{{\"deckCount\":{},\"crossfader\":{:.4},\"deckA\":{},\"deckB\":{}}}",
+            1 + s.deck_b.is_some() as u32,
+            s.crossfader,
+            a,
+            b
+        )
     })
     .unwrap_or_else(|| "{\"deckCount\":0,\"deckA\":null,\"deckB\":null}".to_string())
 }

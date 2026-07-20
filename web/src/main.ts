@@ -24,6 +24,8 @@ import init, {
   deck_b_load_preset,
   deck_b_import_scene,
   deck_diagnostics_json,
+  set_crossfader,
+  crossfader,
   preview_attach,
   preview_detach,
   midi_handle,
@@ -158,6 +160,8 @@ const browserDeps: BrowserDeps = {
   setBank: (ids) => library.setPreviewBank(ids).then(() => undefined),
   attachPreview: (c) => preview_attach(c),
   detachPreview: () => preview_detach(),
+  getCrossfader: () => crossfader(),
+  setCrossfader: (t) => set_crossfader(t),
   setFavorite: (id, f) => content.setFavorite(id, f),
   rename: (id, n) => content.rename(id, n),
   duplicate: (id) => content.duplicate(id),
@@ -867,6 +871,12 @@ async function boot(): Promise<void> {
       setBank: (ids: string[]) => browserDeps.setBank(ids),
       attachPreview: (c: HTMLCanvasElement) => browserDeps.attachPreview(c),
       detachPreview: () => browserDeps.detachPreview(),
+    };
+    // Master crossfader driving for the harness (Phase 10C.2).
+    (window as unknown as Record<string, unknown>).__pmCrossfader = {
+      get: () => crossfader(),
+      set: (t: number) => set_crossfader(t),
+      deck: () => JSON.parse(deck_diagnostics_json()),
     };
   }
 

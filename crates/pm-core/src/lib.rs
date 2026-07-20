@@ -29,6 +29,7 @@ mod waveform_render;
 pub use border::{frames as border_frames, BorderFrame};
 pub use colored_line::ColoredLineRenderer;
 pub use composite::CompositeRenderer;
+pub use crossfade::Crossfade;
 pub use player::{transition_progress, PresetPlayer, DEFAULT_TRANSITION_SECS};
 
 /// The classic (non-shader) final-composite effect parameters, read from the

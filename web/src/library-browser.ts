@@ -31,6 +31,8 @@ export interface BrowserDeps {
   setBank(ids: string[]): Promise<void>;
   attachPreview(canvas: HTMLCanvasElement): boolean;
   detachPreview(): void;
+  getCrossfader(): number;
+  setCrossfader(t: number): void;
   setFavorite(id: string, fav: boolean): Promise<void>;
   rename(id: string, name: string): Promise<LibraryItem | null>;
   duplicate(id: string): Promise<LibraryItem | null>;
@@ -72,6 +74,7 @@ export class LibraryBrowser {
 
   private status!: HTMLElement;
   private previewCanvas!: HTMLCanvasElement;
+  private xfader!: HTMLInputElement;
   private bankbar!: HTMLElement;
   private scroll!: HTMLElement;
   private spacer!: HTMLElement;
@@ -95,6 +98,13 @@ export class LibraryBrowser {
             <button id="br-clear-aud" class="br-x" aria-label="Clear audition" title="Clear audition">✕</button></div>
         </div>
         <canvas id="br-preview" class="br-preview" width="128" height="72" aria-label="Audition monitor (Deck B, not shown to the audience)"></canvas>
+      </div>
+      <div class="br-xf">
+        <span class="br-xf-a">A</span>
+        <input id="br-xf" class="br-xf-slider" type="range" min="0" max="1" step="0.01" value="0"
+          aria-label="Master crossfader: 0 is Deck A, 1 is Deck B" />
+        <span class="br-xf-b">B</span>
+        <span id="br-xf-val" class="br-xf-val" aria-hidden="true">A</span>
       </div>
       <div class="br-top">
         <input id="br-search" class="br-search" type="search" placeholder="Search library…" aria-label="Search library" />
@@ -130,7 +140,16 @@ export class LibraryBrowser {
     this.bankbar = host.querySelector('#br-bankbar')!;
     host.querySelector('#br-clear-aud')!.addEventListener('click', () => {
       this.deps.clearAudition();
+      this.syncCrossfader();
       this.renderStatus();
+    });
+    // Master crossfader (mouse/touch via range input; keyboard arrows are native
+    // to <input type=range>). 0 = Deck A (live default), 1 = Deck B.
+    this.xfader = host.querySelector('#br-xf') as HTMLInputElement;
+    this.xfader.addEventListener('input', () => {
+      const t = Number(this.xfader.value);
+      this.deps.setCrossfader(t);
+      this.renderXfaderLabel(t);
     });
     // Attach the audition monitor (GPU blit of Deck B's texture). Non-fatal if
     // the device can't create a second surface.
@@ -186,6 +205,21 @@ export class LibraryBrowser {
     (this.host.querySelector('#br-live') as HTMLElement).textContent = s.live ? `${s.live.name} (${s.live.type})` : '—';
     (this.host.querySelector('#br-aud') as HTMLElement).textContent = s.audition ? `${s.audition.name} (${s.audition.type})` : '—';
     this.previewCanvas.style.opacity = s.audition && this.previewAttached ? '1' : '.3';
+    this.syncCrossfader();
+  }
+
+  /** Reflect the engine's crossfader value into the slider (e.g. after clear
+   *  resets it to 0). */
+  private syncCrossfader(): void {
+    if (!this.xfader) return;
+    const t = this.deps.getCrossfader();
+    this.xfader.value = String(t);
+    this.renderXfaderLabel(t);
+  }
+
+  private renderXfaderLabel(t: number): void {
+    const label = t <= 0.001 ? 'A' : t >= 0.999 ? 'B' : `${Math.round(t * 100)}%`;
+    (this.host.querySelector('#br-xf-val') as HTMLElement).textContent = label;
   }
 
   /** Audition an item into the inactive deck (never disturbs Deck A/master). */
