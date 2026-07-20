@@ -1031,6 +1031,23 @@ pub fn reset_shader_buffers() {
         }
     });
 }
+/// Load a Milkdrop `.milk` preset into the shared engine, crossfading to it.
+/// Transactional: a parse failure returns `{"ok":false,"error":...}` and keeps
+/// the current preset (the running visual is never blacked out). Returns
+/// `{"ok":true}` on success.
+#[wasm_bindgen]
+pub fn load_preset(text: String) -> String {
+    with_state(|s| match Preset::load(&text) {
+        Ok(preset) => {
+            let engine = WarpEngine::new(&s.ctx, preset, s.config.width.max(1), s.config.height.max(1));
+            s.player.switch_to(engine);
+            "{\"ok\":true}".to_string()
+        }
+        Err(e) => format!("{{\"ok\":false,\"error\":{}}}", json_string(&format!("{e}"))),
+    })
+    .unwrap_or_else(|| "{\"ok\":false,\"error\":\"engine not ready\"}".to_string())
+}
+
 /// The selected shader layer's multipass project (passes + channels + status).
 #[wasm_bindgen]
 pub fn project_json() -> String {
