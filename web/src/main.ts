@@ -41,8 +41,21 @@ import type { ShaderConsole } from './shader-console';
 import type { MidiPanel } from './midi-ui';
 import { parseMessage, PROTOCOL_VERSION } from './projection-protocol';
 import { showAbout, maybeShowOnboarding } from './help';
+import {
+  LibraryStore,
+  makeItem,
+  StableId,
+  openLibraryDB,
+  deleteLibraryDB,
+  applyMigrations,
+  LIBRARY_DB_VERSION,
+} from './library';
 
 const MIDI_KEY = 'pm-web-midi-v1';
+
+// Phase 10A.1 — the content library. Initialized non-blocking after the
+// renderer is up; a storage failure never affects rendering.
+const library = new LibraryStore();
 
 let controlsPanel: ControlsPanel | null = null;
 let layerPanel: LayerPanel | null = null;
@@ -558,6 +571,13 @@ async function boot(): Promise<void> {
   wireUI();
   wireMouse();
 
+  // Content library — non-blocking; never gates startup. If IndexedDB is
+  // unavailable/quota-exceeded/migration-failed, the app keeps running and the
+  // library simply reports its status.
+  void library.init().then((status) => {
+    if (status !== 'ready') console.warn(`pm-web library unavailable (${status}): ${library.error ?? ''}`);
+  });
+
   // A shared scene in the URL fragment overrides the locally-restored scene.
   if (await loadFromUrl()) {
     layerPanel?.refresh();
@@ -628,6 +648,21 @@ async function boot(): Promise<void> {
         maybeShowOnboarding();
       },
       overlayShown: () => document.getElementById('pm-overlay')?.classList.contains('show') === true,
+    };
+    // Content-library driving for the harness: the live store plus constructors
+    // so tests can spin isolated databases (CRUD / migration / corrupt-record /
+    // zero-corpus) without touching the app's real library db.
+    (window as unknown as Record<string, unknown>).__pmLibrary = {
+      status: () => library.status,
+      ready: () => library.ready(),
+      store: library,
+      LibraryStore,
+      makeItem,
+      StableId,
+      openLibraryDB,
+      deleteLibraryDB,
+      applyMigrations,
+      DB_VERSION: LIBRARY_DB_VERSION,
     };
   }
 
