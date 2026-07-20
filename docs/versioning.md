@@ -128,20 +128,32 @@ next public beta uses the new line `v0.10.0-beta.1`. There is no renumbering of
 past releases; the two lines coexist, distinguished by the tag parser's
 `legacy` flag.
 
-## RC qualification status (v0.10.0-beta.1 @ c6ca3cd)
+## RC qualification status (v0.10.0-beta.1 @ 9cbbf91 — FINAL RC commit)
+
+Final RC commit `9cbbf91` supersedes the earlier `c6ca3cd` (PR #19 added only docs
++ the standalone soak harness — no runtime/build change — but the tag will point
+at `9cbbf91`, so the full gate was re-run there).
 
 ```
-RC build provenance:                 PASS (About shows 0.10.0-beta.1 · c6ca3cd)
+RC build provenance:                 PASS (About shows 0.10.0-beta.1 · 9cbbf91)
 Workspace tests:                     277 passed / 0 failed
-All Phase 10 suites:                 green (see qualification report)
-Full WebGPU regression:              88/88 boolean, 0 errors/panics/console
-Short qualification stress:          PASS (leak-free 26→26)
+Version metadata tests:              6/6
+Deployment-tool tests:               22/22
+All Phase 10 suites:                 green (23/23/26/16/16/17/16/22/13)
+Full WebGPU regression:              88/88 boolean (114 entries), 0 errors/panics/console
+Short qualification stress:          PASS (leak-free 26 → worst 67 → 26)
 Extended desktop soak:               PASS at 5.03 min (301,955 ms, 385 iters,
                                        9283 frames; leak-free; FPS 25.7–33.1
                                        avg 31.3; CPU 4.8→5.3 ms flat; 0 errors)
-60-minute desktop soak:              NOT YET RUN (only 5.03 min completed)
+60-minute desktop soak:              NOT YET RUN (only 5.03 min completed) — accepted beta risk
 Physical iPhone:                     NOT YET RUN (checklist: docs/rc-iphone-checklist.md)
-Physical MIDI:                       NOT YET RUN (simulated harness only)
+Physical MIDI:                       NOT YET RUN (simulated harness only; non-blocking for beta.1)
 ```
+
+**Release-facing performance wording:** dual Milkdrop is *supported on qualified
+desktop hardware*; the heavy RC workload averaged ~31 FPS on the tested discrete
+NVIDIA env, so we do **not** promise 60 FPS — performance varies with GPU
+capability, resolution, preset complexity, and simultaneous preset transitions.
+Mobile dual-Milkdrop is capability-gated / experimental.
 Desktop env: Windows 11 · Chrome (headed, real GPU) · discrete NVIDIA
 (`max_texture_dimension_2d` 16384, `timestamp-query` available) · 1280×800 · DPR 1.

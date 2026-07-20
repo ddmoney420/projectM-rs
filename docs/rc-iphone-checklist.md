@@ -6,14 +6,14 @@ running each step on the device. Given the project's iPhone-specific history
 (getDisplayMedia crash, audio suspension, orientation freeze), this is a
 recommended release gate.
 
-Test the RC build (release identity `0.10.0-beta.1 · c6ca3cd`). Until it is
+Test the RC build (release identity `0.10.0-beta.1 · 9cbbf91`). Until it is
 deployed to a preview URL, use a preview deployment of the RC commit (do **not**
 touch production beta.4).
 
 ## Startup
 - [ ] App loads; visual renders within a few seconds.
 - [ ] No raw JS/WASM error banner.
-- [ ] About → shows **`0.10.0-beta.1 · c6ca3cd`** (correct version + commit).
+- [ ] About → shows **`0.10.0-beta.1 · 9cbbf91`** (correct version + commit).
 
 ## Library
 - [ ] Open **Library**; search/filter responds.
